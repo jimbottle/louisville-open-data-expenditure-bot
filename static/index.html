@@ -553,7 +553,14 @@ async function streamAnswer(question) {
             interpBlock.className = 'interpretation';
             agentDiv.appendChild(interpBlock);
           }
-          interpBlock.appendChild(document.createTextNode(event.content));
+          // Convert newlines to <br> for readable formatting
+          const parts = event.content.split('\n');
+          parts.forEach((part, i) => {
+            interpBlock.appendChild(document.createTextNode(part));
+            if (i < parts.length - 1) {
+              interpBlock.appendChild(document.createElement('br'));
+            }
+          });
         }
 
         else if (event.type === 'log') {
