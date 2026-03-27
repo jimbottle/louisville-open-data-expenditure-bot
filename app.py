@@ -71,6 +71,48 @@ def check_ip_rate_limit(ip: str) -> bool:
     ip_requests[ip].append(now)
     return True
 
+# ── Error Tracking ───────────────────────────────────────────────────────────
+
+error_stats = {
+    "total_errors": 0,
+    "sql_gen_errors": 0,
+    "sql_exec_errors": 0,
+    "interpretation_errors": 0,
+    "rate_limit_errors": 0,
+    "last_error": None,
+    "last_error_time": None,
+    "errors_last_hour": [],  # timestamps of errors in the last hour
+}
+
+
+def track_error(category: str, detail: str = ""):
+    """Record an error occurrence."""
+    now = time.time()
+    error_stats["total_errors"] += 1
+    error_stats[f"{category}_errors"] = error_stats.get(f"{category}_errors", 0) + 1
+    error_stats["last_error"] = f"{category}: {detail}" if detail else category
+    error_stats["last_error_time"] = datetime.now().isoformat()
+    error_stats["errors_last_hour"].append(now)
+    error_stats["errors_last_hour"] = [t for t in error_stats["errors_last_hour"] if now - t < 3600]
+    log.warning("Error tracked [%s]: %s", category, detail[:200] if detail else "")
+
+
+def get_error_summary() -> dict:
+    """Return error stats for the health endpoint."""
+    now = time.time()
+    recent = [t for t in error_stats["errors_last_hour"] if now - t < 3600]
+    return {
+        "total_errors": error_stats["total_errors"],
+        "errors_last_hour": len(recent),
+        "sql_gen_errors": error_stats["sql_gen_errors"],
+        "sql_exec_errors": error_stats["sql_exec_errors"],
+        "interpretation_errors": error_stats["interpretation_errors"],
+        "rate_limit_errors": error_stats["rate_limit_errors"],
+        "last_error": error_stats["last_error"],
+        "last_error_time": error_stats["last_error_time"],
+    }
+
+
 # ── Usage Tracking ───────────────────────────────────────────────────────────
 # Tracks usage from API response headers (Cerebras provides x-ratelimit-* headers)
 # Falls back to local counting if headers aren't available.
@@ -232,10 +274,14 @@ async def health():
         for (table_name,) in tables:
             count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
             stats[table_name] = count
+    errors = get_error_summary()
+    # Status is "degraded" if >5 errors in the last hour, "ok" otherwise
+    status = "degraded" if errors["errors_last_hour"] > 5 else "ok"
     return {
-        "status": "ok",
+        "status": status,
         "tables": stats,
         "model": MODEL,
+        "errors": errors,
     }
 
 
@@ -297,10 +343,12 @@ async def ask(request: Request):
         except Exception as e:
             log.error("SQL generation failed: %s", e)
             if is_rate_limit_error(e):
+                track_error("rate_limit", "SQL generation")
                 if dev_mode:
                     yield send("log", {"content": "Rate limit hit during SQL generation. Retries exhausted."})
                 yield send("error", {"content": RATE_LIMIT_MSG})
             else:
+                track_error("sql_gen", str(e)[:200])
                 if dev_mode:
                     yield send("log", {"content": f"SQL generation error: {type(e).__name__}"})
                 yield send("error", {"content": f"SQL generation failed: {e}"})
@@ -337,10 +385,12 @@ async def ask(request: Request):
                     result_df, result_str = execute_sql_safe(con, sql)
             except Exception as e2:
                 if is_rate_limit_error(e2):
+                    track_error("rate_limit", "SQL retry")
                     if dev_mode:
                         yield send("log", {"content": "Rate limit hit during SQL retry."})
                     yield send("error", {"content": RATE_LIMIT_MSG})
                 else:
+                    track_error("sql_exec", str(e2)[:200])
                     if dev_mode:
                         yield send("log", {"content": f"Retry also failed: {type(e2).__name__}"})
                     yield send("error", {"content": f"Query failed after retry: {e2}"})
@@ -375,10 +425,12 @@ async def ask(request: Request):
         except Exception as e:
             log.error("Interpretation failed: %s", e)
             if is_rate_limit_error(e):
+                track_error("rate_limit", "Interpretation")
                 if dev_mode:
                     yield send("log", {"content": "Rate limit hit during interpretation. Retries exhausted."})
                 yield send("error", {"content": RATE_LIMIT_MSG})
             else:
+                track_error("interpretation", str(e)[:200])
                 if dev_mode:
                     yield send("log", {"content": f"Interpretation error: {type(e).__name__}"})
                 yield send("interpretation", {"content": f"\n\n(Interpretation error: {e})"})
