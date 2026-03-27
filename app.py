@@ -191,15 +191,15 @@ def track_usage(prompt_tokens: int = 0, completion_tokens: int = 0):
 
 
 def update_limits_from_headers(response):
-    """Extract rate limit info from API response headers if available."""
+    """Extract rate limit info from API response headers. These are the source of truth."""
     headers = getattr(response, "headers", {}) or {}
     mapping = {
         "rpm": "x-ratelimit-limit-requests-minute",
         "rpd": "x-ratelimit-limit-requests-day",
-        "tpm": "x-ratelimit-limit-tokens-minute",
+        "tpd": "x-ratelimit-limit-tokens-day",
         "rpm_remaining": "x-ratelimit-remaining-requests-minute",
         "rpd_remaining": "x-ratelimit-remaining-requests-day",
-        "tpm_remaining": "x-ratelimit-remaining-tokens-minute",
+        "tpd_remaining": "x-ratelimit-remaining-tokens-day",
     }
     with stats_lock:
         for key, header in mapping.items():
@@ -213,26 +213,26 @@ def update_limits_from_headers(response):
 
 
 def get_usage_summary() -> dict:
-    """Return current usage stats and proximity to limits."""
+    """Return current usage stats derived from API headers (source of truth)."""
     limits = persistent_stats["api_limits"]
-    usage = persistent_stats["usage"]
     rpd = limits.get("rpd") or 14400
     rpd_remaining = limits.get("rpd_remaining")
     rpm = limits.get("rpm") or 30
     rpm_remaining = limits.get("rpm_remaining")
+    tpd = limits.get("tpd") or 1000000
+    tpd_remaining = limits.get("tpd_remaining")
 
-    rpd_used = (rpd - rpd_remaining) if rpd_remaining is not None else usage.get("requests_today", 0)
+    rpd_used = (rpd - rpd_remaining) if rpd_remaining is not None else 0
     rpm_used = (rpm - rpm_remaining) if rpm_remaining is not None else 0
+    tpd_used = (tpd - tpd_remaining) if tpd_remaining is not None else 0
     rpd_pct = round(rpd_used / rpd * 100, 1) if rpd else 0
 
     return {
         "requests_today": rpd_used,
         "requests_per_minute": rpm_used,
-        "tokens_today": usage.get("tokens_today", 0),
-        "prompt_tokens_today": usage.get("prompt_tokens_today", 0),
-        "completion_tokens_today": usage.get("completion_tokens_today", 0),
-        "limits": {"rpm": rpm, "rpd": rpd, "tpm": limits.get("tpm") or 0},
-        "rpd_remaining": rpd_remaining if rpd_remaining is not None else max(0, rpd - usage.get("requests_today", 0)),
+        "tokens_today": tpd_used,
+        "limits": {"rpm": rpm, "rpd": rpd, "tpd": tpd},
+        "rpd_remaining": rpd_remaining if rpd_remaining is not None else rpd,
         "rpm_remaining": rpm_remaining if rpm_remaining is not None else rpm,
         "rpd_pct": rpd_pct,
     }
@@ -510,8 +510,6 @@ async def ask(request: Request):
                 "rpm_used": u["requests_per_minute"],
                 "rpm_remaining": u["rpm_remaining"],
                 "tokens_today": u["tokens_today"],
-                "prompt_tokens": u["prompt_tokens_today"],
-                "completion_tokens": u["completion_tokens_today"],
             })
 
         yield send("done", {})
