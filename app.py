@@ -511,6 +511,10 @@ async def ask(request: Request):
             t_interp = time.time() - t_start
             u = get_usage_summary()
             yield send("debug", {"content": f"Interpretation streamed in {t_interp:.1f}s | ~{interp_tokens} chunks"})
+            # Per-request token count (SQL gen tokens + estimated interpretation tokens)
+            request_tokens = sql_usage.get("total_tokens", 0) + interp_tokens
+            tpd = u["limits"]["tpd"] or 1000000
+            tpd_remaining = tpd - u["tokens_today"]
             yield send("usage", {
                 "requests_today": u["requests_today"],
                 "rpd_remaining": u["rpd_remaining"],
@@ -518,8 +522,9 @@ async def ask(request: Request):
                 "rpm_used": u["requests_per_minute"],
                 "rpm_remaining": u["rpm_remaining"],
                 "tokens_today": u["tokens_today"],
-                "local_requests_today": u["local_requests_today"],
-                "local_tokens_today": u["local_tokens_today"],
+                "tokens_remaining": max(0, tpd_remaining),
+                "tokens_limit": tpd,
+                "request_tokens": request_tokens,
                 "local_prompt_tokens_today": u["local_prompt_tokens_today"],
                 "local_completion_tokens_today": u["local_completion_tokens_today"],
             })
