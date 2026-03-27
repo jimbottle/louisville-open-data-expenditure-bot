@@ -266,6 +266,7 @@ async def index():
         return f.read()
 
 
+@app.head("/api/health")
 @app.get("/api/health")
 async def health():
     with db_lock:
