@@ -71,58 +71,30 @@ def check_ip_rate_limit(ip: str) -> bool:
     ip_requests[ip].append(now)
     return True
 
-# ── Error Tracking ───────────────────────────────────────────────────────────
+# ── Persistent Stats ─────────────────────────────────────────────────────────
+# Stats persist to a JSON file in the data directory so they survive restarts.
 
-error_stats = {
-    "total_errors": 0,
-    "sql_gen_errors": 0,
-    "sql_exec_errors": 0,
-    "interpretation_errors": 0,
-    "rate_limit_errors": 0,
-    "last_error": None,
-    "last_error_time": None,
-    "errors_last_hour": [],  # timestamps of errors in the last hour
-}
+STATS_DIR = os.environ.get("STATS_DIR", DATA_DIR)
+STATS_FILE = os.path.join(STATS_DIR, ".stats.json")
 
-
-def track_error(category: str, detail: str = ""):
-    """Record an error occurrence."""
-    now = time.time()
-    error_stats["total_errors"] += 1
-    error_stats[f"{category}_errors"] = error_stats.get(f"{category}_errors", 0) + 1
-    error_stats["last_error"] = f"{category}: {detail}" if detail else category
-    error_stats["last_error_time"] = datetime.now().isoformat()
-    error_stats["errors_last_hour"].append(now)
-    error_stats["errors_last_hour"] = [t for t in error_stats["errors_last_hour"] if now - t < 3600]
-    log.warning("Error tracked [%s]: %s", category, detail[:200] if detail else "")
-
-
-def get_error_summary() -> dict:
-    """Return error stats for the health endpoint."""
-    now = time.time()
-    recent = [t for t in error_stats["errors_last_hour"] if now - t < 3600]
-    return {
-        "total_errors": error_stats["total_errors"],
-        "errors_last_hour": len(recent),
-        "sql_gen_errors": error_stats["sql_gen_errors"],
-        "sql_exec_errors": error_stats["sql_exec_errors"],
-        "interpretation_errors": error_stats["interpretation_errors"],
-        "rate_limit_errors": error_stats["rate_limit_errors"],
-        "last_error": error_stats["last_error"],
-        "last_error_time": error_stats["last_error_time"],
-    }
-
-
-# ── Usage Tracking ───────────────────────────────────────────────────────────
-# Tracks usage from API response headers (Cerebras provides x-ratelimit-* headers)
-# Falls back to local counting if headers aren't available.
-
-usage_stats = {
-    "requests_today": 0,
-    "tokens_today": 0,
-    "prompt_tokens_today": 0,
-    "completion_tokens_today": 0,
-    # Real limits from API headers (updated on each response)
+_default_stats = {
+    "errors": {
+        "total_errors": 0,
+        "sql_gen_errors": 0,
+        "sql_exec_errors": 0,
+        "interpretation_errors": 0,
+        "rate_limit_errors": 0,
+        "last_error": None,
+        "last_error_time": None,
+        "errors_last_hour": [],
+    },
+    "usage": {
+        "requests_today": 0,
+        "tokens_today": 0,
+        "prompt_tokens_today": 0,
+        "completion_tokens_today": 0,
+        "date": date.today().isoformat(),
+    },
     "api_limits": {
         "rpm": None,
         "rpd": None,
@@ -133,13 +105,89 @@ usage_stats = {
     },
 }
 
+stats_lock = threading.Lock()
+
+
+def _load_stats() -> dict:
+    """Load stats from disk, or return defaults."""
+    try:
+        with open(STATS_FILE) as f:
+            saved = json.load(f)
+        # Reset daily counters if date changed
+        if saved.get("usage", {}).get("date") != date.today().isoformat():
+            saved["usage"] = dict(_default_stats["usage"])
+            saved["errors"]["errors_last_hour"] = []
+        return saved
+    except (FileNotFoundError, json.JSONDecodeError):
+        return json.loads(json.dumps(_default_stats))
+
+
+def _save_stats():
+    """Persist stats to disk. Call after any mutation."""
+    try:
+        with open(STATS_FILE, "w") as f:
+            json.dump(persistent_stats, f)
+    except Exception as e:
+        log.warning("Failed to save stats: %s", e)
+
+
+persistent_stats = _load_stats()
+
+
+# ── Error Tracking ───────────────────────────────────────────────────────────
+
+def track_error(category: str, detail: str = ""):
+    """Record an error occurrence."""
+    now = time.time()
+    with stats_lock:
+        errs = persistent_stats["errors"]
+        errs["total_errors"] += 1
+        errs[f"{category}_errors"] = errs.get(f"{category}_errors", 0) + 1
+        errs["last_error"] = f"{category}: {detail}" if detail else category
+        errs["last_error_time"] = datetime.now().isoformat()
+        errs["errors_last_hour"].append(now)
+        errs["errors_last_hour"] = [t for t in errs["errors_last_hour"] if now - t < 3600]
+        _save_stats()
+    log.warning("Error tracked [%s]: %s", category, detail[:200] if detail else "")
+
+
+def get_error_summary() -> dict:
+    """Return error stats for the health endpoint."""
+    now = time.time()
+    errs = persistent_stats["errors"]
+    recent = [t for t in errs.get("errors_last_hour", []) if now - t < 3600]
+    return {
+        "total_errors": errs["total_errors"],
+        "errors_last_hour": len(recent),
+        "sql_gen_errors": errs.get("sql_gen_errors", 0),
+        "sql_exec_errors": errs.get("sql_exec_errors", 0),
+        "interpretation_errors": errs.get("interpretation_errors", 0),
+        "rate_limit_errors": errs.get("rate_limit_errors", 0),
+        "last_error": errs.get("last_error"),
+        "last_error_time": errs.get("last_error_time"),
+    }
+
+
+# ── Usage Tracking ───────────────────────────────────────────────────────────
+# Tracks usage from API response headers (Cerebras provides x-ratelimit-* headers)
+# Falls back to local counting if headers aren't available.
 
 def track_usage(prompt_tokens: int = 0, completion_tokens: int = 0):
     """Record an LLM call's token usage."""
-    usage_stats["requests_today"] += 1
-    usage_stats["prompt_tokens_today"] += prompt_tokens
-    usage_stats["completion_tokens_today"] += completion_tokens
-    usage_stats["tokens_today"] += prompt_tokens + completion_tokens
+    with stats_lock:
+        usage = persistent_stats["usage"]
+        # Reset if new day
+        if usage.get("date") != date.today().isoformat():
+            usage["requests_today"] = 0
+            usage["tokens_today"] = 0
+            usage["prompt_tokens_today"] = 0
+            usage["completion_tokens_today"] = 0
+            usage["date"] = date.today().isoformat()
+        usage["requests_today"] += 1
+        usage["prompt_tokens_today"] += prompt_tokens
+        usage["completion_tokens_today"] += completion_tokens
+        usage["tokens_today"] += prompt_tokens + completion_tokens
+        _save_stats()
 
 
 def update_limits_from_headers(response):
@@ -153,36 +201,38 @@ def update_limits_from_headers(response):
         "rpd_remaining": "x-ratelimit-remaining-requests-day",
         "tpm_remaining": "x-ratelimit-remaining-tokens-minute",
     }
-    for key, header in mapping.items():
-        val = headers.get(header)
-        if val is not None:
-            try:
-                usage_stats["api_limits"][key] = int(val)
-            except ValueError:
-                pass
+    with stats_lock:
+        for key, header in mapping.items():
+            val = headers.get(header)
+            if val is not None:
+                try:
+                    persistent_stats["api_limits"][key] = int(val)
+                except ValueError:
+                    pass
+        _save_stats()
 
 
 def get_usage_summary() -> dict:
     """Return current usage stats and proximity to limits."""
-    limits = usage_stats["api_limits"]
+    limits = persistent_stats["api_limits"]
+    usage = persistent_stats["usage"]
     rpd = limits.get("rpd") or 14400
     rpd_remaining = limits.get("rpd_remaining")
     rpm = limits.get("rpm") or 30
     rpm_remaining = limits.get("rpm_remaining")
 
-    # Calculate used from remaining if available, otherwise from local count
-    rpd_used = (rpd - rpd_remaining) if rpd_remaining is not None else usage_stats["requests_today"]
+    rpd_used = (rpd - rpd_remaining) if rpd_remaining is not None else usage.get("requests_today", 0)
     rpm_used = (rpm - rpm_remaining) if rpm_remaining is not None else 0
     rpd_pct = round(rpd_used / rpd * 100, 1) if rpd else 0
 
     return {
         "requests_today": rpd_used,
         "requests_per_minute": rpm_used,
-        "tokens_today": usage_stats["tokens_today"],
-        "prompt_tokens_today": usage_stats["prompt_tokens_today"],
-        "completion_tokens_today": usage_stats["completion_tokens_today"],
+        "tokens_today": usage.get("tokens_today", 0),
+        "prompt_tokens_today": usage.get("prompt_tokens_today", 0),
+        "completion_tokens_today": usage.get("completion_tokens_today", 0),
         "limits": {"rpm": rpm, "rpd": rpd, "tpm": limits.get("tpm") or 0},
-        "rpd_remaining": rpd_remaining if rpd_remaining is not None else max(0, rpd - usage_stats["requests_today"]),
+        "rpd_remaining": rpd_remaining if rpd_remaining is not None else max(0, rpd - usage.get("requests_today", 0)),
         "rpm_remaining": rpm_remaining if rpm_remaining is not None else rpm,
         "rpd_pct": rpd_pct,
     }
