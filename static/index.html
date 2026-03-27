@@ -587,7 +587,7 @@ async function streamAnswer(question) {
           const rpm = event.rpm_used + event.rpm_remaining;
           const filled = Math.min(20, Math.round(event.rpd_pct / 5));
           const bar = `[${'█'.repeat(filled)}${'░'.repeat(20 - filled)}]`;
-          u.textContent = `Daily: ${event.requests_today}/${rpd} requests (${event.rpd_pct}%) ${bar} | RPM: ${event.rpm_used}/${rpm} | Tokens today: ${event.tokens_today.toLocaleString()}`;
+          u.textContent = `Daily: ${event.requests_today}/${rpd} requests (${event.rpd_pct}%) ${bar} | RPM: ${event.rpm_used}/${rpm} | Tokens: ${event.tokens_today.toLocaleString()} used (${event.local_prompt_tokens_today.toLocaleString()} prompt + ${event.local_completion_tokens_today.toLocaleString()} completion)`;
           agentDiv.appendChild(u);
         }
 

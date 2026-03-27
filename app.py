@@ -213,8 +213,9 @@ def update_limits_from_headers(response):
 
 
 def get_usage_summary() -> dict:
-    """Return current usage stats derived from API headers (source of truth)."""
+    """Return usage stats. API headers for remaining quota, local counters for cumulative tracking."""
     limits = persistent_stats["api_limits"]
+    usage = persistent_stats["usage"]
     rpd = limits.get("rpd") or 14400
     rpd_remaining = limits.get("rpd_remaining")
     rpm = limits.get("rpm") or 30
@@ -222,19 +223,26 @@ def get_usage_summary() -> dict:
     tpd = limits.get("tpd") or 1000000
     tpd_remaining = limits.get("tpd_remaining")
 
-    rpd_used = (rpd - rpd_remaining) if rpd_remaining is not None else 0
+    # API headers are source of truth for remaining quota
+    rpd_used = (rpd - rpd_remaining) if rpd_remaining is not None else usage.get("requests_today", 0)
     rpm_used = (rpm - rpm_remaining) if rpm_remaining is not None else 0
-    tpd_used = (tpd - tpd_remaining) if tpd_remaining is not None else 0
+    tpd_used = (tpd - tpd_remaining) if tpd_remaining is not None else usage.get("tokens_today", 0)
     rpd_pct = round(rpd_used / rpd * 100, 1) if rpd else 0
 
     return {
+        # From API headers (accurate remaining quota)
         "requests_today": rpd_used,
         "requests_per_minute": rpm_used,
         "tokens_today": tpd_used,
         "limits": {"rpm": rpm, "rpd": rpd, "tpd": tpd},
-        "rpd_remaining": rpd_remaining if rpd_remaining is not None else rpd,
+        "rpd_remaining": rpd_remaining if rpd_remaining is not None else max(0, rpd - usage.get("requests_today", 0)),
         "rpm_remaining": rpm_remaining if rpm_remaining is not None else rpm,
         "rpd_pct": rpd_pct,
+        # From persistent local counters (our audit trail)
+        "local_requests_today": usage.get("requests_today", 0),
+        "local_tokens_today": usage.get("tokens_today", 0),
+        "local_prompt_tokens_today": usage.get("prompt_tokens_today", 0),
+        "local_completion_tokens_today": usage.get("completion_tokens_today", 0),
     }
 
 
@@ -510,6 +518,10 @@ async def ask(request: Request):
                 "rpm_used": u["requests_per_minute"],
                 "rpm_remaining": u["rpm_remaining"],
                 "tokens_today": u["tokens_today"],
+                "local_requests_today": u["local_requests_today"],
+                "local_tokens_today": u["local_tokens_today"],
+                "local_prompt_tokens_today": u["local_prompt_tokens_today"],
+                "local_completion_tokens_today": u["local_completion_tokens_today"],
             })
 
         yield send("done", {})
