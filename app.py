@@ -173,6 +173,14 @@ and interpret results. You work with Louisville Metro government open data.
 - Date columns may be strings in YYYY-MM-DD format. Use string comparisons or CAST to DATE.
 - NULL values are common — use COALESCE or IS NOT NULL where appropriate.
 - When joining tables, be aware that agency/department names may differ slightly between tables. Use LIKE or fuzzy matching when needed.
+
+## CRITICAL: Data Quality Awareness
+- The extended_amount column contains offsetting entries (positive and negative values that cancel out). This is common in government accounting for corrections, reversals, and adjustments.
+- When reporting aggregates (totals, rankings, "largest"), always use SUM(extended_amount) which naturally nets out offsetting entries, NOT individual row values.
+- When asked about "largest single payments", use invoice_amount (the actual invoice value) rather than extended_amount, and filter for invoice_amount > 0.
+- When ranking payees or agencies by total spend, use SUM(extended_amount) grouped by the entity. Do NOT use MAX() or pick individual rows, as single rows may contain erroneous outlier values that are offset by other rows.
+- If a query asks for individual transactions (not aggregates), add a WHERE clause excluding rows where extended_amount has an equal and opposite counterpart for the same invoice.
+
 - The `expenditures` table spans FY2008-FY2026. Columns available vary by era:
   - 2008-2017: has sub_agency, department, sub_department, stimulus_type, payment_amount, payment_void_date
   - 2018+: has cost_center, project, program, grant_, financing_source, region
