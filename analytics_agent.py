@@ -259,10 +259,12 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
 
 def make_client(base_url: str = None, api_key: str = None) -> openai.OpenAI:
     """Create an OpenAI-compatible client. Disables built-in retries — we handle them in _call_with_retry."""
+    import httpx
     return openai.OpenAI(
         api_key=api_key or os.environ.get("CEREBRAS_API_KEY") or os.environ.get("GEMINI_API_KEY", ""),
         base_url=base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL),
         max_retries=0,
+        timeout=httpx.Timeout(60.0, connect=10.0),
     )
 
 

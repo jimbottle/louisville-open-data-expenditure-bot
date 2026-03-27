@@ -417,12 +417,21 @@ async def ask(request: Request):
             yield send("log", {"content": "Interpreting results..."})
         t_start = time.time()
         interp_tokens = 0
+        stream_timeout = 90  # max seconds for entire interpretation stream
         try:
             for chunk in interpret_results_stream(
                 client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry if dev_mode else None
             ):
                 yield send("interpretation", {"content": chunk})
                 interp_tokens += 1
+                if time.time() - t_start > stream_timeout:
+                    log.warning("Interpretation stream timed out after %ds", stream_timeout)
+                    track_error("interpretation", f"Stream timeout after {stream_timeout}s")
+                    yield send("interpretation", {"content": "\n\n(Response truncated due to timeout)"})
+                    break
+        except GeneratorExit:
+            log.info("Client disconnected during interpretation stream")
+            return
         except Exception as e:
             log.error("Interpretation failed: %s", e)
             if is_rate_limit_error(e):

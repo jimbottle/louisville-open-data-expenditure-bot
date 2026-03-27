@@ -6,4 +6,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY analytics_agent.py app.py data_model.py ./
 COPY static/ static/
 EXPOSE 8000
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "30"]
