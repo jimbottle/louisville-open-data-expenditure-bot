@@ -487,7 +487,7 @@ async def ask(request: Request):
 
         # Interpret results (streaming)
         if len(result_df) == 0:
-            yield send("interpretation", {"content": "No results found for this query."})
+            yield send("interpretation", {"content": "I wasn't able to find any data matching that question. This could mean the specific entity, time period, or category you asked about doesn't appear in the Louisville Metro expenditure records, or the question may need to be rephrased. Try broadening your search — for example, use a partial name instead of a full one, or ask about a wider time range."})
             yield send("done", {})
             return
 
