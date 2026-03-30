@@ -41,6 +41,7 @@ def create_constraints(session):
         "CREATE CONSTRAINT IF NOT EXISTS FOR (y:FiscalYear) REQUIRE y.year IS UNIQUE",
         "CREATE CONSTRAINT IF NOT EXISTS FOR (t:ExpenditureType) REQUIRE t.name IS UNIQUE",
         "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Project) REQUIRE p.name IS UNIQUE",
+        "CREATE CONSTRAINT IF NOT EXISTS FOR (ra:RegisteredAgent) REQUIRE ra.name IS UNIQUE",
     ]
     for c in constraints:
         session.run(c)
@@ -115,6 +116,51 @@ def load_nodes(session, con):
         session.run("MERGE (p:Project {name: $name}) SET p.total_spend = $total",
                      name=name, total=float(total))
     print(f"  Projects: {len(projects)}")
+
+
+def load_contractor_profiles(session, con):
+    """Load contractor profile data including SOS registered agents."""
+    # Check if contractor_profiles table exists
+    tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+    if "contractor_profiles" not in tables:
+        print("  contractor_profiles table not found, skipping")
+        return
+
+    profiles = con.execute("""
+        SELECT payee, total_spend, sos_registered_agent, sos_company_type,
+               sos_employees, sos_principal_office, sos_status, sos_file_date,
+               sos_org_number, sos_county, sos_managed_by
+        FROM contractor_profiles
+        WHERE sos_registered_agent IS NOT NULL AND sos_registered_agent != ''
+    """).fetchall()
+
+    agents_seen = set()
+    for (payee, total_spend, agent, company_type, employees, office,
+         status, file_date, org_num, county, managed_by) in profiles:
+        # Update existing Payee node with SOS data
+        session.run("""
+            MERGE (p:Payee {name: $name})
+            SET p.company_type = $company_type, p.employees = $employees,
+                p.principal_office = $office, p.status = $status,
+                p.file_date = $file_date, p.org_number = $org_num,
+                p.county = $county, p.managed_by = $managed_by
+        """, name=payee, company_type=company_type or "", employees=employees or "",
+             office=office or "", status=status or "", file_date=file_date or "",
+             org_num=org_num or "", county=county or "", managed_by=managed_by or "")
+
+        # Extract just the agent name (before the address)
+        agent_name = agent.split(" ")[0:3]  # rough: first 3 words
+        agent_name = " ".join(agent_name).strip().rstrip(",")
+
+        # Create RegisteredAgent node and relationship
+        session.run("""
+            MERGE (ra:RegisteredAgent {name: $agent_full})
+            MERGE (p:Payee {name: $payee})
+            MERGE (p)-[:HAS_REGISTERED_AGENT]->(ra)
+        """, agent_full=agent, payee=payee)
+        agents_seen.add(agent)
+
+    print(f"  Contractor profiles: {len(profiles)} payees enriched, {len(agents_seen)} unique registered agents")
 
 
 def load_relationships(session, con):
@@ -248,6 +294,9 @@ def main():
 
         print("\nCreating nodes...")
         load_nodes(session, con)
+
+        print("\nLoading contractor profiles...")
+        load_contractor_profiles(session, con)
 
         print("\nCreating relationships...")
         load_relationships(session, con)

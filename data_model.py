@@ -138,6 +138,40 @@ HR_LABELS = {
     "WORK_LOCATION": "Work Location",
 }
 
+# contractor_profiles table
+CONTRACTOR_PROFILE_LABELS = {
+    "payee": "Payee",
+    "total_spend": "Total Spend",
+    "transaction_count": "Transaction Count",
+    "years_active": "Years Active",
+    "first_year": "First Year",
+    "last_year": "Last Year",
+    "agencies_served": "Agencies Served",
+    "agency_list": "Agency List",
+    "funds_used": "Funds Used",
+    "expenditure_types": "Expenditure Types",
+    "CATEGORY": "Contractor Category",
+    "DESCRIPTION": "Contractor Description",
+    "LICENSENO": "License Number",
+    "ADDRESS1": "Address",
+    "CITY": "City",
+    "STATE": "State",
+    "ZIPCODE": "Zip Code",
+    "EMAIL": "Email",
+    "DAYTIMEPHONE": "Phone",
+    "sos_org_number": "SOS Org Number",
+    "sos_status": "Business Status",
+    "sos_standing": "Business Standing",
+    "sos_company_type": "Company Type",
+    "sos_industry": "Industry",
+    "sos_employees": "Employee Size",
+    "sos_county": "County",
+    "sos_file_date": "Date Filed",
+    "sos_principal_office": "Principal Office",
+    "sos_managed_by": "Managed By",
+    "sos_registered_agent": "Registered Agent",
+}
+
 # Master lookup for all tables
 ALL_LABELS = {
     "expenditures": EXPENDITURE_LABELS,
@@ -146,6 +180,7 @@ ALL_LABELS = {
     "active_contractors": CONTRACTOR_LABELS,
     "staff_demographics": DEMOGRAPHICS_LABELS,
     "hr_requisitions": HR_LABELS,
+    "contractor_profiles": CONTRACTOR_PROFILE_LABELS,
 }
 
 
@@ -255,6 +290,35 @@ DATA_DICTIONARY = {
             "HIRE_STATUS": "Current hiring status.",
             "TYPE_OF_HIRE": "Type of hire (new, replacement, etc.).",
             "WORK_LOCATION": "Work location.",
+        },
+    },
+    "contractor_profiles": {
+        "description": "Enriched profiles for top 200 payees by spend. Combines expenditure history, contractor license data, and KY Secretary of State business entity records.",
+        "record_scope": "Each row is a payee/contractor with aggregated spend data and business registration details.",
+        "joins": "Join to expenditures on payee <-> payee. This is the primary table for questions about contractors, vendors, company ownership, registered agents, and business details.",
+        "columns": {
+            "payee": "Payee/vendor name as it appears in expenditure records.",
+            "total_spend": "Total expenditure amount received across all years.",
+            "transaction_count": "Number of expenditure transactions.",
+            "years_active": "Number of distinct fiscal years with transactions.",
+            "first_year": "First fiscal year with transactions.",
+            "last_year": "Most recent fiscal year with transactions.",
+            "agencies_served": "Number of distinct agencies this payee received payments from.",
+            "agency_list": "Semicolon-separated list of agencies.",
+            "CATEGORY": "Contractor license category (from Louisville Metro).",
+            "DESCRIPTION": "Contractor license description.",
+            "LICENSENO": "Louisville Metro contractor license number.",
+            "sos_org_number": "Kentucky Secretary of State organization number.",
+            "sos_status": "Business entity status (e.g., A - Active).",
+            "sos_standing": "Business standing (e.g., G - Good).",
+            "sos_company_type": "Company type (e.g., Kentucky LLC, Kentucky Corporation).",
+            "sos_industry": "Industry classification from KY SOS.",
+            "sos_employees": "Employee size category (Small, Medium, Large 100+).",
+            "sos_county": "Primary county of the business.",
+            "sos_file_date": "Date the business was filed/incorporated.",
+            "sos_principal_office": "Principal office address.",
+            "sos_managed_by": "Management structure (Members, Managers, etc.).",
+            "sos_registered_agent": "Name and address of the registered agent — the person legally responsible for receiving official documents on behalf of the company.",
         },
     },
 }
@@ -372,6 +436,7 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
         "active_contractors": "active_contractors.csv",
         "staff_demographics": "staff_demographics.csv",
         "hr_requisitions": "hr_requisitions.csv",
+        "contractor_profiles": "contractor_profiles.csv",
     }
 
     for table_name, filename in enrichment.items():
