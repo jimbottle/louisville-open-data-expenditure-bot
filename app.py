@@ -533,35 +533,47 @@ async def ask(request: Request):
                             chart_type = suggested
                         break
 
-            # Auto-detect if reasoning didn't suggest
-            if chart_type is None and len(result_df.columns) >= 2 and len(result_df) <= 50:
-                cols = result_df.columns.tolist()
-                numeric_cols = [c for c in cols if result_df[c].dtype in ("float64", "int64", "Int64", "float32")]
-                non_numeric_cols = [c for c in cols if c not in numeric_cols]
-                if len(numeric_cols) >= 1 and len(non_numeric_cols) >= 1:
-                    # Check if it looks like a time series
-                    if any(kw in non_numeric_cols[0].lower() for kw in ("year", "month", "date", "fiscal")):
-                        chart_type = "line"
-                    elif len(result_df) <= 6:
-                        chart_type = "pie"
-                    else:
-                        chart_type = "bar"
+            cols = result_df.columns.tolist()
+            numeric_cols = [c for c in cols if result_df[c].dtype in ("float64", "int64", "Int64", "float32")]
+            # Treat year/date/fiscal columns as labels even if numeric
+            label_keywords = ("year", "month", "date", "fiscal", "name", "agency", "payee", "type", "category", "fund")
+            label_col = None
+            value_col = None
+            for c in cols:
+                if any(kw in c.lower() for kw in label_keywords) and label_col is None:
+                    label_col = c
+                elif c in numeric_cols and value_col is None and c != label_col:
+                    value_col = c
 
-            if chart_type and len(result_df) >= 2:
+            # Fall back: first col = labels, second col = values
+            if label_col is None and len(cols) >= 2:
+                label_col = cols[0]
+            if value_col is None:
+                for c in numeric_cols:
+                    if c != label_col:
+                        value_col = c
+                        break
+
+            # Auto-detect chart type if reasoning didn't suggest
+            if chart_type is None and label_col and value_col and len(result_df) <= 50:
+                if any(kw in label_col.lower() for kw in ("year", "month", "date", "fiscal")):
+                    chart_type = "line"
+                elif len(result_df) <= 6:
+                    chart_type = "pie"
+                else:
+                    chart_type = "bar"
+
+            if chart_type and label_col and value_col and len(result_df) >= 2:
                 try:
-                    cols = result_df.columns.tolist()
-                    numeric_cols = [c for c in cols if result_df[c].dtype in ("float64", "int64", "Int64", "float32")]
-                    non_numeric_cols = [c for c in cols if c not in numeric_cols]
-                    if non_numeric_cols and numeric_cols:
-                        labels = result_df[non_numeric_cols[0]].astype(str).tolist()[:30]
-                        values = result_df[numeric_cols[0]].tolist()[:30]
-                        title = humanize_text(numeric_cols[0]) if not dev_mode else numeric_cols[0]
-                        yield send("chart", {
-                            "chart_type": chart_type,
-                            "labels": labels,
-                            "values": [float(v) if v == v else 0 for v in values],  # handle NaN
-                            "title": title,
-                        })
+                    labels = result_df[label_col].astype(str).tolist()[:30]
+                    values = result_df[value_col].tolist()[:30]
+                    title = humanize_text(value_col) if not dev_mode else value_col
+                    yield send("chart", {
+                        "chart_type": chart_type,
+                        "labels": labels,
+                        "values": [float(v) if v == v else 0 for v in values],
+                        "title": title,
+                    })
                 except Exception as e:
                     log.warning("Chart generation failed: %s", e)
 
