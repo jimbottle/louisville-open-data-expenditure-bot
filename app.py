@@ -419,8 +419,9 @@ async def ask(request: Request):
             yield send("log", {"content": "Analyzing question..."})
         t_reason_start = time.time()
         try:
-            reasoning, reason_usage = reason_about_query(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history)
+            reasoning, reason_usage, reason_raw = reason_about_query(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history)
             track_usage(reason_usage.get("prompt_tokens", 0), reason_usage.get("completion_tokens", 0))
+            update_limits_from_headers(reason_raw)
             t_reason = time.time() - t_reason_start
             log.info("Reasoning complete in %.1fs (%d tokens)", t_reason, reason_usage.get("total_tokens", 0))
             if dev_mode:

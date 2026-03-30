@@ -185,20 +185,21 @@ REASONING_PROMPT = """Analyze this user question and plan the SQL query. Conside
 Return a short analysis (3-5 sentences max) of your query plan. Do NOT write SQL."""
 
 
-def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None) -> tuple[str, dict]:
-    """Think about the query before generating SQL. Returns (reasoning, usage_dict)."""
+def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None) -> tuple[str, dict, object]:
+    """Think about the query before generating SQL. Returns (reasoning, usage_dict, raw_response)."""
     def _call():
         messages = [{"role": "system", "content": system_prompt + "\n\n" + REASONING_PROMPT}]
         if history:
             messages.extend(history[-6:])
         messages.append({"role": "user", "content": question})
-        return client.chat.completions.create(
+        return client.with_raw_response.chat.completions.create(
             model=model,
             messages=messages,
             temperature=0.2,
             max_tokens=300,
         )
-    response = _call_with_retry(_call, on_retry=on_retry)
+    raw = _call_with_retry(_call, on_retry=on_retry)
+    response = raw.parse()
     usage = {}
     if hasattr(response, "usage") and response.usage:
         usage = {
@@ -206,7 +207,7 @@ def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, qu
             "completion_tokens": response.usage.completion_tokens or 0,
             "total_tokens": response.usage.total_tokens or 0,
         }
-    return response.choices[0].message.content.strip(), usage
+    return response.choices[0].message.content.strip(), usage, raw
 
 
 def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, reasoning: str = None) -> tuple[str, dict, object]:
