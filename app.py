@@ -431,6 +431,13 @@ async def ask(request: Request):
             if dev_mode:
                 yield send("log", {"content": f"Reasoning skipped: {type(e).__name__}"})
 
+        # Check if reasoning determined the question can't be answered with data
+        if reasoning and not any(kw in reasoning.lower() for kw in ["query", "table", "select", "join", "filter", "column", "group", "aggregate", "expenditure", "salary", "contractor", "fund"]):
+            # Reasoning didn't mention any data concepts — likely an off-topic question
+            yield send("interpretation", {"content": reasoning})
+            yield send("done", {})
+            return
+
         # Generate SQL
         if dev_mode:
             yield send("log", {"content": "Generating SQL query..."})
@@ -440,6 +447,17 @@ async def ask(request: Request):
             track_usage(sql_usage.get("prompt_tokens", 0), sql_usage.get("completion_tokens", 0))
             update_limits_from_headers(raw_resp)
             log.info("SQL generated in %.1fs (%d tokens)", time.time() - t_start, sql_usage.get("total_tokens", 0))
+
+            # Check if SQL is actually a query or just a comment
+            sql_stripped = sql.strip().lstrip("-").strip()
+            if not sql_stripped or sql_stripped.startswith("The question") or not any(kw in sql.upper() for kw in ["SELECT", "WITH", "SHOW", "DESCRIBE"]):
+                log.info("Model returned non-SQL response, using reasoning as answer")
+                if reasoning:
+                    yield send("interpretation", {"content": reasoning})
+                else:
+                    yield send("interpretation", {"content": "This question doesn't appear to be answerable from the Louisville Metro expenditure data. Try asking about government spending, agency budgets, contractor payments, employee salaries, or capital projects."})
+                yield send("done", {})
+                return
         except Exception as e:
             log.error("SQL generation failed: %s", e)
             if is_rate_limit_error(e):
