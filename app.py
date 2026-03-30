@@ -384,6 +384,7 @@ async def ask(request: Request):
     body = await request.json()
     question = body.get("question", "").strip()
     dev_mode = body.get("dev_mode", False)
+    history = body.get("history", [])  # list of {"role": "user"|"assistant", "content": "..."}
     if not question:
         return {"error": "No question provided"}
 
@@ -415,7 +416,7 @@ async def ask(request: Request):
             yield send("log", {"content": "Generating SQL query..."})
         t_start = time.time()
         try:
-            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None)
+            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history)
             track_usage(sql_usage.get("prompt_tokens", 0), sql_usage.get("completion_tokens", 0))
             update_limits_from_headers(raw_resp)
             log.info("SQL generated in %.1fs (%d tokens)", time.time() - t_start, sql_usage.get("total_tokens", 0))
@@ -453,7 +454,7 @@ async def ask(request: Request):
                 yield send("log", {"content": f"Query failed: {type(e).__name__}. Asking model to fix..."})
             try:
                 fix_prompt = f"The following SQL failed with error: {e}\n\nOriginal SQL:\n{sql}\n\nFix the SQL query. Return ONLY the corrected SQL."
-                sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry if dev_mode else None)
+                sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry if dev_mode else None, history=history)
                 track_usage(retry_usage.get("prompt_tokens", 0), retry_usage.get("completion_tokens", 0))
                 update_limits_from_headers(raw_resp)
                 log.info("SQL retry generated")
@@ -498,7 +499,7 @@ async def ask(request: Request):
         stream_timeout = 90  # max seconds for entire interpretation stream
         try:
             for chunk in interpret_results_stream(
-                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry if dev_mode else None
+                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry if dev_mode else None, history=history
             ):
                 yield send("interpretation", {"content": chunk})
                 interp_tokens += 1

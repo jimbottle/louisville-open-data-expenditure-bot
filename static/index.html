@@ -456,6 +456,7 @@ const submitBtn = document.getElementById('submit-btn');
 const devModeEl = document.getElementById('dev-mode');
 
 let isStreaming = false;
+let conversationHistory = [];  // [{role: "user"|"assistant", content: "..."}]
 
 function askQuestion(q) {
   questionEl.value = q;
@@ -504,12 +505,16 @@ async function streamAnswer(question) {
   let sqlBlock = null;
   let resultsBlock = null;
   let interpBlock = null;
+  let interpText = '';  // collect full interpretation for history
+
+  // Add user message to history
+  conversationHistory.push({ role: "user", content: question });
 
   try {
     const resp = await fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, dev_mode: devMode }),
+      body: JSON.stringify({ question, dev_mode: devMode, history: conversationHistory.slice(-6) }),
     });
 
     const reader = resp.body.getReader();
@@ -553,6 +558,7 @@ async function streamAnswer(question) {
             interpBlock.className = 'interpretation';
             agentDiv.appendChild(interpBlock);
           }
+          interpText += event.content;
           // Convert newlines to <br> for readable formatting
           const parts = event.content.split('\n');
           parts.forEach((part, i) => {
@@ -619,6 +625,15 @@ async function streamAnswer(question) {
     errDiv.className = 'error';
     errDiv.textContent = `Connection error: ${err.message}`;
     agentDiv.appendChild(errDiv);
+  }
+
+  // Add assistant response to conversation history
+  if (interpText) {
+    conversationHistory.push({ role: "assistant", content: interpText });
+    // Keep history manageable — last 6 messages (3 exchanges)
+    if (conversationHistory.length > 6) {
+      conversationHistory = conversationHistory.slice(-6);
+    }
   }
 
   isStreaming = false;

@@ -175,15 +175,16 @@ def strip_sql_fences(sql: str) -> str:
     return sql
 
 
-def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None) -> tuple[str, dict, object]:
+def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None) -> tuple[str, dict, object]:
     """Ask the model to generate SQL. Returns (sql, usage_dict, raw_response)."""
     def _call():
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history[-6:])  # last 3 exchanges (6 messages)
+        messages.append({"role": "user", "content": question})
         return client.with_raw_response.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": question},
-            ],
+            messages=messages,
             temperature=0.1,
             max_tokens=512,
         )
@@ -219,17 +220,18 @@ def interpret_results(
 
 
 def interpret_results_stream(
-    client: openai.OpenAI, model: str, system_prompt: str, question: str, sql: str, results: str, on_retry=None
+    client: openai.OpenAI, model: str, system_prompt: str, question: str, sql: str, results: str, on_retry=None, history: list = None
 ):
     """Stream interpretation chunks as a generator."""
     user_msg = f"Question: {question}\n\nSQL executed:\n{sql}\n\nResults:\n{results}"
     def _call():
+        messages = [{"role": "system", "content": system_prompt}]
+        if history:
+            messages.extend(history[-6:])
+        messages.append({"role": "user", "content": user_msg})
         return client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
-            ],
+            messages=messages,
             temperature=0.3,
             max_tokens=1024,
             stream=True,
