@@ -633,7 +633,8 @@ async function streamAnswer(question) {
                 title: { display: !!event.title, text: event.title || '' },
               },
               scales: event.chart_type === 'pie' ? {} : {
-                y: { beginAtZero: true, ticks: { callback: function(v) {
+                x: { title: { display: !!event.label_axis, text: event.label_axis || '' } },
+                y: { title: { display: !!event.title, text: event.title || '' }, beginAtZero: true, ticks: { callback: function(v) {
                   if (Math.abs(v) >= 1e9) return '$' + (v/1e9).toFixed(1) + 'B';
                   if (Math.abs(v) >= 1e6) return '$' + (v/1e6).toFixed(1) + 'M';
                   if (Math.abs(v) >= 1e3) return '$' + (v/1e3).toFixed(0) + 'K';

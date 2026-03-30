@@ -567,12 +567,14 @@ async def ask(request: Request):
                 try:
                     labels = result_df[label_col].astype(str).tolist()[:30]
                     values = result_df[value_col].tolist()[:30]
-                    title = humanize_text(value_col) if not dev_mode else value_col
+                    title = humanize_text(value_col)
+                    label_axis = humanize_text(label_col)
                     yield send("chart", {
                         "chart_type": chart_type,
                         "labels": labels,
                         "values": [float(v) if v == v else 0 for v in values],
                         "title": title,
+                        "label_axis": label_axis,
                     })
                 except Exception as e:
                     log.warning("Chart generation failed: %s", e)
