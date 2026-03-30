@@ -68,6 +68,9 @@ EXPENDITURE_LABELS = {
     "financing_source": "Financing Source",
     "region": "Region",
     "extended_amount": "Extended Amount",
+    "agency_canonical": "Agency (Normalized)",
+    "is_offsetting": "Offsetting Entry",
+    "is_data_artifact": "Data Artifact",
 }
 
 # salary_data table
@@ -178,6 +181,7 @@ DATA_DICTIONARY = {
             "financing_source": "Specific financing source detail (2018+ data only).",
             "region": "Council district or geographic region (2018+ data only).",
             "extended_amount": "Distributed/allocated amount for this line item. Use this for spend analysis.",
+            "agency_canonical": "Normalized agency name. Use this instead of 'agency' for aggregations to avoid duplicate entities from naming variations.",
         },
     },
     "salary_data": {
@@ -322,6 +326,45 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
     total = con.execute("SELECT COUNT(*) FROM expenditures").fetchone()[0]
     print(f"Expenditures: {total:,} rows across {len(loaded_years)} fiscal years ({', '.join(sorted(loaded_years))})")
 
+    # ── Normalize agency names ────────────────────────────────────────────
+    from agency_mapping import AGENCY_MAP
+    # Build a CASE statement for the mapping
+    cases = "\n".join(f"WHEN agency = '{k.replace(chr(39), chr(39)+chr(39))}' THEN '{v.replace(chr(39), chr(39)+chr(39))}'" for k, v in AGENCY_MAP.items())
+    con.execute(f"""
+        ALTER TABLE expenditures ADD COLUMN IF NOT EXISTS agency_canonical VARCHAR;
+        UPDATE expenditures SET agency_canonical = CASE {cases} ELSE agency END;
+    """)
+    canonical_count = con.execute("SELECT COUNT(DISTINCT agency_canonical) FROM expenditures").fetchone()[0]
+    print(f"Agency normalization: 98 variants -> {canonical_count} canonical names")
+
+    # ── Data quality cleaning ────────────────────────────────────────────
+    # Add net_amount: for invoices with offsetting entries, compute net per invoice
+    # Flag rows that are part of zero-sum offsetting pairs
+    con.execute("""
+        ALTER TABLE expenditures ADD COLUMN IF NOT EXISTS is_offsetting BOOLEAN DEFAULT FALSE;
+        UPDATE expenditures SET is_offsetting = TRUE
+        WHERE invoice_number IN (
+            SELECT invoice_number FROM expenditures
+            WHERE extended_amount IS NOT NULL
+            GROUP BY invoice_number
+            HAVING ABS(SUM(extended_amount)) < 0.01 AND COUNT(*) > 1
+        );
+    """)
+    # Flag extreme outliers (|extended_amount| > 100M) that have offsetting counterparts
+    con.execute("""
+        ALTER TABLE expenditures ADD COLUMN IF NOT EXISTS is_data_artifact BOOLEAN DEFAULT FALSE;
+        UPDATE expenditures SET is_data_artifact = TRUE
+        WHERE ABS(extended_amount) > 100000000
+        AND invoice_number IN (
+            SELECT invoice_number FROM expenditures
+            GROUP BY invoice_number
+            HAVING ABS(SUM(extended_amount)) < ABS(MAX(extended_amount))
+        );
+    """)
+    offset_count = con.execute("SELECT COUNT(*) FROM expenditures WHERE is_offsetting").fetchone()[0]
+    artifact_count = con.execute("SELECT COUNT(*) FROM expenditures WHERE is_data_artifact").fetchone()[0]
+    print(f"Data quality: {offset_count} offsetting rows flagged, {artifact_count} data artifacts flagged")
+
     # ── Load enrichment tables ───────────────────────────────────────────
     enrichment = {
         "salary_data": "salary_data.csv",
@@ -339,6 +382,74 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
             print(f"{table_name}: {count:,} rows")
         else:
             print(f"{table_name}: not found ({csv_path})")
+
+    # ── Pre-computed summary tables ──────────────────────────────────────
+    # Materialized aggregations for common starter questions
+
+    # Q: Which agencies have spent the most money across all fiscal years?
+    con.execute("""
+        CREATE TABLE summary_agency_spend AS
+        SELECT agency_canonical AS agency, ROUND(SUM(extended_amount), 2) AS total_spend,
+               COUNT(*) AS transaction_count, MIN(fiscal_year) AS first_year, MAX(fiscal_year) AS last_year
+        FROM expenditures WHERE is_data_artifact = FALSE
+        GROUP BY agency_canonical ORDER BY total_spend DESC
+    """)
+
+    # Q: How has total annual spending changed from 2008 to 2026?
+    con.execute("""
+        CREATE TABLE summary_annual_spend AS
+        SELECT fiscal_year, ROUND(SUM(extended_amount), 2) AS total_spend,
+               COUNT(*) AS transaction_count
+        FROM expenditures WHERE is_data_artifact = FALSE AND fiscal_year IS NOT NULL
+        GROUP BY fiscal_year ORDER BY fiscal_year
+    """)
+
+    # Q: What are the largest single payments ever made?
+    con.execute("""
+        CREATE TABLE summary_largest_payments AS
+        SELECT payee, agency_canonical AS agency, invoice_amount, invoice_number,
+               invoice_date, fiscal_year, expenditure_type, fund
+        FROM expenditures
+        WHERE invoice_amount IS NOT NULL AND invoice_amount > 0 AND is_data_artifact = FALSE
+        ORDER BY invoice_amount DESC LIMIT 50
+    """)
+
+    # Q: What are the highest-paid job titles?
+    con.execute("""
+        CREATE TABLE summary_top_salaries AS
+        SELECT jobTitle AS job_title, Department AS department,
+               ROUND(AVG(YTD_Total), 2) AS avg_total_comp,
+               ROUND(MAX(YTD_Total), 2) AS max_total_comp,
+               COUNT(*) AS employee_count
+        FROM salary_data
+        GROUP BY jobTitle, Department
+        ORDER BY avg_total_comp DESC LIMIT 50
+    """)
+
+    # Q: How does spending break down between operating and capital?
+    con.execute("""
+        CREATE TABLE summary_expenditure_type AS
+        SELECT expenditure_type, fiscal_year,
+               ROUND(SUM(extended_amount), 2) AS total_spend,
+               COUNT(*) AS transaction_count
+        FROM expenditures WHERE is_data_artifact = FALSE AND expenditure_type IS NOT NULL
+        GROUP BY expenditure_type, fiscal_year
+        ORDER BY fiscal_year, total_spend DESC
+    """)
+
+    # Q: Which agencies use the most licensed contractors?
+    con.execute("""
+        CREATE TABLE summary_agency_contractors AS
+        SELECT e.agency_canonical AS agency, COUNT(DISTINCT ac.FULLNAME) AS contractor_count,
+               ROUND(SUM(e.extended_amount), 2) AS total_contractor_spend
+        FROM active_contractors ac
+        JOIN expenditures e ON LOWER(e.payee) = LOWER(ac.FULLNAME)
+        WHERE e.is_data_artifact = FALSE
+        GROUP BY e.agency_canonical
+        ORDER BY contractor_count DESC
+    """)
+
+    print("Summary tables created: agency_spend, annual_spend, largest_payments, top_salaries, expenditure_type, agency_contractors")
 
     # Lock down DuckDB — disable external file access and make read-only safe
     con.execute("SET enable_external_access = false")
