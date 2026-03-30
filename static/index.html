@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Louisville Metro Expenditure Bot</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <style>
   :root {
     --bg: #f5f5f5;
@@ -195,6 +196,15 @@
     padding: 10px 14px;
     color: #991b1b;
     font-size: 13px;
+  }
+
+  .agent .chart-block {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    max-width: 600px;
+    max-height: 400px;
   }
 
   .agent .reasoning-block {
@@ -584,6 +594,54 @@ async function streamAnswer(question) {
           resultsBlock.innerHTML = `<span class="label">Results (${event.row_count} rows)</span>`;
           resultsBlock.appendChild(document.createTextNode(event.content));
           agentDiv.appendChild(resultsBlock);
+        }
+
+        else if (event.type === 'chart') {
+          const chartDiv = document.createElement('div');
+          chartDiv.className = 'chart-block';
+          const canvas = document.createElement('canvas');
+          chartDiv.appendChild(canvas);
+          agentDiv.appendChild(chartDiv);
+          const colors = [
+            '#1a56db', '#7c3aed', '#059669', '#d97706', '#dc2626',
+            '#2563eb', '#9333ea', '#10b981', '#f59e0b', '#ef4444',
+            '#3b82f6', '#a855f7', '#34d399', '#fbbf24', '#f87171'
+          ];
+          const bgColors = event.chart_type === 'pie'
+            ? colors.slice(0, event.labels.length)
+            : 'rgba(26, 86, 219, 0.7)';
+          const borderColors = event.chart_type === 'pie'
+            ? colors.slice(0, event.labels.length)
+            : '#1a56db';
+          new Chart(canvas, {
+            type: event.chart_type,
+            data: {
+              labels: event.labels,
+              datasets: [{
+                label: event.title || 'Value',
+                data: event.values,
+                backgroundColor: bgColors,
+                borderColor: borderColors,
+                borderWidth: 1,
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: true,
+              plugins: {
+                legend: { display: event.chart_type === 'pie' },
+                title: { display: !!event.title, text: event.title || '' },
+              },
+              scales: event.chart_type === 'pie' ? {} : {
+                y: { beginAtZero: true, ticks: { callback: function(v) {
+                  if (Math.abs(v) >= 1e9) return '$' + (v/1e9).toFixed(1) + 'B';
+                  if (Math.abs(v) >= 1e6) return '$' + (v/1e6).toFixed(1) + 'M';
+                  if (Math.abs(v) >= 1e3) return '$' + (v/1e3).toFixed(0) + 'K';
+                  return v.toLocaleString();
+                }}},
+              },
+            }
+          });
         }
 
         else if (event.type === 'interpretation') {

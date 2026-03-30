@@ -521,7 +521,51 @@ async def ask(request: Request):
         if dev_mode:
             yield send("debug", {"content": f"Query executed in {t_exec:.2f}s | {len(result_df)} rows returned"})
 
-        # Brief pause to avoid back-to-back RPM hits on Gemini free tier
+        # Chart visualization
+        if len(result_df) >= 2:
+            # Parse chart suggestion from reasoning
+            chart_type = None
+            if reasoning:
+                for line in reasoning.split("\n"):
+                    if line.strip().upper().startswith("CHART:"):
+                        suggested = line.split(":", 1)[1].strip().lower()
+                        if suggested in ("bar", "line", "pie"):
+                            chart_type = suggested
+                        break
+
+            # Auto-detect if reasoning didn't suggest
+            if chart_type is None and len(result_df.columns) >= 2 and len(result_df) <= 50:
+                cols = result_df.columns.tolist()
+                numeric_cols = [c for c in cols if result_df[c].dtype in ("float64", "int64", "Int64", "float32")]
+                non_numeric_cols = [c for c in cols if c not in numeric_cols]
+                if len(numeric_cols) >= 1 and len(non_numeric_cols) >= 1:
+                    # Check if it looks like a time series
+                    if any(kw in non_numeric_cols[0].lower() for kw in ("year", "month", "date", "fiscal")):
+                        chart_type = "line"
+                    elif len(result_df) <= 6:
+                        chart_type = "pie"
+                    else:
+                        chart_type = "bar"
+
+            if chart_type and len(result_df) >= 2:
+                try:
+                    cols = result_df.columns.tolist()
+                    numeric_cols = [c for c in cols if result_df[c].dtype in ("float64", "int64", "Int64", "float32")]
+                    non_numeric_cols = [c for c in cols if c not in numeric_cols]
+                    if non_numeric_cols and numeric_cols:
+                        labels = result_df[non_numeric_cols[0]].astype(str).tolist()[:30]
+                        values = result_df[numeric_cols[0]].tolist()[:30]
+                        title = humanize_text(numeric_cols[0]) if not dev_mode else numeric_cols[0]
+                        yield send("chart", {
+                            "chart_type": chart_type,
+                            "labels": labels,
+                            "values": [float(v) if v == v else 0 for v in values],  # handle NaN
+                            "title": title,
+                        })
+                except Exception as e:
+                    log.warning("Chart generation failed: %s", e)
+
+        # Brief pause to avoid back-to-back RPM hits
         time.sleep(3)
 
         # Interpret results (streaming)

@@ -181,8 +181,9 @@ REASONING_PROMPT = """Analyze this user question and plan the SQL query. Conside
 3. Whether to use agency_canonical or agency, and whether to filter by fiscal year
 4. Any data quality concerns (offsetting entries, artifacts)
 5. What columns and aggregations are needed
+6. Whether the results would benefit from a chart visualization. If yes, on the LAST line write exactly: CHART: type (where type is bar, line, or pie). Use line for time series, bar for comparisons/rankings, pie for proportional breakdowns. If no chart is appropriate (single values, text-heavy, individual records), write: CHART: none
 
-Return a short analysis (3-5 sentences max) of your query plan. Do NOT write SQL."""
+Return a short analysis (3-5 sentences max) of your query plan, ending with the CHART line. Do NOT write SQL."""
 
 
 def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None) -> tuple[str, dict, object]:
