@@ -476,7 +476,7 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
                invoice_date, fiscal_year, expenditure_type, fund
         FROM expenditures
         WHERE invoice_amount IS NOT NULL AND invoice_amount > 0 AND is_data_artifact = FALSE
-        ORDER BY invoice_amount DESC LIMIT 50
+        ORDER BY invoice_amount DESC
     """)
 
     # Q: What are the highest-paid job titles?
@@ -488,7 +488,7 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
                COUNT(*) AS employee_count
         FROM salary_data
         GROUP BY jobTitle, Department
-        ORDER BY avg_total_comp DESC LIMIT 50
+        ORDER BY avg_total_comp DESC
     """)
 
     # Q: How does spending break down between operating and capital?
