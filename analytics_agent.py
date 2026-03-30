@@ -175,13 +175,50 @@ def strip_sql_fences(sql: str) -> str:
     return sql
 
 
-def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None) -> tuple[str, dict, object]:
+REASONING_PROMPT = """Analyze this user question and plan the SQL query. Consider:
+1. Which table(s) to query (expenditures, summary tables, contractor_profiles, salary_data, etc.)
+2. Whether this is a follow-up that references prior context
+3. Whether to use agency_canonical or agency, and whether to filter by fiscal year
+4. Any data quality concerns (offsetting entries, artifacts)
+5. What columns and aggregations are needed
+
+Return a short analysis (3-5 sentences max) of your query plan. Do NOT write SQL."""
+
+
+def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None) -> tuple[str, dict]:
+    """Think about the query before generating SQL. Returns (reasoning, usage_dict)."""
+    def _call():
+        messages = [{"role": "system", "content": system_prompt + "\n\n" + REASONING_PROMPT}]
+        if history:
+            messages.extend(history[-6:])
+        messages.append({"role": "user", "content": question})
+        return client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=300,
+        )
+    response = _call_with_retry(_call, on_retry=on_retry)
+    usage = {}
+    if hasattr(response, "usage") and response.usage:
+        usage = {
+            "prompt_tokens": response.usage.prompt_tokens or 0,
+            "completion_tokens": response.usage.completion_tokens or 0,
+            "total_tokens": response.usage.total_tokens or 0,
+        }
+    return response.choices[0].message.content.strip(), usage
+
+
+def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, reasoning: str = None) -> tuple[str, dict, object]:
     """Ask the model to generate SQL. Returns (sql, usage_dict, raw_response)."""
     def _call():
         messages = [{"role": "system", "content": system_prompt}]
         if history:
-            messages.extend(history[-6:])  # last 3 exchanges (6 messages)
-        messages.append({"role": "user", "content": question})
+            messages.extend(history[-6:])
+        user_content = question
+        if reasoning:
+            user_content = f"Question: {question}\n\nQuery plan:\n{reasoning}\n\nNow write ONLY the SQL query based on this plan."
+        messages.append({"role": "user", "content": user_content})
         return client.with_raw_response.chat.completions.create(
             model=model,
             messages=messages,

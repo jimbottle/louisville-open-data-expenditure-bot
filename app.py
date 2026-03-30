@@ -31,6 +31,7 @@ from analytics_agent import (
     generate_sql,
     interpret_results_stream,
     make_client,
+    reason_about_query,
 )
 from data_model import (
     DATA_DICTIONARY,
@@ -410,13 +411,31 @@ async def ask(request: Request):
                 events.append(send("log", {"content": retry_logs.pop(0)}))
             return events
 
-        # Generate SQL
+        # Reasoning step
         log.info("Question: %s", question)
+        reasoning = None
+        if dev_mode:
+            yield send("log", {"content": "Analyzing question..."})
+        t_reason_start = time.time()
+        try:
+            reasoning, reason_usage = reason_about_query(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history)
+            track_usage(reason_usage.get("prompt_tokens", 0), reason_usage.get("completion_tokens", 0))
+            t_reason = time.time() - t_reason_start
+            log.info("Reasoning complete in %.1fs (%d tokens)", t_reason, reason_usage.get("total_tokens", 0))
+            if dev_mode:
+                yield send("reasoning", {"content": reasoning})
+                yield send("debug", {"content": f"Reasoning in {t_reason:.1f}s | {reason_usage.get('total_tokens', 0)} tokens"})
+        except Exception as e:
+            log.warning("Reasoning failed: %s — proceeding without", e)
+            if dev_mode:
+                yield send("log", {"content": f"Reasoning skipped: {type(e).__name__}"})
+
+        # Generate SQL
         if dev_mode:
             yield send("log", {"content": "Generating SQL query..."})
         t_start = time.time()
         try:
-            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history)
+            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history, reasoning=reasoning)
             track_usage(sql_usage.get("prompt_tokens", 0), sql_usage.get("completion_tokens", 0))
             update_limits_from_headers(raw_resp)
             log.info("SQL generated in %.1fs (%d tokens)", time.time() - t_start, sql_usage.get("total_tokens", 0))
