@@ -135,6 +135,27 @@ def build_profiles(data_dir, skip_sos=False, top=200):
     return run(cmd, f"Building top {top} contractor profiles" + (" (skip SOS)" if skip_sos else ""))
 
 
+def scrape_officers(data_dir):
+    """Scrape officers for companies using agent services."""
+    print("\n" + "=" * 60)
+    print("  SCRAPING OFFICERS FOR AGENT-SERVICE COMPANIES")
+    print("=" * 60)
+
+    profiles_path = os.path.join(data_dir, "contractor_profiles.csv")
+    if not os.path.exists(profiles_path):
+        print("  contractor_profiles.csv not found, skipping officer scrape")
+        return True
+
+    return run(
+        [
+            sys.executable, os.path.join(SCRIPT_DIR, "graph", "scrape_officers.py"),
+            "--input", profiles_path,
+            "--output", profiles_path,
+        ],
+        "Scraping current officers from KY SOS",
+    )
+
+
 def reload_graph(neo4j_uri, neo4j_password, data_dir):
     """Reload the Neo4j context graph."""
     print("\n" + "=" * 60)
@@ -189,7 +210,11 @@ def main():
         # Step 2: Build contractor profiles
         success = build_profiles(args.data_dir, args.skip_sos, args.profile_top) and success
 
-        # Step 3: Reload graph
+        # Step 3: Scrape officers for agent-service companies
+        if not args.skip_sos:
+            success = scrape_officers(args.data_dir) and success
+
+        # Step 4: Reload graph
         if not args.skip_graph:
             success = reload_graph(args.neo4j_uri, args.neo4j_password, args.data_dir) and success
 
