@@ -170,6 +170,7 @@ CONTRACTOR_PROFILE_LABELS = {
     "sos_principal_office": "Principal Office",
     "sos_managed_by": "Managed By",
     "sos_registered_agent": "Registered Agent",
+    "sos_officers": "Current Officers",
 }
 
 # Master lookup for all tables
@@ -319,6 +320,7 @@ DATA_DICTIONARY = {
             "sos_principal_office": "Principal office address.",
             "sos_managed_by": "Management structure (Members, Managers, etc.).",
             "sos_registered_agent": "Name and address of the registered agent — the person legally responsible for receiving official documents on behalf of the company.",
+            "sos_officers": "Current officers and directors from KY Secretary of State filings. Format: 'Title: Name; Title: Name'. Includes President, VP, Secretary, Treasurer, Directors, Members, Managers. Available for ~31 companies that use corporate agent services (CT Corporation, etc.) as their registered agent.",
         },
     },
 }
