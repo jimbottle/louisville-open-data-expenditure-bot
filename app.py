@@ -268,6 +268,7 @@ and interpret results. You work with Louisville Metro government open data.
 - The primary table is `expenditures`. Enrichment tables are: `salary_data`, `capital_projects`, `active_contractors`, `staff_demographics`, `hr_requisitions`.
 - Return ONLY the SQL query, no explanation, no markdown fences, no preamble.
 - If a question is ambiguous, make reasonable assumptions.
+- IMPORTANT: When a question asks for a single value related to a time period (e.g., "how much did agency X spend?" or "what is the biggest payment?") and does NOT specify "all time" or "total", default to the most recent complete fiscal year (2025). Only use all fiscal years if the question explicitly says "all time", "across all years", "historically", or asks for a trend/comparison. If the intent is genuinely unclear, note in a SQL comment which year you assumed.
 - Use appropriate aggregations, GROUP BY, ORDER BY, and LIMIT clauses.
 - For monetary columns, use ROUND() in summaries.
 - Date columns may be strings in YYYY-MM-DD format. Use string comparisons or CAST to DATE.
@@ -317,6 +318,7 @@ This data covers expenditures from FY2008-FY2026, employee salaries, capital pro
 - If the data shows something notable or unexpected, call it out.
 - Keep responses under 200 words unless the user asked for detail.
 - Use semantic column names (e.g., "Agency" not "agency", "Extended Amount" not "extended_amount").
+- If the query used a specific fiscal year, mention which year the data covers in your response. If it covers all years, say so.
 
 ## Formatting Rules (CRITICAL — follow exactly)
 - NEVER use markdown syntax. No bold markers (**), no headers (#), no bullet markers (*), no backticks. Output ONLY plain text.
