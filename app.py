@@ -293,7 +293,7 @@ and interpret results. You work with Louisville Metro government open data.
 - `summary_expenditure_type` — spending by type (Operating/Capital) per fiscal year. Use for "spending by type".
 - `summary_agency_contractors` — agencies ranked by number of licensed contractors used. Use for "which agencies use the most contractors".
 - The `capital_projects` table already covers "what capital projects exist" directly.
-- `contractor_profiles` — top 200 payees enriched with KY Secretary of State data. Use for questions about vendors, contractors, company ownership, registered agents, business details, who runs a company, or who has financial interest. Join to expenditures on payee. Key columns: sos_registered_agent (the person legally responsible), sos_company_type, sos_employees, sos_principal_office, total_spend, agencies_served.
+- `contractor_profiles` — top 200 payees by total spend, enriched with KY Secretary of State data. IMPORTANT: this table only contains the 200 highest-spending vendors. For questions about small vendors, low-spend contractors, or the full universe of payees, query the `expenditures` table directly (GROUP BY payee). Use contractor_profiles for questions about company ownership, registered agents, business details, who runs a company, or who has financial interest in top vendors.
 - PREFER these summary tables when the question matches. Fall back to the raw `expenditures` table for custom or detailed queries.
 
 ## Data Dictionary: Key Field Definitions
@@ -507,7 +507,20 @@ async def ask(request: Request):
 
         # Interpret results (streaming)
         if len(result_df) == 0:
-            yield send("interpretation", {"content": "I wasn't able to find any data matching that question. This could mean the specific entity, time period, or category you asked about doesn't appear in the Louisville Metro expenditure records, or the question may need to be rephrased. Try broadening your search — for example, use a partial name instead of a full one, or ask about a wider time range."})
+            # Ask the model to explain why and suggest alternatives
+            empty_prompt = f"""The user asked: "{question}"
+
+The SQL query returned 0 rows:
+{sql}
+
+Explain in plain text (no markdown) why this likely returned no results based on what you know about the data structure. Then suggest 1-2 rephrased questions that would likely return results. Keep it under 100 words."""
+            try:
+                for chunk in interpret_results_stream(
+                    client, MODEL, interpret_system, empty_prompt, sql, "No rows returned", history=history
+                ):
+                    yield send("interpretation", {"content": chunk})
+            except Exception:
+                yield send("interpretation", {"content": "I wasn't able to find any data matching that question. Try broadening your search or rephrasing."})
             yield send("done", {})
             return
 
