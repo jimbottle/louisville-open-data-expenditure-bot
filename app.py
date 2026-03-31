@@ -381,6 +381,11 @@ async def get_usage():
     return get_usage_summary()
 
 
+# ── Response Cache ────────────────────────────────────────────────────────────
+# Cache full SSE responses for starter questions (no history, no dev mode)
+response_cache: dict[str, list[str]] = {}
+
+
 @app.post("/api/ask")
 async def ask(request: Request):
     body = await request.json()
@@ -395,9 +400,26 @@ async def ask(request: Request):
         log.warning("IP rate limited: %s", client_ip)
         return {"error": "Too many requests. Please wait a minute."}
 
+    # Serve from cache if: not dev mode, no conversation history, and question is cached
+    cache_key = question.lower().strip()
+    if not dev_mode and not history and cache_key in response_cache:
+        log.info("Cache hit: %s", question[:50])
+        def cached_stream():
+            for event in response_cache[cache_key]:
+                yield event
+        return StreamingResponse(cached_stream(), media_type="text/event-stream")
+
+    # Track whether this response should be cached
+    should_cache = not dev_mode and not history
+
     def event_stream():
+        cache_events = []
+
         def send(event_type: str, data: dict):
-            return f"data: {json.dumps({'type': event_type, **data})}\n\n"
+            event = f"data: {json.dumps({'type': event_type, **data})}\n\n"
+            if should_cache:
+                cache_events.append(event)
+            return event
 
         # Collect retry log events to yield inline during streaming
         retry_logs = []
@@ -661,5 +683,10 @@ Explain in plain text (no markdown) why this likely returned no results based on
             })
 
         yield send("done", {})
+
+        # Cache the response for future identical questions
+        if should_cache and cache_events:
+            response_cache[cache_key] = cache_events
+            log.info("Cached response for: %s", question[:50])
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
