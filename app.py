@@ -577,11 +577,9 @@ async def ask(request: Request):
                         value_col = c
                         break
 
-            # Auto-detect chart type if reasoning didn't suggest
+            # Auto-detect chart type if reasoning didn't suggest — default to bar
             if chart_type is None and label_col and value_col and len(result_df) <= 50:
-                if any(kw in label_col.lower() for kw in ("year", "month", "date", "fiscal")):
-                    chart_type = "line"
-                elif len(result_df) <= 6:
+                if len(result_df) <= 5:
                     chart_type = "pie"
                 else:
                     chart_type = "bar"
