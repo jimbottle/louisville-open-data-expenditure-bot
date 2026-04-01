@@ -30,29 +30,39 @@ RETRY_BASE_DELAY = 16  # seconds, matches Gemini's suggested retry delay
 
 
 def _call_with_retry(fn, on_retry=None, fallback_fn=None):
-    """Retry a function on 429 rate limit errors. Falls back to paid client if available."""
+    """Retry on 429 rate limit errors. Always tries free tier first, falls back to paid only when confirmed limited."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return fn()
         except openai.RateLimitError as e:
-            # If we have a fallback (paid tier), try it immediately
-            if fallback_fn and attempt == 1:
-                log.info("Free tier rate limited, falling back to paid tier")
-                if on_retry:
-                    on_retry(attempt, MAX_RETRIES, 0)
-                try:
-                    return fallback_fn()
-                except Exception as fallback_err:
-                    log.warning("Paid tier fallback failed: %s", fallback_err)
-                    # Continue with normal retry logic
-
-            if attempt == MAX_RETRIES:
-                log.warning("Rate limit: all %d retries exhausted", MAX_RETRIES)
-                raise
             delay = RETRY_BASE_DELAY
             match = re.search(r'retry in ([\d.]+)s', str(e))
             if match:
-                delay = float(match.group(1)) + 1
+                delay = min(float(match.group(1)) + 1, 60)
+
+            # First retry: wait and try free tier again (per-minute limit may have cleared)
+            if attempt == 1:
+                log.info("Rate limited (attempt 1/%d), retrying free tier in %.0fs", MAX_RETRIES, delay)
+                if on_retry:
+                    on_retry(attempt, MAX_RETRIES, delay)
+                time.sleep(delay)
+                try:
+                    return fn()
+                except openai.RateLimitError:
+                    # Free tier still limited — fall back to paid if available
+                    if fallback_fn:
+                        log.info("Free tier confirmed limited, using paid tier")
+                        if on_retry:
+                            on_retry(attempt + 1, MAX_RETRIES, 0)
+                        try:
+                            return fallback_fn()
+                        except Exception as fallback_err:
+                            log.warning("Paid tier fallback failed: %s", fallback_err)
+
+            if attempt == MAX_RETRIES:
+                log.warning("Rate limit: all %d retries exhausted (free and paid)", MAX_RETRIES)
+                raise
+
             log.info("Rate limited (attempt %d/%d), retrying in %.0fs", attempt, MAX_RETRIES, delay)
             if on_retry:
                 on_retry(attempt, MAX_RETRIES, delay)
