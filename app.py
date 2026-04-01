@@ -382,6 +382,34 @@ async def get_usage():
     return get_usage_summary()
 
 
+@app.get("/api/cache")
+async def get_cache_status():
+    """Show cached questions and whether they have valid responses."""
+    status = {}
+    for key, events in response_cache.items():
+        has_interp = any('"type": "interpretation"' in e for e in events)
+        has_error = any('"type": "error"' in e for e in events)
+        status[key] = {"events": len(events), "has_interpretation": has_interp, "has_error": has_error}
+    return {"cached_questions": len(status), "entries": status}
+
+
+@app.delete("/api/cache")
+async def clear_cache(request: Request):
+    """Clear specific or all cached responses. Pass {"question": "..."} to clear one, or no body to clear all."""
+    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
+    question = body.get("question", "").strip().lower()
+    if question:
+        if question in response_cache:
+            del response_cache[question]
+            _save_cache()
+            return {"cleared": question}
+        return {"error": "Not in cache"}
+    else:
+        response_cache.clear()
+        _save_cache()
+        return {"cleared": "all"}
+
+
 # ── Response Cache ────────────────────────────────────────────────────────────
 # Cache full SSE responses. Persisted to disk so it survives restarts.
 
@@ -711,10 +739,15 @@ Explain in plain text (no markdown) why this likely returned no results based on
 
         yield send("done", {})
 
-        # Cache the response for future identical questions
+        # Cache the response only if it has a valid interpretation (not errors/empty)
         if should_cache and cache_events:
-            response_cache[cache_key] = cache_events
-            _save_cache()
-            log.info("Cached response for: %s", question[:50])
+            has_interpretation = any('"type": "interpretation"' in e for e in cache_events)
+            has_error = any('"type": "error"' in e for e in cache_events)
+            if has_interpretation and not has_error:
+                response_cache[cache_key] = cache_events
+                _save_cache()
+                log.info("Cached response for: %s", question[:50])
+            else:
+                log.info("Skipped caching (error or empty): %s", question[:50])
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
