@@ -533,14 +533,36 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
     """)
 
     # Q: Who are the registered agents for the top contractors?
+    # Use payee_canonical totals for consistency with expenditure queries
     if "contractor_profiles" in [t[0] for t in con.execute("SHOW TABLES").fetchall()]:
+        # First build a mapping from raw payee to canonical total
+        con.execute("""
+            CREATE TEMP TABLE _payee_canonical_totals AS
+            SELECT payee_canonical AS payee,
+                   ROUND(SUM(extended_amount), 2) AS canonical_total
+            FROM expenditures
+            WHERE is_data_artifact = FALSE AND payee_canonical IS NOT NULL
+            GROUP BY payee_canonical
+        """)
+        # Also map raw payee names to their canonical name
+        con.execute("""
+            CREATE TEMP TABLE _payee_to_canonical AS
+            SELECT DISTINCT payee AS raw_payee, payee_canonical
+            FROM expenditures WHERE payee IS NOT NULL
+        """)
         con.execute("""
             CREATE TABLE summary_top_contractors AS
-            SELECT payee, total_spend, sos_registered_agent, sos_officers,
-                   sos_company_type, sos_employees, sos_county, sos_file_date,
-                   agencies_served, years_active, transaction_count
-            FROM contractor_profiles
-            WHERE sos_registered_agent IS NOT NULL
+            SELECT
+                cp.payee AS payee_original,
+                COALESCE(pc.payee_canonical, cp.payee) AS payee,
+                COALESCE(ct.canonical_total, cp.total_spend) AS total_spend,
+                cp.sos_registered_agent, cp.sos_officers,
+                cp.sos_company_type, cp.sos_employees, cp.sos_county, cp.sos_file_date,
+                cp.agencies_served, cp.years_active, cp.transaction_count
+            FROM contractor_profiles cp
+            LEFT JOIN _payee_to_canonical pc ON pc.raw_payee = cp.payee
+            LEFT JOIN _payee_canonical_totals ct ON ct.payee = COALESCE(pc.payee_canonical, cp.payee)
+            WHERE cp.sos_registered_agent IS NOT NULL
             ORDER BY total_spend DESC
         """)
 

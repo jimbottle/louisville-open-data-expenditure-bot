@@ -274,6 +274,8 @@ and interpret results. You work with Louisville Metro government open data.
 - CRITICAL: 2026 is a PARTIAL year across ALL tables (expenditures AND salary_data). It has significantly fewer transactions and lower totals because the year is still in progress. When presenting 2026 data in trends or comparisons, always note that it represents partial-year data. When asked about "current" or "latest" spending OR salaries, use 2025 (the most recent COMPLETE year) unless the user specifically asks about 2026. This applies to BOTH fiscal_year in expenditures AND CalYear in salary_data.
 - Use appropriate aggregations, GROUP BY, ORDER BY, and LIMIT clauses.
 - When a question asks about quantitative values (spend, cost, salary, amount), always include the relevant numbers in the SELECT. If ranking entities by a numeric value, include that value in the results. Not every query needs dollar amounts — only include them when relevant to the question.
+- ALWAYS filter out NULL values from display columns. Use WHERE column IS NOT NULL or COALESCE(column, 'N/A'). Never return rows with blank or null values in key fields — they confuse users.
+- CONSISTENCY: When answering follow-up questions, use the same tables and groupings as the original query. If the original used payee_canonical, the follow-up must too. If the original used summary_top_contractors, reference it consistently.
 - For monetary columns, use ROUND() in summaries.
 - Date columns may be strings in YYYY-MM-DD format. Use string comparisons or CAST to DATE.
 - NULL values are common — use COALESCE or IS NOT NULL where appropriate.
