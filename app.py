@@ -383,8 +383,31 @@ async def get_usage():
 
 
 # ── Response Cache ────────────────────────────────────────────────────────────
-# Cache full SSE responses for starter questions (no history, no dev mode)
-response_cache: dict[str, list[str]] = {}
+# Cache full SSE responses. Persisted to disk so it survives restarts.
+
+CACHE_FILE = os.path.join(os.environ.get("STATS_DIR", os.environ.get("DATA_DIR", "data")), ".response_cache.json")
+
+
+def _load_cache() -> dict[str, list[str]]:
+    """Load cache from disk."""
+    try:
+        with open(CACHE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_cache():
+    """Persist cache to disk."""
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(response_cache, f)
+    except Exception as e:
+        log.warning("Failed to save cache: %s", e)
+
+
+response_cache: dict[str, list[str]] = _load_cache()
+log.info("Response cache loaded: %d entries", len(response_cache))
 
 
 @app.post("/api/ask")
@@ -401,9 +424,9 @@ async def ask(request: Request):
         log.warning("IP rate limited: %s", client_ip)
         return {"error": "Too many requests. Please wait a minute."}
 
-    # Serve from cache if: not dev mode, no conversation history, and question is cached
+    # Serve from cache if: not dev mode and question is cached
     cache_key = question.lower().strip()
-    if not dev_mode and not history and cache_key in response_cache:
+    if not dev_mode and cache_key in response_cache:
         log.info("Cache hit: %s", question[:50])
         def cached_stream():
             for event in response_cache[cache_key]:
@@ -691,6 +714,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
         # Cache the response for future identical questions
         if should_cache and cache_events:
             response_cache[cache_key] = cache_events
+            _save_cache()
             log.info("Cached response for: %s", question[:50])
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
