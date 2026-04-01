@@ -29,12 +29,23 @@ MAX_RETRIES = 3
 RETRY_BASE_DELAY = 16  # seconds, matches Gemini's suggested retry delay
 
 
-def _call_with_retry(fn, on_retry=None):
-    """Retry a function on 429 rate limit errors. Optional on_retry callback for status updates."""
+def _call_with_retry(fn, on_retry=None, fallback_fn=None):
+    """Retry a function on 429 rate limit errors. Falls back to paid client if available."""
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             return fn()
         except openai.RateLimitError as e:
+            # If we have a fallback (paid tier), try it immediately
+            if fallback_fn and attempt == 1:
+                log.info("Free tier rate limited, falling back to paid tier")
+                if on_retry:
+                    on_retry(attempt, MAX_RETRIES, 0)
+                try:
+                    return fallback_fn()
+                except Exception as fallback_err:
+                    log.warning("Paid tier fallback failed: %s", fallback_err)
+                    # Continue with normal retry logic
+
             if attempt == MAX_RETRIES:
                 log.warning("Rate limit: all %d retries exhausted", MAX_RETRIES)
                 raise
@@ -186,20 +197,23 @@ REASONING_PROMPT = """Analyze this user question and plan the SQL query. Conside
 Return a short analysis (3-5 sentences max) of your query plan, ending with the CHART line. Do NOT write SQL."""
 
 
-def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None) -> tuple[str, dict, object]:
+def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None) -> tuple[str, dict, object]:
     """Think about the query before generating SQL. Returns (reasoning, usage_dict, raw_response)."""
-    def _call():
-        messages = [{"role": "system", "content": system_prompt + "\n\n" + REASONING_PROMPT}]
-        if history:
-            messages.extend(history[-6:])
-        messages.append({"role": "user", "content": question})
-        return client.with_raw_response.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=300,
-        )
-    raw = _call_with_retry(_call, on_retry=on_retry)
+    def _make_call(c):
+        def _call():
+            messages = [{"role": "system", "content": system_prompt + "\n\n" + REASONING_PROMPT}]
+            if history:
+                messages.extend(history[-6:])
+            messages.append({"role": "user", "content": question})
+            return c.with_raw_response.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=300,
+            )
+        return _call
+    fallback_fn = _make_call(fallback_client) if fallback_client else None
+    raw = _call_with_retry(_make_call(client), on_retry=on_retry, fallback_fn=fallback_fn)
     response = raw.parse()
     usage = {}
     if hasattr(response, "usage") and response.usage:
@@ -211,23 +225,26 @@ def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, qu
     return response.choices[0].message.content.strip(), usage, raw
 
 
-def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, reasoning: str = None) -> tuple[str, dict, object]:
+def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, reasoning: str = None, fallback_client: openai.OpenAI = None) -> tuple[str, dict, object]:
     """Ask the model to generate SQL. Returns (sql, usage_dict, raw_response)."""
-    def _call():
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history[-6:])
-        user_content = question
-        if reasoning:
-            user_content = f"Question: {question}\n\nQuery plan:\n{reasoning}\n\nNow write ONLY the SQL query based on this plan."
-        messages.append({"role": "user", "content": user_content})
-        return client.with_raw_response.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.1,
-            max_tokens=512,
-        )
-    raw = _call_with_retry(_call, on_retry=on_retry)
+    def _make_call(c):
+        def _call():
+            messages = [{"role": "system", "content": system_prompt}]
+            if history:
+                messages.extend(history[-6:])
+            user_content = question
+            if reasoning:
+                user_content = f"Question: {question}\n\nQuery plan:\n{reasoning}\n\nNow write ONLY the SQL query based on this plan."
+            messages.append({"role": "user", "content": user_content})
+            return c.with_raw_response.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=512,
+            )
+        return _call
+    fallback_fn = _make_call(fallback_client) if fallback_client else None
+    raw = _call_with_retry(_make_call(client), on_retry=on_retry, fallback_fn=fallback_fn)
     response = raw.parse()
     usage = {}
     if hasattr(response, "usage") and response.usage:
@@ -259,23 +276,26 @@ def interpret_results(
 
 
 def interpret_results_stream(
-    client: openai.OpenAI, model: str, system_prompt: str, question: str, sql: str, results: str, on_retry=None, history: list = None
+    client: openai.OpenAI, model: str, system_prompt: str, question: str, sql: str, results: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None
 ):
     """Stream interpretation chunks as a generator."""
     user_msg = f"Question: {question}\n\nSQL executed:\n{sql}\n\nResults:\n{results}"
-    def _call():
-        messages = [{"role": "system", "content": system_prompt}]
-        if history:
-            messages.extend(history[-6:])
-        messages.append({"role": "user", "content": user_msg})
-        return client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.3,
-            max_tokens=1024,
-            stream=True,
-        )
-    stream = _call_with_retry(_call, on_retry=on_retry)
+    def _make_call(c):
+        def _call():
+            messages = [{"role": "system", "content": system_prompt}]
+            if history:
+                messages.extend(history[-6:])
+            messages.append({"role": "user", "content": user_msg})
+            return c.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=1024,
+                stream=True,
+            )
+        return _call
+    fallback_fn = _make_call(fallback_client) if fallback_client else None
+    stream = _call_with_retry(_make_call(client), on_retry=on_retry, fallback_fn=fallback_fn)
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
@@ -303,6 +323,20 @@ def make_client(base_url: str = None, api_key: str = None) -> openai.OpenAI:
     import httpx
     return openai.OpenAI(
         api_key=api_key or os.environ.get("CEREBRAS_API_KEY") or os.environ.get("GEMINI_API_KEY", ""),
+        base_url=base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL),
+        max_retries=0,
+        timeout=httpx.Timeout(60.0, connect=10.0),
+    )
+
+
+def make_paid_client(base_url: str = None, api_key: str = None) -> openai.OpenAI:
+    """Create a paid-tier client as fallback. Returns None if no paid key is configured."""
+    import httpx
+    paid_key = api_key or os.environ.get("CEREBRAS_PAID_API_KEY", "")
+    if not paid_key:
+        return None
+    return openai.OpenAI(
+        api_key=paid_key,
         base_url=base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL),
         max_retries=0,
         timeout=httpx.Timeout(60.0, connect=10.0),

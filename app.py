@@ -31,6 +31,7 @@ from analytics_agent import (
     generate_sql,
     interpret_results_stream,
     make_client,
+    make_paid_client,
     reason_about_query,
 )
 from data_model import (
@@ -341,7 +342,11 @@ This data covers expenditures from FY2008-FY2026, employee salaries, capital pro
 """
 
     client = make_client()
-    print(f"Model: {MODEL}")
+    paid_client = make_paid_client()
+    if paid_client:
+        print(f"Model: {MODEL} (paid tier fallback available)")
+    else:
+        print(f"Model: {MODEL} (free tier only)")
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
@@ -498,7 +503,7 @@ async def ask(request: Request):
             yield send("log", {"content": "Analyzing question..."})
         t_reason_start = time.time()
         try:
-            reasoning, reason_usage, reason_raw = reason_about_query(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history)
+            reasoning, reason_usage, reason_raw = reason_about_query(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history, fallback_client=paid_client)
             track_usage(reason_usage.get("prompt_tokens", 0), reason_usage.get("completion_tokens", 0))
             update_limits_from_headers(reason_raw)
             # Extract and strip CHART suggestion from reasoning text
@@ -528,7 +533,7 @@ async def ask(request: Request):
             yield send("log", {"content": "Generating SQL query..."})
         t_start = time.time()
         try:
-            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history, reasoning=reasoning)
+            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history, reasoning=reasoning, fallback_client=paid_client)
             track_usage(sql_usage.get("prompt_tokens", 0), sql_usage.get("completion_tokens", 0))
             update_limits_from_headers(raw_resp)
             log.info("SQL generated in %.1fs (%d tokens)", time.time() - t_start, sql_usage.get("total_tokens", 0))
@@ -577,7 +582,7 @@ async def ask(request: Request):
                 yield send("log", {"content": f"Query failed: {type(e).__name__}. Asking model to fix..."})
             try:
                 fix_prompt = f"The following SQL failed with error: {e}\n\nOriginal SQL:\n{sql}\n\nFix the SQL query. Return ONLY the corrected SQL."
-                sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry if dev_mode else None, history=history)
+                sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry if dev_mode else None, history=history, fallback_client=paid_client)
                 track_usage(retry_usage.get("prompt_tokens", 0), retry_usage.get("completion_tokens", 0))
                 update_limits_from_headers(raw_resp)
                 log.info("SQL retry generated")
@@ -676,7 +681,7 @@ The SQL query returned 0 rows:
 Explain in plain text (no markdown) why this likely returned no results based on what you know about the data structure. Then suggest 1-2 rephrased questions that would likely return results. Keep it under 100 words."""
             try:
                 for chunk in interpret_results_stream(
-                    client, MODEL, interpret_system, empty_prompt, sql, "No rows returned", history=history
+                    client, MODEL, interpret_system, empty_prompt, sql, "No rows returned", history=history, fallback_client=paid_client
                 ):
                     yield send("interpretation", {"content": humanize_text(chunk)})
             except Exception:
@@ -691,7 +696,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
         stream_timeout = 90  # max seconds for entire interpretation stream
         try:
             for chunk in interpret_results_stream(
-                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry if dev_mode else None, history=history
+                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry if dev_mode else None, history=history, fallback_client=paid_client
             ):
                 yield send("interpretation", {"content": humanize_text(chunk)})
                 interp_tokens += 1
