@@ -445,10 +445,15 @@ async def ask(request: Request):
             reasoning, reason_usage, reason_raw = reason_about_query(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history)
             track_usage(reason_usage.get("prompt_tokens", 0), reason_usage.get("completion_tokens", 0))
             update_limits_from_headers(reason_raw)
+            # Extract and strip CHART suggestion from reasoning text
+            reasoning_display = "\n".join(
+                line for line in reasoning.split("\n")
+                if not line.strip().upper().startswith("CHART:")
+            ).strip()
             t_reason = time.time() - t_reason_start
             log.info("Reasoning complete in %.1fs (%d tokens)", t_reason, reason_usage.get("total_tokens", 0))
             if dev_mode:
-                yield send("reasoning", {"content": reasoning})
+                yield send("reasoning", {"content": reasoning_display})
                 yield send("debug", {"content": f"Reasoning in {t_reason:.1f}s | {reason_usage.get('total_tokens', 0)} tokens"})
         except Exception as e:
             log.warning("Reasoning failed: %s — proceeding without", e)
@@ -458,7 +463,7 @@ async def ask(request: Request):
         # Check if reasoning determined the question can't be answered with data
         if reasoning and not any(kw in reasoning.lower() for kw in ["query", "table", "select", "join", "filter", "column", "group", "aggregate", "expenditure", "salary", "contractor", "fund"]):
             # Reasoning didn't mention any data concepts — likely an off-topic question
-            yield send("interpretation", {"content": reasoning})
+            yield send("interpretation", {"content": reasoning_display})
             yield send("done", {})
             return
 
@@ -477,7 +482,7 @@ async def ask(request: Request):
             if not sql_stripped or sql_stripped.startswith("The question") or not any(kw in sql.upper() for kw in ["SELECT", "WITH", "SHOW", "DESCRIBE"]):
                 log.info("Model returned non-SQL response, using reasoning as answer")
                 if reasoning:
-                    yield send("interpretation", {"content": reasoning})
+                    yield send("interpretation", {"content": reasoning_display})
                 else:
                     yield send("interpretation", {"content": "This question doesn't appear to be answerable from the Louisville Metro expenditure data. Try asking about government spending, agency budgets, contractor payments, employee salaries, or capital projects."})
                 yield send("done", {})
