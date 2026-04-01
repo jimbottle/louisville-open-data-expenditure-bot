@@ -150,11 +150,11 @@ def main():
     print("Loading expenditure data...")
     con = load_all_data(args.data_dir)
 
-    # Get top payees by spend (excluding individuals — rough filter on LLC, INC, etc.)
-    print(f"\nBuilding profiles for top {args.top} payees...")
+    # Get top payees by spend using canonical names to merge variants
+    print(f"\nBuilding profiles for top {args.top} payees (using canonical names)...")
     payees = con.execute(f"""
         SELECT
-            e.payee,
+            e.payee_canonical AS payee,
             ROUND(SUM(e.extended_amount), 2) AS total_spend,
             COUNT(*) AS transaction_count,
             COUNT(DISTINCT e.fiscal_year) AS years_active,
@@ -165,9 +165,9 @@ def main():
             COUNT(DISTINCT e.fund) AS funds_used,
             COUNT(DISTINCT e.expenditure_type) AS expenditure_types
         FROM expenditures e
-        WHERE e.payee IS NOT NULL AND e.is_data_artifact = FALSE
+        WHERE e.payee_canonical IS NOT NULL AND e.is_data_artifact = FALSE
             AND e.extended_amount > 0
-        GROUP BY e.payee
+        GROUP BY e.payee_canonical
         ORDER BY total_spend DESC
         LIMIT {args.top}
     """).fetchdf()

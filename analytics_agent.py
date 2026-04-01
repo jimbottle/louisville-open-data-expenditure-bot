@@ -334,10 +334,31 @@ BLOCKED_SQL = re.compile(
 )
 
 
+def fix_sql(sql: str) -> str:
+    """Post-process generated SQL to enforce rules the LLM sometimes ignores."""
+    fixed = sql
+
+    # Replace raw column names with canonical versions
+    # Only replace when used as a column reference (after SELECT, GROUP BY, WHERE, ORDER BY, JOIN ON)
+    # Use word boundary matching to avoid replacing inside strings
+    if re.search(r'\bGROUP BY\b.*\bagency\b', fixed, re.IGNORECASE | re.DOTALL):
+        if 'agency_canonical' not in fixed.lower():
+            fixed = re.sub(r'\bagency\b(?!\s*_canonical)', 'agency_canonical', fixed)
+            log.info("SQL fix: replaced 'agency' with 'agency_canonical'")
+
+    if re.search(r'\bGROUP BY\b.*\bpayee\b', fixed, re.IGNORECASE | re.DOTALL):
+        if 'payee_canonical' not in fixed.lower():
+            fixed = re.sub(r'\bpayee\b(?!\s*_canonical)', 'payee_canonical', fixed)
+            log.info("SQL fix: replaced 'payee' with 'payee_canonical'")
+
+    return fixed
+
+
 def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataFrame, str]:
     """Execute SQL and return (dataframe, formatted string). Raises on failure."""
     if BLOCKED_SQL.search(sql):
         raise ValueError("Query contains blocked operations")
+    sql = fix_sql(sql)
     pd.set_option("display.float_format", lambda x: f"{x:,.2f}")
     result_df = con.execute(sql).fetchdf()
     result_str = result_df.to_string(index=False, max_rows=50)

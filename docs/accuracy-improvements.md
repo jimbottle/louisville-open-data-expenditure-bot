@@ -49,6 +49,14 @@
 **Approach:** Extract definitions from Louisville's budget documents and CAFR. Add to the interpretation prompt context.
 
 ## 9. Council District Spending Analysis
-**Status:** Needs investigation
-**Issue:** The `region` column in expenditures (2018+ only) has very sparse district-level data — most records don't have a district assigned. The question "Which areas or council districts receive the most funding?" produces misleading results showing only ~$115K across 7 districts when actual spending is $643M+. Removed as a starter question.
-**To investigate:** Pull Louisville Metro Council Districts geographic data from LOJIC and cross-reference with capital projects (which have Council_Di field) for a more complete district analysis.
+**Status:** Investigated — insufficient data
+**Issue:** The `region` column in expenditures (2018+ only) has only 988 records out of 2.26M (0.04%) with district data. Capital projects have only 14 records across 10 districts. District-level expenditure analysis is not viable with current data.
+**Potential future source:** Louisville Metro Council Districts geographic data from LOJIC could be cross-referenced with capital project addresses for spatial analysis, but this requires geocoding project locations.
+
+## 10. SQL Post-Processor
+**Status:** Complete
+**Enforcement:** Code-level `fix_sql()` function automatically replaces `agency` with `agency_canonical` and `payee` with `payee_canonical` when used in GROUP BY clauses, regardless of what the LLM generates.
+
+## 11. Canonical Payee Profiles
+**Status:** Complete
+**Change:** `build_contractor_profiles.py` now groups by `payee_canonical` instead of raw `payee`. This means "LG&E" and "LOUISVILLE GAS & ELECTRIC COMPANY" produce a single profile entry with correct total spend, eliminating duplicate profiles with inconsistent numbers.
