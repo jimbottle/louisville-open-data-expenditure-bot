@@ -600,7 +600,8 @@ def get_full_schema_description(con: duckdb.DuckDBPyConnection) -> str:
 
 
 def humanize_text(text: str, table: str = "expenditures") -> str:
-    """Replace column names with semantic labels in display text."""
+    """Replace column names with semantic labels in display text.
+    Falls back to converting snake_case to Title Case for unknown columns."""
     import re
     labels = ALL_LABELS.get(table, EXPENDITURE_LABELS)
     # Also include all labels from all tables for cross-table results
@@ -609,6 +610,8 @@ def humanize_text(text: str, table: str = "expenditures") -> str:
         all_flat.update(tbl_labels)
     for col, label in sorted(all_flat.items(), key=lambda x: -len(x[0])):
         text = re.sub(rf'\b{re.escape(col)}\b', label, text)
+    # Convert any remaining snake_case words to Title Case
+    text = re.sub(r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b', lambda m: m.group(1).replace('_', ' ').title(), text)
     return text
 
 
