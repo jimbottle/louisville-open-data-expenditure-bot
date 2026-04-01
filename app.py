@@ -256,7 +256,7 @@ def is_rate_limit_error(e: Exception) -> bool:
 
 @app.on_event("startup")
 def startup():
-    global con, schema_desc, sql_system, interpret_system, client
+    global con, schema_desc, sql_system, interpret_system, client, paid_client
 
     con = load_all_data(DATA_DIR)
     schema_desc = get_full_schema_description(con)
