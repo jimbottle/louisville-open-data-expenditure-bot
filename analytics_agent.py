@@ -29,11 +29,23 @@ MAX_RETRIES = 3
 RETRY_BASE_DELAY = 16  # seconds, matches Gemini's suggested retry delay
 
 
+# Track which tier was used on the last call (for dev mode display)
+_last_tier_used = "free"
+
+
+def get_last_tier_used() -> str:
+    """Return which tier was used on the most recent LLM call."""
+    return _last_tier_used
+
+
 def _call_with_retry(fn, on_retry=None, fallback_fn=None):
     """Retry on 429 rate limit errors. Always tries free tier first, falls back to paid only when confirmed limited."""
+    global _last_tier_used
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            return fn()
+            result = fn()
+            _last_tier_used = "free"
+            return result
         except openai.RateLimitError as e:
             delay = RETRY_BASE_DELAY
             match = re.search(r'retry in ([\d.]+)s', str(e))
@@ -47,7 +59,9 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
                     on_retry(attempt, MAX_RETRIES, delay)
                 time.sleep(delay)
                 try:
-                    return fn()
+                    result = fn()
+                    _last_tier_used = "free"
+                    return result
                 except openai.RateLimitError:
                     # Free tier still limited — fall back to paid if available
                     if fallback_fn:
@@ -55,7 +69,9 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
                         if on_retry:
                             on_retry(attempt + 1, MAX_RETRIES, 0)
                         try:
-                            return fallback_fn()
+                            result = fallback_fn()
+                            _last_tier_used = "paid"
+                            return result
                         except Exception as fallback_err:
                             log.warning("Paid tier fallback failed: %s", fallback_err)
 

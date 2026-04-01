@@ -29,6 +29,7 @@ from analytics_agent import (
     build_interpret_prompt,
     execute_sql_safe,
     generate_sql,
+    get_last_tier_used,
     interpret_results_stream,
     make_client,
     make_paid_client,
@@ -515,7 +516,7 @@ async def ask(request: Request):
             log.info("Reasoning complete in %.1fs (%d tokens)", t_reason, reason_usage.get("total_tokens", 0))
             if dev_mode:
                 yield send("reasoning", {"content": reasoning_display})
-                yield send("debug", {"content": f"Reasoning in {t_reason:.1f}s | {reason_usage.get('total_tokens', 0)} tokens"})
+                yield send("debug", {"content": f"Reasoning in {t_reason:.1f}s | {reason_usage.get('total_tokens', 0)} tokens | Tier: {get_last_tier_used()}"})
         except Exception as e:
             log.warning("Reasoning failed: %s — proceeding without", e)
             if dev_mode:
@@ -567,7 +568,7 @@ async def ask(request: Request):
             for evt in flush_retry_logs():
                 yield evt
             yield send("sql", {"content": sql})
-            yield send("debug", {"content": f"SQL generated in {t_sql:.1f}s | {sql_usage.get('total_tokens', 0)} tokens | Model: {MODEL}"})
+            yield send("debug", {"content": f"SQL generated in {t_sql:.1f}s | {sql_usage.get('total_tokens', 0)} tokens | Model: {MODEL} | Tier: {get_last_tier_used()}"})
 
         # Execute SQL
         if dev_mode:
@@ -728,7 +729,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
                 yield evt
             t_interp = time.time() - t_start
             u = get_usage_summary()
-            yield send("debug", {"content": f"Interpretation streamed in {t_interp:.1f}s | ~{interp_tokens} chunks"})
+            yield send("debug", {"content": f"Interpretation streamed in {t_interp:.1f}s | ~{interp_tokens} chunks | Tier: {get_last_tier_used()}"})
             # Per-request token count (SQL gen tokens + estimated interpretation tokens)
             request_tokens = sql_usage.get("total_tokens", 0) + interp_tokens
             tpd = u["limits"]["tpd"] or 1000000
