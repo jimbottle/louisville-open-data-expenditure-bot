@@ -463,9 +463,9 @@ async def ask(request: Request):
         log.warning("IP rate limited: %s", client_ip)
         return {"error": "Too many requests. Please wait a minute."}
 
-    # Serve from cache if: not dev mode and question is cached
+    # Serve from cache if question is cached
     cache_key = question.lower().strip()
-    if not dev_mode and cache_key in response_cache:
+    if cache_key in response_cache:
         log.info("Cache hit: %s", question[:50])
         def cached_stream():
             for event in response_cache[cache_key]:
