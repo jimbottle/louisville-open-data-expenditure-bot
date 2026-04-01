@@ -644,14 +644,17 @@ async function streamAnswer(question) {
   let interpBlock = null;
   let interpText = '';  // collect full interpretation for history
 
-  // Add user message to history
+  // Send prior history (not including current question) for context
+  const historyToSend = conversationHistory.slice(-6);
+
+  // Add current question to history after capturing what to send
   conversationHistory.push({ role: "user", content: question });
 
   try {
     const resp = await fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, dev_mode: devMode, history: conversationHistory.slice(-6) }),
+      body: JSON.stringify({ question, dev_mode: devMode, history: historyToSend }),
     });
 
     const reader = resp.body.getReader();
