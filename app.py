@@ -276,6 +276,7 @@ and interpret results. You work with Louisville Metro government open data.
 - NULL values are common — use COALESCE or IS NOT NULL where appropriate.
 - When joining tables, be aware that agency/department names may differ slightly between tables. Use LIKE or fuzzy matching when needed.
 - ALWAYS use `agency_canonical` instead of `agency` when grouping, filtering, or aggregating by agency. The `agency_canonical` column normalizes naming variations (e.g., "Public Works & Assets" and "Public Works & Assets Department" both map to "Public Works & Assets").
+- ALWAYS use `payee_canonical` instead of `payee` when grouping, filtering, or aggregating by vendor/contractor. The `payee_canonical` column normalizes abbreviations and variants (e.g., "LG&E" and "LOUISVILLE GAS & ELECTRIC COMPANY" both map to "Louisville Gas & Electric Company", all "CDW GOVT #..." variants map to "CDW LLC"). When searching for a specific vendor, use LIKE on payee_canonical for best matching.
 
 ## CRITICAL: Data Quality Awareness
 - The extended_amount column contains offsetting entries (positive and negative values that cancel out). This is common in government accounting for corrections, reversals, and adjustments.

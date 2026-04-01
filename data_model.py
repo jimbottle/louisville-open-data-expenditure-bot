@@ -69,6 +69,7 @@ EXPENDITURE_LABELS = {
     "region": "Region",
     "extended_amount": "Extended Amount",
     "agency_canonical": "Agency (Normalized)",
+    "payee_canonical": "Payee (Normalized)",
     "is_offsetting": "Offsetting Entry",
     "is_data_artifact": "Data Artifact",
 }
@@ -218,6 +219,7 @@ DATA_DICTIONARY = {
             "region": "Council district or geographic region (2018+ data only).",
             "extended_amount": "Distributed/allocated amount for this line item. Use this for spend analysis.",
             "agency_canonical": "Normalized agency name. Use this instead of 'agency' for aggregations to avoid duplicate entities from naming variations.",
+            "payee_canonical": "Normalized payee/vendor name. Maps abbreviations and variants to canonical names (e.g., 'LG&E' and 'LOUISVILLE GAS & ELECTRIC COMPANY' both become 'Louisville Gas & Electric Company'). Use this instead of 'payee' when grouping or filtering by vendor.",
         },
     },
     "salary_data": {
@@ -402,6 +404,20 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
     """)
     canonical_count = con.execute("SELECT COUNT(DISTINCT agency_canonical) FROM expenditures").fetchone()[0]
     print(f"Agency normalization: 98 variants -> {canonical_count} canonical names")
+
+    # ── Normalize payee names ─────────────────────────────────────────────
+    from payee_mapping import PAYEE_MAP, PAYEE_PREFIX_MAP
+    # Direct mappings
+    cases = "\n".join(f"WHEN UPPER(payee) = '{k.upper().replace(chr(39), chr(39)+chr(39))}' THEN '{v.replace(chr(39), chr(39)+chr(39))}'" for k, v in PAYEE_MAP.items())
+    # Prefix mappings
+    prefix_cases = "\n".join(f"WHEN UPPER(payee) LIKE '{p.upper().replace(chr(39), chr(39)+chr(39))}%' THEN '{v.replace(chr(39), chr(39)+chr(39))}'" for p, v in PAYEE_PREFIX_MAP.items())
+    con.execute(f"""
+        ALTER TABLE expenditures ADD COLUMN IF NOT EXISTS payee_canonical VARCHAR;
+        UPDATE expenditures SET payee_canonical = CASE {cases} {prefix_cases} ELSE payee END;
+    """)
+    payee_before = con.execute("SELECT COUNT(DISTINCT payee) FROM expenditures WHERE payee IS NOT NULL").fetchone()[0]
+    payee_after = con.execute("SELECT COUNT(DISTINCT payee_canonical) FROM expenditures WHERE payee_canonical IS NOT NULL").fetchone()[0]
+    print(f"Payee normalization: {payee_before:,} variants -> {payee_after:,} canonical names")
 
     # ── Data quality cleaning ────────────────────────────────────────────
     # Add net_amount: for invoices with offsetting entries, compute net per invoice
