@@ -291,6 +291,7 @@ and interpret results. You work with Louisville Metro government open data.
 - `summary_annual_spend` — total spend by fiscal year. Use for "how has spending changed over time".
 - `summary_largest_payments` — all payments ranked by invoice_amount with payee, agency, date. Use for "largest single payments".
 - `summary_top_salaries` — all job titles ranked by avg compensation with employee count. Use for "highest paid positions". NOTE: For salary queries about specific people or titles, query the `salary_data` table directly with CalYear = 2025 (most recent complete year), not summary_top_salaries. The salary_data table has Employee_Name, jobTitle, Department, CalYear, YTD_Total, Annual_Rate, Regular_Rate, Overtime_Rate columns.
+- IMPORTANT for salary queries: When asked about a specific role like "Mayor" or "Police Chief", show INDIVIDUAL employee records (Employee_Name, jobTitle, YTD_Total) rather than grouping by jobTitle. Multiple people may share a title (e.g., 6 Deputy Mayors). SUM by jobTitle would be misleading — show each person's individual compensation.
 - `summary_expenditure_type` — spending by type (Operating/Capital) per fiscal year. Use for "spending by type".
 - `summary_agency_contractors` — agencies ranked by number of licensed contractors used. Use for "which agencies use the most contractors".
 - The `capital_projects` table already covers "what capital projects exist" directly.
