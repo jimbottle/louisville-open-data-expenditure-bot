@@ -298,6 +298,7 @@ and interpret results. You work with Louisville Metro government open data.
 - `contractor_profiles` — top 200 payees by total spend, enriched with KY Secretary of State data. IMPORTANT: this table only contains the 200 highest-spending vendors. For questions about small vendors, low-spend contractors, or the full universe of payees, query the `expenditures` table directly (GROUP BY payee_canonical).
 - `summary_top_contractors` — pre-filtered list of contractors WITH registered agents, ranked by total spend. Use this for "who are the registered agents" or "who runs the top contractors" questions. Already excludes government entities and null agents. Columns: payee, total_spend, sos_registered_agent, sos_officers, sos_company_type, sos_employees.
 - Government entities (JEFFERSON COUNTY CLERK, LOUISVILLE METRO AFFORDABLE HOUSING TRUST FUND, FLEETONE, KENTUCKY STATE TREASURER) are NOT contractors — exclude them from contractor queries.
+- `summary_grant_funding` — grant/federal funding by fund source with total amounts, transaction counts, and year ranges. Use for "how much grant funding" or "funding sources" questions. Already filtered to grant-related funds.
 - Use summary tables for quick overviews and the starter questions. For questions asking about specific entities, full breakdowns, "all" of something, outliers, filtering, or any detailed analysis, query the raw `expenditures` table directly. When computing totals or sums, NEVER limit the query to a subset — include all matching rows unless the user explicitly asks for a top-N.
 - When the user asks for a total, sum, or aggregate, do NOT add a LIMIT clause that would exclude data. Only use LIMIT when the user asks for "top N" or the result set would be unreasonably large (>100 rows).
 
@@ -676,7 +677,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
                 for chunk in interpret_results_stream(
                     client, MODEL, interpret_system, empty_prompt, sql, "No rows returned", history=history
                 ):
-                    yield send("interpretation", {"content": chunk})
+                    yield send("interpretation", {"content": humanize_text(chunk)})
             except Exception:
                 yield send("interpretation", {"content": "I wasn't able to find any data matching that question. Try broadening your search or rephrasing."})
             yield send("done", {})
@@ -691,7 +692,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
             for chunk in interpret_results_stream(
                 client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry if dev_mode else None, history=history
             ):
-                yield send("interpretation", {"content": chunk})
+                yield send("interpretation", {"content": humanize_text(chunk)})
                 interp_tokens += 1
                 if time.time() - t_start > stream_timeout:
                     log.warning("Interpretation stream timed out after %ds", stream_timeout)

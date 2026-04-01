@@ -47,3 +47,8 @@
 **Rule:** Questions about a single value default to FY2025 (most recent complete year). All-time queries require explicit "all time" / "across all years" language.
 **Goal:** Encode fund codes, expenditure types, and category definitions into the system prompt for better interpretation.
 **Approach:** Extract definitions from Louisville's budget documents and CAFR. Add to the interpretation prompt context.
+
+## 9. Council District Spending Analysis
+**Status:** Needs investigation
+**Issue:** The `region` column in expenditures (2018+ only) has very sparse district-level data — most records don't have a district assigned. The question "Which areas or council districts receive the most funding?" produces misleading results showing only ~$115K across 7 districts when actual spending is $643M+. Removed as a starter question.
+**To investigate:** Pull Louisville Metro Council Districts geographic data from LOJIC and cross-reference with capital projects (which have Council_Di field) for a more complete district analysis.

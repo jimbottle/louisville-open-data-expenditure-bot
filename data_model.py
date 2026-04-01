@@ -544,7 +544,25 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
             ORDER BY total_spend DESC
         """)
 
-    print("Summary tables created: agency_spend, annual_spend, largest_payments, top_salaries, expenditure_type, agency_contractors, top_contractors")
+    # Q: How much grant funding has Louisville received?
+    con.execute("""
+        CREATE TABLE summary_grant_funding AS
+        SELECT fund, ROUND(SUM(extended_amount), 2) AS total_amount,
+               COUNT(*) AS transaction_count,
+               MIN(fiscal_year) AS first_year, MAX(fiscal_year) AS last_year
+        FROM expenditures
+        WHERE is_data_artifact = FALSE
+            AND (LOWER(fund) LIKE '%grant%' OR LOWER(fund) LIKE '%federal%'
+                 OR LOWER(fund) LIKE '%cares%' OR LOWER(fund) LIKE '%cdbg%'
+                 OR LOWER(fund) LIKE '%esg%' OR LOWER(fund) LIKE '%pass thru%'
+                 OR LOWER(fund) LIKE '%shelter%' OR LOWER(fund) LIKE '%home %'
+                 OR LOWER(fund) LIKE '%hopwa%' OR LOWER(fund) LIKE '%cap kaca%'
+                 OR LOWER(fund) LIKE '%stimulus%')
+        GROUP BY fund
+        ORDER BY total_amount DESC
+    """)
+
+    print("Summary tables created: agency_spend, annual_spend, largest_payments, top_salaries, expenditure_type, agency_contractors, top_contractors, grant_funding")
 
     # Lock down DuckDB — disable external file access and make read-only safe
     con.execute("SET enable_external_access = false")
