@@ -226,10 +226,30 @@ def main():
         print(f"  REFRESH COMPLETED WITH ERRORS in {elapsed / 60:.1f} minutes")
     print(f"{'=' * 60}")
 
+    # Clear response cache — data changed, cached answers are stale
+    stats_dir = os.environ.get("STATS_DIR", args.data_dir)
+    cache_file = os.path.join(stats_dir, ".response_cache.json")
+    if os.path.exists(cache_file):
+        os.remove(cache_file)
+        print("\n  Response cache cleared (data changed, cached answers invalidated)")
+    else:
+        print("\n  No response cache to clear")
+
+    # Also try to clear via API if the bot is running
+    try:
+        import requests
+        resp = requests.delete("http://localhost:8000/api/cache",
+                               json={}, timeout=5)
+        if resp.status_code == 200:
+            print("  Live bot cache also cleared via API")
+    except Exception:
+        print("  Bot not running — cache file cleared, will take effect on next start")
+
     # Print summary of data files
     csv_count = len([f for f in os.listdir(args.data_dir) if f.endswith(".csv")])
     print(f"\n  Data directory: {args.data_dir}")
     print(f"  CSV files: {csv_count}")
+    print(f"\n  IMPORTANT: Re-warm starter question caches after restarting the bot")
 
 
 if __name__ == "__main__":

@@ -490,7 +490,7 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
     # Q: What are the largest single payments ever made?
     con.execute("""
         CREATE TABLE summary_largest_payments AS
-        SELECT payee, agency_canonical AS agency, invoice_amount, invoice_number,
+        SELECT payee_canonical AS payee, agency_canonical AS agency, invoice_amount, invoice_number,
                invoice_date, fiscal_year, expenditure_type, fund
         FROM expenditures
         WHERE invoice_amount IS NOT NULL AND invoice_amount > 0 AND is_data_artifact = FALSE
