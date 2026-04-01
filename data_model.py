@@ -532,7 +532,19 @@ def load_all_data(data_dir: str = "data") -> duckdb.DuckDBPyConnection:
         ORDER BY contractor_count DESC
     """)
 
-    print("Summary tables created: agency_spend, annual_spend, largest_payments, top_salaries, expenditure_type, agency_contractors")
+    # Q: Who are the registered agents for the top contractors?
+    if "contractor_profiles" in [t[0] for t in con.execute("SHOW TABLES").fetchall()]:
+        con.execute("""
+            CREATE TABLE summary_top_contractors AS
+            SELECT payee, total_spend, sos_registered_agent, sos_officers,
+                   sos_company_type, sos_employees, sos_county, sos_file_date,
+                   agencies_served, years_active, transaction_count
+            FROM contractor_profiles
+            WHERE sos_registered_agent IS NOT NULL
+            ORDER BY total_spend DESC
+        """)
+
+    print("Summary tables created: agency_spend, annual_spend, largest_payments, top_salaries, expenditure_type, agency_contractors, top_contractors")
 
     # Lock down DuckDB — disable external file access and make read-only safe
     con.execute("SET enable_external_access = false")
