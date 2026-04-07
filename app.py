@@ -16,11 +16,32 @@ from datetime import date, datetime
 import openai
 from fastapi import FastAPI, Request
 
+LOG_DIR = os.environ.get("LOG_DIR", "/logs")
+LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+# Console handler
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    datefmt="%H:%M:%S",
+    format=LOG_FORMAT,
+    datefmt=LOG_DATEFMT,
 )
+
+# File handler — persistent logs that survive container recreations
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+    from logging.handlers import RotatingFileHandler
+    file_handler = RotatingFileHandler(
+        os.path.join(LOG_DIR, "louisville-bot.log"),
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=5,
+    )
+    file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
+    file_handler.setLevel(logging.INFO)
+    logging.getLogger().addHandler(file_handler)
+except Exception as e:
+    print(f"Warning: could not set up file logging: {e}")
+
 log = logging.getLogger("app")
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -347,9 +368,10 @@ This data covers expenditures from FY2008-FY2026, employee salaries, capital pro
     client = make_client()
     paid_client = make_paid_client()
     if paid_client:
-        print(f"Model: {MODEL} (paid tier fallback available)")
+        log.info("Model: %s (paid tier fallback available)", MODEL)
     else:
-        print(f"Model: {MODEL} (free tier only)")
+        log.info("Model: %s (free tier only)", MODEL)
+    log.info("Logs writing to: %s", LOG_DIR)
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
