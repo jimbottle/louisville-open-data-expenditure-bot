@@ -11,7 +11,7 @@ Run: python -m pytest tests/test_known_answers.py -v
 """
 
 import pytest
-from data_model import load_all_data
+from data_model import get_compact_schema_description, load_all_data
 
 
 @pytest.fixture(scope="module")
@@ -155,6 +155,34 @@ def test_top_contractor_is_lge(con):
         "SELECT payee FROM summary_top_contractors ORDER BY total_spend DESC LIMIT 1"
     ).fetchone()
     assert r[0] == "Louisville Gas & Electric Company"
+
+
+# ── Compact schema (feeds the LLM system prompt) ──────────────────────────────
+
+def test_compact_schema_excludes_internal_tables(con):
+    schema = get_compact_schema_description(con)
+    # Internal helper tables are present in the DB but must not reach the prompt.
+    assert "## _payee_to_canonical" not in schema
+    assert "## _payee_canonical_totals" not in schema
+    # Real tables are present.
+    assert "## expenditures" in schema
+    assert "## summary_agency_spend" in schema
+
+
+def test_compact_schema_enumerates_only_low_cardinality(con):
+    schema = get_compact_schema_description(con)
+    # Low-cardinality categorical: values listed inline as an enum {...}.
+    # (Trailing space avoids matching the separate `expenditure_types` column.)
+    line = next((ln for ln in schema.splitlines() if ln.startswith("- expenditure_type ")), "")
+    assert "{" in line and "Operating" in line
+    # High-cardinality entity columns must NOT be enumerated (would bloat + leak).
+    payee_line = next((ln for ln in schema.splitlines() if ln.startswith("- payee_canonical ")), "")
+    assert "{" not in payee_line
+
+
+def test_compact_schema_smaller_than_full(con):
+    from data_model import get_full_schema_description
+    assert len(get_compact_schema_description(con)) < len(get_full_schema_description(con))
 
 
 # ── Volume ────────────────────────────────────────────────────────────────────

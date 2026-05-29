@@ -288,8 +288,13 @@ def is_service_error(e: Exception) -> bool:
         openai.APITimeoutError, openai.InternalServerError,
     )):
         return True
+    # String fallback ONLY for LLM-specific phrasings. Deliberately narrow: the
+    # SQL-retry path can hand us DuckDB errors like 'Table "x" does not exist',
+    # which must NOT be treated as a service error (they're bad-query errors the
+    # user can rephrase). The openai exception types above already catch real
+    # LLM 404/auth failures; this just adds the unambiguous Cerebras wording.
     s = str(e).lower()
-    return any(t in s for t in ("model_not_found", "does not exist", "not_found_error", "authentication"))
+    return "model_not_found" in s or "does not exist or you do not have access" in s
 
 
 # Shown for is_service_error cases: honest about it being our problem, no futile "reword".
@@ -711,8 +716,13 @@ async def ask(request: Request):
 
             if chart_type and label_col and value_col and len(result_df) >= 2:
                 try:
-                    labels = result_df[label_col].astype(str).tolist()[:30]
-                    values = result_df[value_col].tolist()[:30]
+                    # A line chart implies a time axis, but the query may be
+                    # ordered by value (e.g. "top 5 years by spend" -> amount DESC).
+                    # Sort by the time/label column so the line reads chronologically
+                    # instead of zig-zagging in rank order.
+                    chart_df = result_df.sort_values(label_col) if chart_type == "line" else result_df
+                    labels = chart_df[label_col].astype(str).tolist()[:30]
+                    values = chart_df[value_col].tolist()[:30]
                     title = humanize_text(value_col)
                     label_axis = humanize_text(label_col)
                     yield send("chart", {
