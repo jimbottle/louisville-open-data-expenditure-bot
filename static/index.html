@@ -3,18 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Louisville Metro Expenditure Bot</title>
+<title>Lou · Louisville Metro open data</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <style>
   :root {
-    --bg: #f5f5f5;
-    --surface: #ffffff;
+    /* Neutrals are tinted very slightly toward the civic-blue hue rather than pure gray. */
+    --bg: #f3f4f8;
+    --surface: #fdfdfe;
     --primary: #1a56db;
     --primary-light: #e8edfb;
     --text: #1f2937;
     --text-muted: #6b7280;
     --border: #e5e7eb;
-    --code-bg: #f3f4f6;
+    --code-bg: #f2f3f7;
     --user-bg: #1a56db;
     --user-text: #ffffff;
     --radius: 12px;
@@ -55,6 +56,26 @@
     display: flex;
     align-items: center;
     gap: 12px;
+  }
+
+  .header-btn {
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 5px 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+
+  .header-btn:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
+  .header-btn[hidden] {
+    display: none;
   }
 
   .dev-toggle {
@@ -139,7 +160,7 @@
     font-family: 'SF Mono', 'Fira Code', monospace;
     font-size: 12px;
     white-space: pre-wrap;
-    word-break: break-all;
+    word-break: break-word;
     color: var(--text-muted);
     position: relative;
   }
@@ -196,6 +217,49 @@
     padding: 10px 14px;
     color: #991b1b;
     font-size: 13px;
+  }
+
+  /* Non-error notices (e.g. "info" events). Distinct from .error so screen
+     readers and users don't read every notice as a failure. */
+  .agent .info {
+    background: #eef4ff;
+    border: 1px solid #c7dafe;
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: #1e3a8a;
+    font-size: 13px;
+  }
+
+  .agent .retry-btn {
+    margin-top: 8px;
+    background: transparent;
+    border: 1px solid #fca5a5;
+    color: #991b1b;
+    border-radius: 16px;
+    padding: 4px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .agent .retry-btn:hover {
+    background: #fee2e2;
+    border-color: #f87171;
+  }
+
+  .agent .retry-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  /* Single rotating progress line shown above the typing dots while waiting. */
+  .agent .status-line {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    padding: 2px 2px 4px;
+    min-height: 16px;
+    transition: opacity 0.2s;
   }
 
   .agent .chart-block {
@@ -282,6 +346,33 @@
     max-width: 600px;
   }
 
+  .chip-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 640px;
+    width: 100%;
+  }
+
+  .chip-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .chip-group-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .chip-group .chips {
+    justify-content: flex-start;
+    max-width: none;
+  }
+
   .starters button {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -354,7 +445,8 @@
 
   .about-icon:hover + .about-tooltip,
   .about-icon:focus + .about-tooltip,
-  .about-tooltip:hover {
+  .about-tooltip:hover,
+  .about-wrapper.open .about-tooltip {
     display: block;
   }
 
@@ -399,6 +491,15 @@
   #input-bar button:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+  }
+
+  /* While a response is streaming the Ask button becomes a Stop control. */
+  #input-bar button.stop {
+    background: #b91c1c;
+  }
+
+  #input-bar button.stop:hover {
+    opacity: 0.9;
   }
 
   .typing {
@@ -533,9 +634,11 @@
 
 <header>
   <div>
-    <h1>Lou (Open Data Day Inspired Demo Bot)</h1>
+    <h1>Lou</h1>
+    <div class="subtitle">Louisville Metro open data, in plain English</div>
   </div>
   <div class="header-right">
+    <button type="button" class="header-btn" id="newchat-btn" hidden onclick="newChat()">New chat</button>
     <label class="dev-toggle" title="Show SQL queries and debug info">
       <input type="checkbox" id="dev-mode" />
       <span class="switch"></span>
@@ -548,20 +651,33 @@
   <div class="starters" id="starters">
     <h2>Ask me about Louisville Metro Government Expenditure. I might have some answers.</h2>
     <p>Natural language queries run against Louisville Metro expenditure, salary, capital projects, contractor, and staffing data.</p>
-    <div class="chips">
-      <button onclick="askQuestion('Which agencies have spent the most money across all fiscal years?')">Which agencies spend the most?</button>
-      <button onclick="askQuestion('How has total annual spending changed from 2008 to 2026?')">How has spending changed over time?</button>
-      <button onclick="askQuestion('Give me a year-over-year breakdown of LMPD spending')">LMPD spending by year</button>
-      <button onclick="askQuestion('How much does the mayor make? What about the police chief?')">What do top officials earn?</button>
-      <button onclick="askQuestion('Who are the registered agents for the top 10 contractors by total spend?')">Who runs the top contractors?</button>
-      <button onclick="askQuestion('Which vendors receive payments from the most different agencies?')">Which vendors work across agencies?</button>
-      <button onclick="askQuestion('Are there any patterns that suggest potential contract splitting?')">Any signs of contract splitting?</button>
-      <button onclick="askQuestion('What does Louisville Metro spend on technology and cybersecurity?')">Technology and cybersecurity spend</button>
-      <button onclick="askQuestion('What are the largest capital projects and how much was allocated to each?')">Largest capital projects</button>
-      <button onclick="askQuestion('How much grant funding has Louisville received and from which sources?')">Grant funding breakdown</button>
+    <div class="chip-groups">
+      <div class="chip-group">
+        <span class="chip-group-label">Spending</span>
+        <div class="chips">
+          <button onclick="askQuestion('How has total annual spending changed from 2008 to 2026?')">How has spending changed over time?</button>
+          <button onclick="askQuestion('Which agencies have spent the most money across all fiscal years?')">Which agencies spend the most?</button>
+          <button onclick="askQuestion('Give me a year-over-year breakdown of LMPD spending')">LMPD spending by year</button>
+        </div>
+      </div>
+      <div class="chip-group">
+        <span class="chip-group-label">People &amp; pay</span>
+        <div class="chips">
+          <button onclick="askQuestion('How much does the mayor make? What about the police chief?')">What do top officials earn?</button>
+          <button onclick="askQuestion('What are the highest paid positions in Louisville Metro government?')">Highest paid positions</button>
+        </div>
+      </div>
+      <div class="chip-group">
+        <span class="chip-group-label">Contracts &amp; projects</span>
+        <div class="chips">
+          <button onclick="askQuestion('Who are the registered agents for the top 10 contractors by total spend?')">Who runs the top contractors?</button>
+          <button onclick="askQuestion('What are the largest capital projects and how much was allocated to each?')">Largest capital projects</button>
+          <button onclick="askQuestion('How much grant funding has Louisville received and from which sources?')">Grant funding breakdown</button>
+        </div>
+      </div>
     </div>
     <div class="about-wrapper">
-      <span class="about-icon" tabindex="0">i</span>
+      <span class="about-icon" tabindex="0" role="button" aria-label="About this data" onclick="toggleAbout(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAbout(this);}">i</span>
       <div class="about-tooltip">
         <strong>About this data</strong><br>
         Data sourced from <a href="https://data.louisvilleky.gov/datasets/" target="_blank">Louisville Metro Open Data Portal</a>,
@@ -581,7 +697,7 @@
   <form onsubmit="handleSubmit(event)">
     <input type="text" id="question" placeholder="Enter your question about Louisville Metro Government expenditure here..." autocomplete="off" />
     <button type="submit" id="submit-btn">Ask Lou</button>
-    <span class="disclaimer">POC — expect hiccups. AI-generated — verify results.</span>
+    <span class="disclaimer">Proof of concept; expect hiccups. AI-generated, so verify results before you rely on them.</span>
   </form>
 </div>
 
@@ -592,23 +708,56 @@ const questionEl = document.getElementById('question');
 const submitBtn = document.getElementById('submit-btn');
 const devModeEl = document.getElementById('dev-mode');
 
+const newChatBtn = document.getElementById('newchat-btn');
+
 let isStreaming = false;
 let conversationHistory = [];  // [{role: "user"|"assistant", content: "..."}]
+let activeController = null;    // abort handle for the in-flight request
+let lastQuestion = '';          // backs the Retry affordance
 
 function askQuestion(q) {
+  if (isStreaming) return;
   questionEl.value = q;
   handleSubmit(new Event('submit'));
 }
 
 function handleSubmit(e) {
   e.preventDefault();
+  // While streaming, the Ask button acts as a Stop control.
+  if (isStreaming) { stopStreaming(); return; }
   const q = questionEl.value.trim();
-  if (!q || isStreaming) return;
+  if (!q) return;
 
   startersEl.style.display = 'none';
+  newChatBtn.hidden = false;
   addUserMessage(q);
   questionEl.value = '';
   streamAnswer(q);
+}
+
+function stopStreaming() {
+  if (activeController) activeController.abort('user');
+}
+
+function newChat() {
+  // Clear the conversation and return to the starter screen (which doubles as
+  // the "what can I ask" help surface once the opening chips have been used).
+  if (isStreaming) stopStreaming();
+  conversationHistory = [];
+  messagesEl.querySelectorAll('.message').forEach(el => el.remove());
+  startersEl.style.display = '';
+  newChatBtn.hidden = true;
+  questionEl.focus();
+}
+
+function toggleAbout(el) {
+  el.closest('.about-wrapper').classList.toggle('open');
+}
+
+function resetAskButton() {
+  submitBtn.textContent = 'Ask Lou';
+  submitBtn.classList.remove('stop');
+  submitBtn.disabled = false;
 }
 
 function addUserMessage(text) {
@@ -623,9 +772,13 @@ function scrollBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-async function streamAnswer(question) {
+async function streamAnswer(question, opts = {}) {
+  const isRetry = !!opts.isRetry;
+  lastQuestion = question;
   isStreaming = true;
-  submitBtn.disabled = true;
+  submitBtn.textContent = 'Stop';
+  submitBtn.classList.add('stop');
+  submitBtn.disabled = false;
   const devMode = devModeEl.checked;
 
   const agentDiv = document.createElement('div');
@@ -642,20 +795,76 @@ async function streamAnswer(question) {
   let sqlBlock = null;
   let resultsBlock = null;
   let interpBlock = null;
+  let statusLine = null;  // rotating progress line shown while waiting
   let interpText = '';  // collect full interpretation for history
 
   // Send prior history (not including current question) for context
   const historyToSend = conversationHistory.slice(-6);
 
-  // Add current question to history after capturing what to send
-  conversationHistory.push({ role: "user", content: question });
+  // Add current question to history (skip on retry; it's already recorded)
+  if (!isRetry) conversationHistory.push({ role: "user", content: question });
+
+  // Watchdog: abort if the server sends nothing for too long, so the typing
+  // indicator can never spin forever on a stalled or rate-limited backend.
+  const controller = new AbortController();
+  const STALL_MS = 90000;  // max gap with no data before we give up
+  let stallTimer = setTimeout(() => controller.abort('timeout'), STALL_MS);
+  const resetStall = () => {
+    clearTimeout(stallTimer);
+    stallTimer = setTimeout(() => controller.abort('timeout'), STALL_MS);
+  };
+  activeController = controller;
+  let receivedAnyEvent = false;
+
+  const clearWaiting = () => {
+    typing.remove();
+    if (statusLine) { statusLine.remove(); statusLine = null; }
+  };
+
+  const showError = (text, opts = {}) => {
+    clearWaiting();
+    const errDiv = document.createElement('div');
+    errDiv.className = opts.info ? 'info' : 'error';
+    errDiv.textContent = text;
+    if (opts.retry) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'retry-btn';
+      btn.textContent = 'Try again';
+      btn.onclick = () => { btn.disabled = true; streamAnswer(question, { isRetry: true }); };
+      errDiv.appendChild(document.createElement('br'));
+      errDiv.appendChild(btn);
+    }
+    agentDiv.appendChild(errDiv);
+    scrollBottom();
+  };
 
   try {
     const resp = await fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question, dev_mode: devMode, history: historyToSend }),
+      signal: controller.signal,
     });
+
+    // Guard against non-SSE responses (HTTP errors, JSON error bodies, proxy
+    // pages). Reading these as an SSE stream would yield no `data:` lines and
+    // leave the spinner running indefinitely.
+    const contentType = resp.headers.get('content-type') || '';
+    if (!resp.ok || !contentType.includes('text/event-stream')) {
+      let msg = `The server returned an unexpected response (HTTP ${resp.status}). Please try again.`;
+      try {
+        const data = await resp.json();
+        if (data && data.error) msg = data.error;
+      } catch { /* body wasn't JSON, keep the generic message */ }
+      clearTimeout(stallTimer);
+      activeController = null;
+      showError(msg, { retry: true });
+      resetAskButton();
+      isStreaming = false;
+      questionEl.focus();
+      return;
+    }
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -664,6 +873,7 @@ async function streamAnswer(question) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      resetStall();
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
@@ -674,7 +884,23 @@ async function streamAnswer(question) {
         let event;
         try { event = JSON.parse(line.slice(6)); } catch { continue; }
 
-        typing.remove();
+        // `status` events drive the progress line but keep the typing dots
+        // alive; any other (content) event clears the whole waiting state.
+        if (event.type === 'status') {
+          if (!devMode) {
+            if (!statusLine) {
+              statusLine = document.createElement('div');
+              statusLine.className = 'status-line';
+              agentDiv.insertBefore(statusLine, typing);
+            }
+            statusLine.textContent = event.content;
+            scrollBottom();
+          }
+          continue;
+        }
+
+        receivedAnyEvent = true;
+        clearWaiting();
 
         if (event.type === 'reasoning' && devMode) {
           const rb = document.createElement('div');
@@ -710,10 +936,12 @@ async function streamAnswer(question) {
           const canvas = document.createElement('canvas');
           chartDiv.appendChild(canvas);
           agentDiv.appendChild(chartDiv);
+          // Deliberate civic categorical scale, anchored on the brand blue.
+          // Distinguishable hues without the neon-violet AI-palette tells.
           const colors = [
-            '#1a56db', '#7c3aed', '#059669', '#d97706', '#dc2626',
-            '#2563eb', '#9333ea', '#10b981', '#f59e0b', '#ef4444',
-            '#3b82f6', '#a855f7', '#34d399', '#fbbf24', '#f87171'
+            '#1a56db', '#0e7490', '#b45309', '#15803d', '#7e22ce',
+            '#1e3a8a', '#0f766e', '#9a3412', '#4d7c0f', '#9d174d',
+            '#2563eb', '#0891b2', '#c2410c', '#166534', '#6d28d9'
           ];
           const bgColors = event.chart_type === 'pie'
             ? colors.slice(0, event.labels.length)
@@ -804,15 +1032,21 @@ async function streamAnswer(question) {
           const err = document.createElement('div');
           err.className = 'error';
           err.textContent = event.content;
+          // Most server-side errors (rate limit, transient query failure) are
+          // worth retrying, so offer a one-click Try again.
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          btn.className = 'retry-btn';
+          btn.textContent = 'Try again';
+          btn.onclick = () => { btn.disabled = true; streamAnswer(question, { isRetry: true }); };
+          err.appendChild(document.createElement('br'));
+          err.appendChild(btn);
           agentDiv.appendChild(err);
         }
 
         else if (event.type === 'info') {
           const info = document.createElement('div');
-          info.className = 'error';
-          info.style.background = '#fffbeb';
-          info.style.borderColor = '#fde68a';
-          info.style.color = '#92400e';
+          info.className = 'info';
           info.textContent = event.content;
           agentDiv.appendChild(info);
         }
@@ -821,23 +1055,41 @@ async function streamAnswer(question) {
       }
     }
   } catch (err) {
-    typing.remove();
-    const errDiv = document.createElement('div');
-    errDiv.className = 'error';
-    errDiv.textContent = `Connection error: ${err.message}`;
-    agentDiv.appendChild(errDiv);
+    if (controller.signal.reason === 'user') {
+      // User pressed Stop. Leave a quiet note, no alarming error, no retry.
+      clearWaiting();
+      const note = document.createElement('div');
+      note.className = 'status-line';
+      note.textContent = 'Stopped.';
+      agentDiv.appendChild(note);
+    } else if (err && err.name === 'AbortError') {
+      showError("The server is taking too long to respond. It may be busy or rate-limited; please try again in a minute.", { retry: true });
+    } else {
+      showError(`Something went wrong: ${err && err.message ? err.message : err}. Please try again.`, { retry: true });
+    }
+  } finally {
+    clearTimeout(stallTimer);
+    activeController = null;
+  }
+
+  // Safety net: if the stream ended without producing any renderable content,
+  // remove the spinner and surface a fallback so the UI never hangs silently.
+  clearWaiting();
+  if (!receivedAnyEvent && !agentDiv.querySelector('.error, .info, .status-line')) {
+    showError("No response received from the server. Please try again.", { retry: true });
   }
 
   // Add assistant response to conversation history
   if (interpText) {
     conversationHistory.push({ role: "assistant", content: interpText });
-    // Keep history manageable — last 6 messages (3 exchanges)
+    // Keep history manageable: last 6 messages (3 exchanges)
     if (conversationHistory.length > 6) {
       conversationHistory = conversationHistory.slice(-6);
     }
   }
 
   isStreaming = false;
+  resetAskButton();
   submitBtn.disabled = false;
   questionEl.focus();
 }

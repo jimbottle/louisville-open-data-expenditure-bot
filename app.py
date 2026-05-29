@@ -473,19 +473,35 @@ response_cache: dict[str, list[str]] = _load_cache()
 log.info("Response cache loaded: %d entries", len(response_cache))
 
 
+def _sse_message(event_type: str, content: str) -> StreamingResponse:
+    """Return a one-shot SSE stream carrying a single event + done.
+
+    Used for early-exit cases (bad input, rate limit) so the client always
+    receives a parseable SSE event instead of a plain-JSON body it can't
+    render — a plain-JSON error leaves the UI spinning forever.
+    """
+    def gen():
+        yield f"data: {json.dumps({'type': event_type, 'content': content})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 @app.post("/api/ask")
 async def ask(request: Request):
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return _sse_message("error", "Invalid request. Please refresh the page and try again.")
     question = body.get("question", "").strip()
     dev_mode = body.get("dev_mode", False)
     history = body.get("history", [])  # list of {"role": "user"|"assistant", "content": "..."}
     if not question:
-        return {"error": "No question provided"}
+        return _sse_message("error", "Please enter a question.")
 
     client_ip = request.client.host if request.client else "unknown"
     if not check_ip_rate_limit(client_ip):
         log.warning("IP rate limited: %s", client_ip)
-        return {"error": "Too many requests. Please wait a minute."}
+        return _sse_message("error", "You're sending questions too quickly. Please wait a minute and try again.")
 
     # Serve from cache if question is cached
     cache_key = question.lower().strip()
@@ -526,6 +542,8 @@ async def ask(request: Request):
         reasoning = None
         if dev_mode:
             yield send("log", {"content": "Analyzing question..."})
+        else:
+            yield send("status", {"content": "Reading your question…"})
         t_reason_start = time.time()
         try:
             reasoning, reason_usage, reason_raw = reason_about_query(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history, fallback_client=paid_client)
@@ -556,6 +574,8 @@ async def ask(request: Request):
         # Generate SQL
         if dev_mode:
             yield send("log", {"content": "Generating SQL query..."})
+        else:
+            yield send("status", {"content": "Writing the query…"})
         t_start = time.time()
         try:
             sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history, reasoning=reasoning, fallback_client=paid_client)
@@ -584,7 +604,8 @@ async def ask(request: Request):
                 track_error("sql_gen", str(e)[:200])
                 if dev_mode:
                     yield send("log", {"content": f"SQL generation error: {type(e).__name__}"})
-                yield send("error", {"content": f"SQL generation failed: {e}"})
+                    yield send("debug", {"content": f"SQL gen error detail: {e}"})
+                yield send("error", {"content": "I couldn't turn that into a query. Try rewording it, or ask about spending, salaries, contractors, or capital projects."})
             return
         t_sql = time.time() - t_start
 
@@ -597,6 +618,8 @@ async def ask(request: Request):
         # Execute SQL
         if dev_mode:
             yield send("log", {"content": "Executing query against database..."})
+        else:
+            yield send("status", {"content": "Querying the data…"})
         t_start = time.time()
         try:
             with db_lock:
@@ -626,7 +649,8 @@ async def ask(request: Request):
                     track_error("sql_exec", str(e2)[:200])
                     if dev_mode:
                         yield send("log", {"content": f"Retry also failed: {type(e2).__name__}"})
-                    yield send("error", {"content": f"Query failed after retry: {e2}"})
+                        yield send("debug", {"content": f"SQL exec error detail: {e2}"})
+                    yield send("error", {"content": "That query couldn't be run against the data, even after a retry. Try simplifying or rephrasing your question."})
                 return
         t_exec = time.time() - t_start
 
@@ -716,6 +740,8 @@ Explain in plain text (no markdown) why this likely returned no results based on
 
         if dev_mode:
             yield send("log", {"content": "Interpreting results..."})
+        else:
+            yield send("status", {"content": "Summarizing the results…"})
         t_start = time.time()
         interp_tokens = 0
         stream_timeout = 90  # max seconds for entire interpretation stream
@@ -744,7 +770,8 @@ Explain in plain text (no markdown) why this likely returned no results based on
                 track_error("interpretation", str(e)[:200])
                 if dev_mode:
                     yield send("log", {"content": f"Interpretation error: {type(e).__name__}"})
-                yield send("interpretation", {"content": f"\n\n(Interpretation error: {e})"})
+                    yield send("debug", {"content": f"Interpretation error detail: {e}"})
+                yield send("interpretation", {"content": "\n\n(I ran the query but had trouble summarizing the results. The data above is still accurate.)"})
         track_usage(0, interp_tokens)
         log.info("Request complete — %d chunks streamed", interp_tokens)
 
@@ -785,4 +812,22 @@ Explain in plain text (no markdown) why this likely returned no results based on
             else:
                 log.info("Skipped caching (error or empty): %s", question[:50])
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    def safe_stream():
+        """Wrap event_stream so any unhandled error still terminates the SSE
+        stream with an error + done event. Without this, an exception raised
+        before/between events would close the connection silently and leave
+        the client's typing indicator spinning forever."""
+        gen = event_stream()
+        try:
+            for event in gen:
+                yield event
+        except GeneratorExit:
+            gen.close()
+            raise
+        except Exception as e:
+            log.exception("Unhandled error in /api/ask stream: %s", e)
+            track_error("unhandled", str(e)[:200])
+            yield f"data: {json.dumps({'type': 'error', 'content': f'Something went wrong on the server ({type(e).__name__}). Please try again in a moment.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(safe_stream(), media_type="text/event-stream")
