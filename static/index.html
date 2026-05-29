@@ -1029,19 +1029,9 @@ async function streamAnswer(question, opts = {}) {
         }
 
         else if (event.type === 'error') {
-          const err = document.createElement('div');
-          err.className = 'error';
-          err.textContent = event.content;
           // Most server-side errors (rate limit, transient query failure) are
-          // worth retrying, so offer a one-click Try again.
-          const btn = document.createElement('button');
-          btn.type = 'button';
-          btn.className = 'retry-btn';
-          btn.textContent = 'Try again';
-          btn.onclick = () => { btn.disabled = true; streamAnswer(question, { isRetry: true }); };
-          err.appendChild(document.createElement('br'));
-          err.appendChild(btn);
-          agentDiv.appendChild(err);
+          // worth retrying; showError owns the single Try-again implementation.
+          showError(event.content, { retry: true });
         }
 
         else if (event.type === 'info') {
@@ -1055,14 +1045,17 @@ async function streamAnswer(question, opts = {}) {
       }
     }
   } catch (err) {
-    if (controller.signal.reason === 'user') {
+    // abort(reason) rejects fetch/read with `reason` itself (a plain string
+    // here), not a DOMException named 'AbortError' — so branch on signal.reason.
+    const reason = controller.signal.reason;
+    if (reason === 'user') {
       // User pressed Stop. Leave a quiet note, no alarming error, no retry.
       clearWaiting();
       const note = document.createElement('div');
       note.className = 'status-line';
       note.textContent = 'Stopped.';
       agentDiv.appendChild(note);
-    } else if (err && err.name === 'AbortError') {
+    } else if (reason === 'timeout' || (err && err.name === 'AbortError')) {
       showError("The server is taking too long to respond. It may be busy or rate-limited; please try again in a minute.", { retry: true });
     } else {
       showError(`Something went wrong: ${err && err.message ? err.message : err}. Please try again.`, { retry: true });
@@ -1090,7 +1083,6 @@ async function streamAnswer(question, opts = {}) {
 
   isStreaming = false;
   resetAskButton();
-  submitBtn.disabled = false;
   questionEl.focus();
 }
 </script>
