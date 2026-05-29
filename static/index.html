@@ -1041,14 +1041,18 @@ async function streamAnswer(question, opts = {}) {
         let event;
         try { event = JSON.parse(line.slice(6)); } catch { continue; }
 
-        // `status` events drive the progress line but keep the typing dots
-        // alive; any other (content) event clears the whole waiting state.
+        // `status` events drive the progress line during the initial wait and
+        // keep the typing dots alive. Once any content has arrived (results,
+        // interpretation, ...) the waiting state is torn down, so ignore later
+        // status events (e.g. the backend's "Summarizing…" sent after results) —
+        // re-inserting relative to the now-removed typing node would throw.
         if (event.type === 'status') {
-          if (!devMode) {
+          if (!devMode && !receivedAnyEvent) {
             if (!statusLine) {
               statusLine = document.createElement('div');
               statusLine.className = 'status-line';
-              agentDiv.insertBefore(statusLine, typing);
+              if (typing.parentNode === agentDiv) agentDiv.insertBefore(statusLine, typing);
+              else agentDiv.appendChild(statusLine);
             }
             statusLine.textContent = event.content;
             scrollBottom();
