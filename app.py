@@ -714,6 +714,21 @@ async def ask(request: Request):
                 else:
                     chart_type = "bar"
 
+            # A line axis must be chronologically sortable (we sort by it below).
+            # Numeric (fiscal_year), datetime, or 4-digit-year strings sort right;
+            # a non-numeric string axis (e.g. month NAMES) would mis-sort into a
+            # zig-zag, so downgrade those to a categorical chart instead.
+            if chart_type == "line":
+                col = result_df[label_col]
+                sortable = col.dtype.kind in "iufcM"  # int/uint/float/complex/datetime
+                if not sortable:
+                    try:
+                        sortable = bool(col.dropna().astype(str).str.fullmatch(r"\d{4}").all())
+                    except Exception:
+                        sortable = False
+                if not sortable:
+                    chart_type = "pie" if len(result_df) <= 5 else "bar"
+
             if chart_type and label_col and value_col and len(result_df) >= 2:
                 try:
                     # A line chart implies a time axis, but the query may be
