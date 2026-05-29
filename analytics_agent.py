@@ -266,7 +266,7 @@ def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question
                 model=model,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=512,
+                max_tokens=2048,
             )
         return _call
     fallback_fn = _make_call(fallback_client) if fallback_client else None
@@ -295,7 +295,7 @@ def interpret_results(
                 {"role": "user", "content": user_msg},
             ],
             temperature=0.3,
-            max_tokens=1024,
+            max_tokens=4096,
         )
     response = _call_with_retry(_call)
     return response.choices[0].message.content.strip()
@@ -316,7 +316,7 @@ def interpret_results_stream(
                 model=model,
                 messages=messages,
                 temperature=0.3,
-                max_tokens=1024,
+                max_tokens=4096,
                 stream=True,
             )
         return _call

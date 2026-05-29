@@ -54,10 +54,10 @@ from analytics_agent import (
     interpret_results_stream,
     make_client,
     make_paid_client,
-    reason_about_query,
 )
 from data_model import (
     DATA_DICTIONARY,
+    get_compact_schema_description,
     get_data_dictionary_text,
     get_full_schema_description,
     humanize_text,
@@ -306,7 +306,9 @@ def startup():
     global con, schema_desc, sql_system, interpret_system, client, paid_client
 
     con = load_all_data(DATA_DIR)
-    schema_desc = get_full_schema_description(con)
+    # Compact schema for the system prompt (sent on every LLM call, so token
+    # size matters); the full verbose version is still available at /api/schema.
+    schema_desc = get_compact_schema_description(con)
 
     sql_system = f"""You are a data analytics assistant. You translate natural language questions into SQL queries
 and interpret results. You work with Louisville Metro government open data.
@@ -429,7 +431,10 @@ async def health():
 
 @app.get("/api/schema")
 async def get_schema():
-    return {"schema": schema_desc}
+    # The prompt uses the compact schema; expose both here for debugging.
+    with db_lock:
+        full = get_full_schema_description(con)
+    return {"schema": schema_desc, "schema_full": full}
 
 
 @app.get("/api/dictionary")
@@ -562,39 +567,13 @@ async def ask(request: Request):
                 events.append(send("log", {"content": retry_logs.pop(0)}))
             return events
 
-        # Reasoning step
+        # The separate "reason" LLM call was removed: it re-sent the full system
+        # prompt (~11K tokens) just to produce a small chart hint, roughly 45% of
+        # per-question tokens. Chart type is now inferred from the result shape
+        # (see the chart block); off-topic questions are caught by the non-SQL
+        # check right after generation.
         log.info("Question: %s", question)
         reasoning = None
-        if dev_mode:
-            yield send("log", {"content": "Analyzing question..."})
-        else:
-            yield send("status", {"content": "Reading your question…"})
-        t_reason_start = time.time()
-        try:
-            reasoning, reason_usage, reason_raw = reason_about_query(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history, fallback_client=paid_client)
-            track_usage(reason_usage.get("prompt_tokens", 0), reason_usage.get("completion_tokens", 0))
-            update_limits_from_headers(reason_raw)
-            # Extract and strip CHART suggestion from reasoning text
-            reasoning_display = "\n".join(
-                line for line in reasoning.split("\n")
-                if not line.strip().upper().startswith("CHART:")
-            ).strip()
-            t_reason = time.time() - t_reason_start
-            log.info("Reasoning complete in %.1fs (%d tokens)", t_reason, reason_usage.get("total_tokens", 0))
-            if dev_mode:
-                yield send("reasoning", {"content": reasoning_display})
-                yield send("debug", {"content": f"Reasoning in {t_reason:.1f}s | {reason_usage.get('total_tokens', 0)} tokens | Tier: {get_last_tier_used()}"})
-        except Exception as e:
-            log.warning("Reasoning failed: %s — proceeding without", e)
-            if dev_mode:
-                yield send("log", {"content": f"Reasoning skipped: {type(e).__name__}"})
-
-        # Check if reasoning determined the question can't be answered with data
-        if reasoning and not any(kw in reasoning.lower() for kw in ["query", "table", "select", "join", "filter", "column", "group", "aggregate", "expenditure", "salary", "contractor", "fund"]):
-            # Reasoning didn't mention any data concepts — likely an off-topic question
-            yield send("interpretation", {"content": reasoning_display})
-            yield send("done", {})
-            return
 
         # Generate SQL
         if dev_mode:
@@ -608,14 +587,11 @@ async def ask(request: Request):
             update_limits_from_headers(raw_resp)
             log.info("SQL generated in %.1fs (%d tokens)", time.time() - t_start, sql_usage.get("total_tokens", 0))
 
-            # Check if SQL is actually a query or just a comment
+            # Check if SQL is actually a query or just a comment (off-topic guard)
             sql_stripped = sql.strip().lstrip("-").strip()
             if not sql_stripped or sql_stripped.startswith("The question") or not any(kw in sql.upper() for kw in ["SELECT", "WITH", "SHOW", "DESCRIBE"]):
-                log.info("Model returned non-SQL response, using reasoning as answer")
-                if reasoning:
-                    yield send("interpretation", {"content": reasoning_display})
-                else:
-                    yield send("interpretation", {"content": "This question doesn't appear to be answerable from the Louisville Metro expenditure data. Try asking about government spending, agency budgets, contractor payments, employee salaries, or capital projects."})
+                log.info("Model returned non-SQL response (likely off-topic)")
+                yield send("interpretation", {"content": "This question doesn't appear to be answerable from the Louisville Metro expenditure data. Try asking about government spending, agency budgets, contractor payments, employee salaries, or capital projects."})
                 yield send("done", {})
                 return
         except Exception as e:
@@ -699,20 +675,12 @@ async def ask(request: Request):
 
         # Chart visualization
         if len(result_df) >= 2:
-            # Parse chart suggestion from reasoning
             chart_type = None
-            if reasoning:
-                for line in reasoning.split("\n"):
-                    if line.strip().upper().startswith("CHART:"):
-                        suggested = line.split(":", 1)[1].strip().lower()
-                        if suggested in ("bar", "line", "pie"):
-                            chart_type = suggested
-                        break
-
             cols = result_df.columns.tolist()
             numeric_cols = [c for c in cols if result_df[c].dtype in ("float64", "int64", "Int64", "float32")]
             # Treat year/date/fiscal columns as labels even if numeric
-            label_keywords = ("year", "month", "date", "fiscal", "name", "agency", "payee", "type", "category", "fund")
+            time_keywords = ("year", "fiscal", "month", "date")
+            label_keywords = time_keywords + ("name", "agency", "payee", "type", "category", "fund")
             label_col = None
             value_col = None
             for c in cols:
@@ -730,9 +698,13 @@ async def ask(request: Request):
                         value_col = c
                         break
 
-            # Auto-detect chart type if reasoning didn't suggest — default to bar
-            if chart_type is None and label_col and value_col and len(result_df) <= 50:
-                if len(result_df) <= 5:
+            # Infer chart type from the result shape (replaces the old LLM chart
+            # hint): line for a time series, pie for a few proportional slices,
+            # bar otherwise.
+            if label_col and value_col and len(result_df) <= 50:
+                if any(kw in label_col.lower() for kw in time_keywords):
+                    chart_type = "line"
+                elif len(result_df) <= 5:
                     chart_type = "pie"
                 else:
                     chart_type = "bar"

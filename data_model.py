@@ -651,6 +651,70 @@ def get_full_schema_description(con: duckdb.DuckDBPyConnection) -> str:
     return "\n".join(lines)
 
 
+def get_compact_schema_description(con: duckdb.DuckDBPyConnection) -> str:
+    """Token-efficient schema for the LLM system prompt.
+
+    Same facts the model needs to write correct SQL, in a compact format:
+    one line per column (name + short type + curated doc), enum values listed
+    ONLY for low-cardinality categoricals (the ones the model filters on), and
+    no per-column sample dumps or numeric ranges (the bulk of the verbose
+    version's tokens, and the least useful for query generation). Roughly a
+    third the size of get_full_schema_description with no loss of the
+    filtering/joining facts that drive accuracy.
+    """
+    tables = [t[0] for t in con.execute("SHOW TABLES").fetchall()]
+    out = []
+    for table in tables:
+        # Skip internal helper tables (e.g. _payee_to_canonical); the model
+        # should never query them, and they only add prompt tokens.
+        if table.startswith("_"):
+            continue
+        dd = DATA_DICTIONARY.get(table, {})
+        desc = dd.get("description", "")
+        col_docs = dd.get("columns", {})
+        joins = dd.get("joins", "")
+        row_count = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        columns = con.execute(f"DESCRIBE {table}").fetchall()
+
+        header = f"## {table} ({row_count:,} rows)"
+        if desc:
+            header += f": {desc}"
+        out.append(header)
+        if joins:
+            out.append(f"joins: {joins}")
+
+        for col_name, col_type, *_ in columns:
+            short_type = col_type.split("(")[0].lower()
+            line = f"- {col_name} {short_type}"
+            if "VARCHAR" in col_type.upper():
+                try:
+                    n_distinct = con.execute(
+                        f"SELECT COUNT(DISTINCT {col_name}) FROM {table}"
+                    ).fetchone()[0]
+                    # Enumerate only genuinely categorical columns the model
+                    # filters on; high-cardinality ones (payees, etc.) are handled
+                    # by the canonical-column rules. Cap the list so a ~12-value
+                    # column doesn't bloat the prompt.
+                    if 0 < n_distinct <= 12:
+                        vals = [
+                            str(r[0]) for r in con.execute(
+                                f"SELECT DISTINCT {col_name} FROM {table} "
+                                f"WHERE {col_name} IS NOT NULL LIMIT 12"
+                            ).fetchall()
+                        ]
+                        if vals:
+                            line += " {" + ", ".join(vals) + "}"
+                except Exception:
+                    pass
+            doc = col_docs.get(col_name, "")
+            if doc:
+                line += f" — {doc}"
+            out.append(line)
+        out.append("")
+
+    return "\n".join(out)
+
+
 def humanize_text(text: str, table: str = "expenditures") -> str:
     """Replace column names with semantic labels in display text.
     Falls back to converting snake_case to Title Case for unknown columns."""
