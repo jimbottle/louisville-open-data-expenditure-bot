@@ -162,6 +162,7 @@
   .message {
     max-width: 85%;
     line-height: 1.5;
+    overflow-wrap: break-word;  /* long unbroken strings (URLs, IDs) wrap, not overflow */
   }
 
   .message.user {
@@ -725,7 +726,7 @@
 
 <div id="input-bar">
   <form onsubmit="handleSubmit(event)">
-    <input type="text" id="question" placeholder="Enter your question about Louisville Metro Government expenditure here..." aria-label="Ask a question about Louisville Metro data" autocomplete="off" />
+    <input type="text" id="question" placeholder="Enter your question about Louisville Metro Government expenditure here..." aria-label="Ask a question about Louisville Metro data" maxlength="500" autocomplete="off" />
     <button type="submit" id="submit-btn">Ask Lou</button>
     <span class="disclaimer">Proof of concept; expect hiccups. AI-generated, so verify results before you rely on them.</span>
   </form>
@@ -772,6 +773,9 @@ function stopStreaming() {
 function newChat() {
   // Clear the conversation and return to the starter screen (which doubles as
   // the "what can I ask" help surface once the opening chips have been used).
+  // Guard the wipe: it's destructive and there's no persistence to recover from.
+  const hasConversation = messagesEl.querySelector('.message');
+  if (hasConversation && !confirm('Start a new chat? This clears the current conversation.')) return;
   if (isStreaming) stopStreaming();
   conversationHistory = [];
   messagesEl.querySelectorAll('.message').forEach(el => el.remove());
@@ -861,7 +865,9 @@ async function streamAnswer(question, opts = {}) {
       btn.type = 'button';
       btn.className = 'retry-btn';
       btn.textContent = 'Try again';
-      btn.onclick = () => { btn.disabled = true; streamAnswer(question, { isRetry: true }); };
+      // Drop the failed attempt so a successful retry reads as one clean answer,
+      // not "error, then answer" stacked in the transcript.
+      btn.onclick = () => { agentDiv.remove(); streamAnswer(question, { isRetry: true }); };
       errDiv.appendChild(document.createElement('br'));
       errDiv.appendChild(btn);
     }
