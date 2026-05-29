@@ -90,7 +90,7 @@ docker rename louisville-bot louisville-bot-prev
 docker stop louisville-bot-prev
 docker run -d --name louisville-bot --restart unless-stopped -p 8000:8000 \
   -v louisville-data:/data:ro -v louisville-state:/state -v louisville-logs:/logs \
-  -e CEREBRAS_API_KEY=... -e CEREBRAS_PAID_API_KEY=... -e MODEL=qwen-3-235b-a22b-instruct-2507 \
+  -e CEREBRAS_API_KEY=... -e CEREBRAS_PAID_API_KEY=... -e MODEL=gpt-oss-120b \
   -e LLM_BASE_URL=https://api.cerebras.ai/v1 -e DATA_DIR=/data -e STATS_DIR=/state -e LOG_DIR=/logs \
   --health-cmd "curl -sf --max-time 5 http://localhost:8000/api/health || exit 1" \
   --health-interval 30s --health-start-period 120s --health-retries 3 \
@@ -110,6 +110,17 @@ A deploy is not "done" until it is tested **end-to-end through the production UR
 Persistent state lives in Docker named volumes, not the image: `louisville-data` (CSVs, read-only at `/data`), `louisville-state` (`.stats.json`, response cache), `louisville-logs` (rotating logs). Env (incl. the Cerebras keys) is set on the container, sourced from the gitignored `.env` locally; the keys are not in git.
 
 The repo's `docker-compose.yml` and `deploy.sh` describe an **older** flow (bind-mounted `./data`, `DATA_DIR=/app/data`, SSH rsync) that does **not** match the current production container (named volumes at `/data`,`/state`,`/logs`; deployed via the MCP Docker flow above). Trust the running container's config over those files.
+
+### LLM model (`MODEL` env)
+
+Currently `gpt-oss-120b` on Cerebras. **Cerebras deprecates models without notice** — the bot previously ran `qwen-3-235b-a22b-instruct-2507`, which started returning `404 model_not_found` on every live call (cached starter answers still worked, which masked it). If live queries suddenly fail, list the account's current models and switch:
+
+```bash
+curl -s https://api.cerebras.ai/v1/models -H "Authorization: Bearer $CEREBRAS_API_KEY"   # pick a valid id
+# then recreate the container with the new -e MODEL=... (no image rebuild needed)
+```
+
+`gpt-oss-120b` is a reasoning model: its chain-of-thought comes back in a separate `reasoning` field, the final answer is in `message.content`/`delta.content` (what the app reads), so reasoning never pollutes output as long as `max_tokens` leaves room after the reasoning tokens.
 
 ## Build & Test
 

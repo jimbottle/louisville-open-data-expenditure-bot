@@ -67,7 +67,7 @@ from data_model import (
 # ── Config ───────────────────────────────────────────────────────────────────
 
 DATA_DIR = os.environ.get("DATA_DIR", "data")
-MODEL = os.environ.get("MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("MODEL", "gpt-oss-120b")  # Cerebras model; override via MODEL env
 
 RATE_LIMIT_MSG = "Evan was too cheap to use anything other than a free tier and we just hit that free tier's limit. Try again in a few minutes."
 
@@ -272,6 +272,31 @@ def get_usage_summary() -> dict:
 def is_rate_limit_error(e: Exception) -> bool:
     """Check if an exception is a rate limit error (after retries exhausted)."""
     return isinstance(e, openai.RateLimitError) or "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e)
+
+
+def is_service_error(e: Exception) -> bool:
+    """LLM service/config failure that the user cannot fix by rewording.
+
+    Examples: the configured model was removed or is inaccessible (404
+    model_not_found), bad/expired API key (401/403), the provider is down or
+    unreachable (5xx / connection / timeout). These are problems on our end, so
+    we should say so plainly rather than blame the question or imply a rate limit.
+    """
+    if isinstance(e, (
+        openai.AuthenticationError, openai.PermissionDeniedError,
+        openai.NotFoundError, openai.APIConnectionError,
+        openai.APITimeoutError, openai.InternalServerError,
+    )):
+        return True
+    s = str(e).lower()
+    return any(t in s for t in ("model_not_found", "does not exist", "not_found_error", "authentication"))
+
+
+# Shown for is_service_error cases: honest about it being our problem, no futile "reword".
+SERVICE_ERROR_MSG = (
+    "Lou is having trouble reaching its language model right now. This is a problem on "
+    "our end, not your question, so please try again in a little while."
+)
 
 
 # ── Startup ──────────────────────────────────────────────────────────────────
@@ -501,7 +526,7 @@ async def ask(request: Request):
     client_ip = request.client.host if request.client else "unknown"
     if not check_ip_rate_limit(client_ip):
         log.warning("IP rate limited: %s", client_ip)
-        return _sse_message("error", "You're sending questions too quickly. Please wait a minute and try again.")
+        return _sse_message("error", "That's a lot of questions in a short time. Please wait a few seconds, then ask again.")
 
     # Serve from cache if question is cached
     cache_key = question.lower().strip()
@@ -600,6 +625,12 @@ async def ask(request: Request):
                 if dev_mode:
                     yield send("log", {"content": "Rate limit hit during SQL generation. Retries exhausted."})
                 yield send("error", {"content": RATE_LIMIT_MSG})
+            elif is_service_error(e):
+                track_error("service", str(e)[:200])
+                if dev_mode:
+                    yield send("log", {"content": f"Service error: {type(e).__name__}"})
+                    yield send("debug", {"content": f"LLM service error detail: {e}"})
+                yield send("error", {"content": SERVICE_ERROR_MSG})
             else:
                 track_error("sql_gen", str(e)[:200])
                 if dev_mode:
@@ -645,6 +676,12 @@ async def ask(request: Request):
                     if dev_mode:
                         yield send("log", {"content": "Rate limit hit during SQL retry."})
                     yield send("error", {"content": RATE_LIMIT_MSG})
+                elif is_service_error(e2):
+                    track_error("service", str(e2)[:200])
+                    if dev_mode:
+                        yield send("log", {"content": f"Service error during retry: {type(e2).__name__}"})
+                        yield send("debug", {"content": f"LLM service error detail: {e2}"})
+                    yield send("error", {"content": SERVICE_ERROR_MSG})
                 else:
                     track_error("sql_exec", str(e2)[:200])
                     if dev_mode:
@@ -766,6 +803,12 @@ Explain in plain text (no markdown) why this likely returned no results based on
                 if dev_mode:
                     yield send("log", {"content": "Rate limit hit during interpretation. Retries exhausted."})
                 yield send("error", {"content": RATE_LIMIT_MSG})
+            elif is_service_error(e):
+                track_error("service", str(e)[:200])
+                if dev_mode:
+                    yield send("log", {"content": f"Service error during interpretation: {type(e).__name__}"})
+                    yield send("debug", {"content": f"LLM service error detail: {e}"})
+                yield send("error", {"content": SERVICE_ERROR_MSG})
             else:
                 track_error("interpretation", str(e)[:200])
                 if dev_mode:
