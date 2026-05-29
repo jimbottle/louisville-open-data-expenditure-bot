@@ -96,9 +96,16 @@ docker run -d --name louisville-bot --restart unless-stopped -p 8000:8000 \
   --health-interval 30s --health-start-period 120s --health-retries 3 \
   louisville-bot:new
 docker tag louisville-bot:new louisville-bot:latest
-# 4. Verify at https://louisville.raylytics.io/ (NOT just the LAN IP)
 # Rollback: docker stop louisville-bot; docker rm louisville-bot; docker rename louisville-bot-prev louisville-bot; docker start louisville-bot
 ```
+
+### Deploy verification (MANDATORY — do not skip)
+
+A deploy is not "done" until it is tested **end-to-end through the production URL**, not just by loading the page. Loading `/` proves static files; it does NOT prove the API works (the edge can block the API path while serving the page fine — exactly what the Cloudflare `/api` WAF block did).
+
+1. Container reachable: `curl -sf http://localhost:8000/api/health` on the server returns `ok`.
+2. **End-to-end through production:** `curl -i -X POST https://louisville.raylytics.io/<ask-path> -H 'Content-Type: application/json' --data '{"question":""}'` must return **HTTP 200** and `content-type: text/event-stream` (an empty question short-circuits to an SSE error with no LLM call, so it's a free, safe probe). A `403`/`5xx` here means the edge or app is blocking the API, fix before calling the deploy good.
+3. One real question in the browser at https://louisville.raylytics.io/ returns an answer.
 
 Persistent state lives in Docker named volumes, not the image: `louisville-data` (CSVs, read-only at `/data`), `louisville-state` (`.stats.json`, response cache), `louisville-logs` (rotating logs). Env (incl. the Cerebras keys) is set on the container, sourced from the gitignored `.env` locally; the keys are not in git.
 
