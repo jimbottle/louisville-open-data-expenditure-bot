@@ -404,7 +404,8 @@
     max-width: none;
   }
 
-  .starters button {
+  .starters button,
+  #examples-tray button {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 20px;
@@ -415,9 +416,41 @@
     transition: border-color 0.15s, background 0.15s;
   }
 
-  .starters button:hover {
+  .starters button:hover,
+  #examples-tray button:hover {
     border-color: var(--primary);
     background: var(--primary-light);
+  }
+
+  /* Dismissible suggestions tray, recovers the starter prompts after the
+     opening chips are gone. Sits above the input bar; doesn't disturb scroll. */
+  #examples-tray {
+    flex-shrink: 0;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  #examples-tray[hidden] {
+    display: none;
+  }
+
+  #examples-tray .tray-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  #examples-tray .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
   }
 
   .about-wrapper {
@@ -669,6 +702,7 @@
     <div class="subtitle">Louisville Metro open data, in plain English</div>
   </div>
   <div class="header-right">
+    <button type="button" class="header-btn" id="examples-btn" hidden onclick="toggleExamples()" aria-expanded="false" aria-controls="examples-tray">Examples</button>
     <button type="button" class="header-btn" id="newchat-btn" hidden onclick="newChat()">New chat</button>
     <label class="dev-toggle" title="Show SQL queries and debug info">
       <input type="checkbox" id="dev-mode" />
@@ -724,6 +758,17 @@
   </div>
 </main>
 
+<div id="examples-tray" hidden aria-label="Example questions">
+  <span class="tray-label">Try asking</span>
+  <div class="chips">
+    <button onclick="askQuestion('How has total annual spending changed from 2008 to 2026?')">How has spending changed over time?</button>
+    <button onclick="askQuestion('Which agencies have spent the most money across all fiscal years?')">Which agencies spend the most?</button>
+    <button onclick="askQuestion('How much does the mayor make? What about the police chief?')">What do top officials earn?</button>
+    <button onclick="askQuestion('Who are the registered agents for the top 10 contractors by total spend?')">Who runs the top contractors?</button>
+    <button onclick="askQuestion('What are the largest capital projects and how much was allocated to each?')">Largest capital projects</button>
+  </div>
+</div>
+
 <div id="input-bar">
   <form onsubmit="handleSubmit(event)">
     <input type="text" id="question" placeholder="Enter your question about Louisville Metro Government expenditure here..." aria-label="Ask a question about Louisville Metro data" maxlength="500" autocomplete="off" />
@@ -740,6 +785,8 @@ const submitBtn = document.getElementById('submit-btn');
 const devModeEl = document.getElementById('dev-mode');
 
 const newChatBtn = document.getElementById('newchat-btn');
+const examplesBtn = document.getElementById('examples-btn');
+const examplesTray = document.getElementById('examples-tray');
 
 let isStreaming = false;
 let conversationHistory = [];  // [{role: "user"|"assistant", content: "..."}]
@@ -761,9 +808,25 @@ function handleSubmit(e) {
 
   startersEl.style.display = 'none';
   newChatBtn.hidden = false;
+  examplesBtn.hidden = false;  // guidance stays reachable after the opening chips are gone
+  hideExamples();
   addUserMessage(q);
   questionEl.value = '';
   streamAnswer(q);
+}
+
+function toggleExamples() {
+  examplesTray.hidden ? showExamples() : hideExamples();
+}
+
+function showExamples() {
+  examplesTray.hidden = false;
+  examplesBtn.setAttribute('aria-expanded', 'true');
+}
+
+function hideExamples() {
+  examplesTray.hidden = true;
+  examplesBtn.setAttribute('aria-expanded', 'false');
 }
 
 function stopStreaming() {
@@ -781,6 +844,8 @@ function newChat() {
   messagesEl.querySelectorAll('.message').forEach(el => el.remove());
   startersEl.style.display = '';
   newChatBtn.hidden = true;
+  examplesBtn.hidden = true;  // the starter hero already shows the examples
+  hideExamples();
   questionEl.focus();
 }
 
