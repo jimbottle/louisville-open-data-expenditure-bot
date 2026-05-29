@@ -463,6 +463,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    position: relative;
     width: 22px;
     height: 22px;
     border-radius: 50%;
@@ -690,6 +691,31 @@
     .agent .interpretation {
       padding: 10px 12px;
       font-size: 13px;
+    }
+  }
+
+  /* Touch input: meet the 44px minimum target size (WCAG 2.5.5). Scoped to
+     coarse pointers so the mouse/desktop UI keeps its tighter proportions.
+     Placed after the width breakpoint so it wins where both apply. */
+  @media (pointer: coarse) {
+    .starters button,
+    #examples-tray button,
+    #input-bar button,
+    #input-bar input,
+    .header-btn {
+      min-height: 44px;
+    }
+
+    .starters .chips,
+    #examples-tray .chips {
+      gap: 10px;
+    }
+
+    /* Expand the small "i" icon's tap area to 44px without enlarging the circle. */
+    .about-icon::before {
+      content: '';
+      position: absolute;
+      inset: -11px;
     }
   }
 </style>
