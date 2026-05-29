@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "louisville_open_data",
+  "project_id": "122b99a6-1184-4add-bc22-d3249fd21f81"
+}
