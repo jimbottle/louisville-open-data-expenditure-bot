@@ -682,42 +682,61 @@ async def ask(request: Request):
         if len(result_df) >= 2:
             chart_type = None
             cols = result_df.columns.tolist()
-            numeric_cols = [c for c in cols if result_df[c].dtype in ("float64", "int64", "Int64", "float32")]
-            # Treat year/date/fiscal columns as labels even if numeric
+            NUMERIC = ("float64", "int64", "Int64", "float32", "int32", "Float64")
             time_keywords = ("year", "fiscal", "month", "date")
             label_keywords = time_keywords + ("name", "agency", "payee", "type", "category", "fund")
-            label_col = None
-            value_col = None
-            for c in cols:
-                if any(kw in c.lower() for kw in label_keywords) and label_col is None:
-                    label_col = c
-                elif c in numeric_cols and value_col is None and c != label_col:
-                    value_col = c
+            n_rows = len(result_df)
 
-            # Fall back: first col = labels, second col = values
-            if label_col is None and len(cols) >= 2:
-                label_col = cols[0]
-            if value_col is None:
-                for c in numeric_cols:
-                    if c != label_col:
-                        value_col = c
-                        break
+            def ndistinct(c):
+                try:
+                    return int(result_df[c].nunique(dropna=True))
+                except Exception:
+                    return 0
+
+            # Value (y): a numeric measure that actually varies and isn't a
+            # year/time id. Prefer the last such column (aggregates like SUM(...)
+            # are conventionally last in the SELECT).
+            value_cands = [
+                c for c in cols
+                if str(result_df[c].dtype) in NUMERIC and ndistinct(c) > 1
+                and not any(kw in c.lower() for kw in time_keywords)
+            ]
+            value_col = value_cands[-1] if value_cands else None
+
+            # Label (x): the dimension that varies most. A constant column (e.g.
+            # fiscal_year = 2025 for a "top 5 in 2025" result) is never a useful
+            # axis, so skip anything with <=1 distinct value. Prefer categorical
+            # or time-named columns; fall back to any varying non-value column.
+            label_col = None
+            best = 0
+            for c in cols:
+                if c == value_col or ndistinct(c) <= 1:
+                    continue
+                is_dim = result_df[c].dtype == object or any(kw in c.lower() for kw in label_keywords)
+                if is_dim and ndistinct(c) > best:
+                    best = ndistinct(c)
+                    label_col = c
+            if label_col is None:
+                label_col = next((c for c in cols if c != value_col and ndistinct(c) > 1), None)
 
             # Infer chart type from the result shape (replaces the old LLM chart
-            # hint): line for a time series, pie for a few proportional slices,
-            # bar otherwise.
-            if label_col and value_col and len(result_df) <= 50:
-                if any(kw in label_col.lower() for kw in time_keywords):
+            # hint): line only for a genuine time series (time axis with one row
+            # per distinct, sortable time point), pie for a few proportional
+            # slices, bar otherwise.
+            if label_col and value_col and 2 <= n_rows <= 50:
+                is_time = any(kw in label_col.lower() for kw in time_keywords)
+                clean_series = ndistinct(label_col) == n_rows  # no repeated x labels
+                if is_time and clean_series:
                     chart_type = "line"
-                elif len(result_df) <= 5:
+                elif n_rows <= 5:
                     chart_type = "pie"
                 else:
                     chart_type = "bar"
 
-            # A line axis must be chronologically sortable (we sort by it below).
-            # Numeric (fiscal_year), datetime, or 4-digit-year strings sort right;
-            # a non-numeric string axis (e.g. month NAMES) would mis-sort into a
-            # zig-zag, so downgrade those to a categorical chart instead.
+            # A line axis must be chronologically sortable (we sort by it below):
+            # numeric (fiscal_year), datetime, or 4-digit-year strings. A
+            # non-numeric string axis (e.g. month NAMES) would mis-sort, so
+            # downgrade those to a categorical chart instead.
             if chart_type == "line":
                 col = result_df[label_col]
                 sortable = col.dtype.kind in "iufcM"  # int/uint/float/complex/datetime
@@ -727,7 +746,7 @@ async def ask(request: Request):
                     except Exception:
                         sortable = False
                 if not sortable:
-                    chart_type = "pie" if len(result_df) <= 5 else "bar"
+                    chart_type = "pie" if n_rows <= 5 else "bar"
 
             if chart_type and label_col and value_col and len(result_df) >= 2:
                 try:
