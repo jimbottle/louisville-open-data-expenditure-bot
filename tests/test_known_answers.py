@@ -1,16 +1,25 @@
 """
 Known-answer test suite for Louisville expenditure bot.
 
+These pin down values and invariants that should hold for the loaded dataset.
+When the underlying data is refreshed, exact-value assertions (counts, named
+top entries) may legitimately change and should be updated to match; the
+invariant-style assertions (ranges, "no nulls", subset relationships) are meant
+to survive routine refreshes.
+
 Run: python -m pytest tests/test_known_answers.py -v
 """
 
 import pytest
 from data_model import load_all_data
 
+
 @pytest.fixture(scope="module")
 def con():
     return load_all_data("data")
 
+
+# ── Agency spend ──────────────────────────────────────────────────────────────
 
 def test_top_agency_is_public_works(con):
     r = con.execute("SELECT agency FROM summary_agency_spend LIMIT 1").fetchone()
@@ -22,9 +31,11 @@ def test_top_agency_spend_over_1b(con):
     assert r[0] > 1_000_000_000
 
 
+# ── Annual spend ──────────────────────────────────────────────────────────────
+
 def test_19_fiscal_years(con):
     r = con.execute("SELECT COUNT(*) FROM summary_annual_spend").fetchone()
-    assert r[0] == 19
+    assert r[0] == 19  # FY2008 through FY2026 inclusive
 
 
 def test_annual_spend_range(con):
@@ -38,27 +49,26 @@ def test_peak_spending_year_is_2025(con):
     assert r[0] == 2025
 
 
+def test_2026_is_partial_year(con):
+    """FY2026 is still in progress, so its total must trail the last complete year."""
+    rows = dict(con.execute(
+        "SELECT fiscal_year, total_spend FROM summary_annual_spend WHERE fiscal_year IN (2025, 2026)"
+    ).fetchall())
+    assert rows[2026] < rows[2025]
+
+
+# ── Largest payments / data artifacts ─────────────────────────────────────────
+
 def test_largest_payment_not_susteen(con):
-    """SUSTEEN $224M was a data artifact — it should not appear in largest payments."""
-    r = con.execute("SELECT payee FROM summary_largest_payments LIMIT 1").fetchone()
-    assert r[0] != "SUSTEEN INC"
+    """SUSTEEN's $224M entry is a data artifact and must not surface in largest payments."""
+    rows = con.execute("SELECT payee FROM summary_largest_payments LIMIT 50").fetchall()
+    assert all("SUSTEEN" not in (p[0] or "").upper() for p in rows)
 
 
 def test_largest_payment_is_arena_authority(con):
     r = con.execute("SELECT payee, invoice_amount FROM summary_largest_payments LIMIT 1").fetchone()
-    assert r[0] == "LOUISVILLE ARENA AUTHORITY INC"
+    assert r[0] == "Louisville Arena Authority Inc"  # canonicalized (was uppercase pre-canonicalization)
     assert r[1] == 12_000_000.00
-
-
-def test_top_salary_is_police_chief(con):
-    r = con.execute("SELECT job_title FROM summary_top_salaries LIMIT 1").fetchone()
-    assert r[0] == "Police Chief"
-
-
-def test_expenditure_types_exist(con):
-    r = con.execute("SELECT DISTINCT expenditure_type FROM summary_expenditure_type").fetchall()
-    types = {row[0] for row in r}
-    assert "Operating" in types or "Metro Government Operations" in types
 
 
 def test_data_artifacts_flagged(con):
@@ -66,11 +76,88 @@ def test_data_artifacts_flagged(con):
     assert r[0] == 2  # the SUSTEEN pair
 
 
+def test_offsetting_rows_flagged(con):
+    """Offsetting rows are flagged, and the artifact rows are a subset of them."""
+    offsetting = con.execute("SELECT COUNT(*) FROM expenditures WHERE is_offsetting = TRUE").fetchone()[0]
+    artifacts = con.execute("SELECT COUNT(*) FROM expenditures WHERE is_data_artifact = TRUE").fetchone()[0]
+    assert offsetting > 0
+    assert offsetting >= artifacts
+
+
+# ── Salaries ──────────────────────────────────────────────────────────────────
+
+def test_top_salary_is_police_chief(con):
+    r = con.execute("SELECT job_title FROM summary_top_salaries LIMIT 1").fetchone()
+    assert r[0] == "Police Chief"
+
+
+# ── Expenditure types ─────────────────────────────────────────────────────────
+
+def test_expenditure_types_exist(con):
+    r = con.execute("SELECT DISTINCT expenditure_type FROM summary_expenditure_type").fetchall()
+    types = {row[0] for row in r}
+    assert "Operating" in types or "Metro Government Operations" in types
+
+
+# ── Canonicalization ──────────────────────────────────────────────────────────
+
+def test_canonical_columns_exist(con):
+    cols = {c[0] for c in con.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = 'expenditures'"
+    ).fetchall()}
+    assert {"agency_canonical", "payee_canonical"}.issubset(cols)
+
+
 def test_agency_normalization_no_duplicates(con):
     """Public Works should be one canonical entry, not two."""
     r = con.execute("SELECT COUNT(*) FROM summary_agency_spend WHERE agency LIKE '%Public Works%'").fetchone()
     assert r[0] == 1
 
+
+def test_agency_canonicalization_collapses_variants(con):
+    """Canonicalization must collapse the raw agency-name variants into fewer names."""
+    r = con.execute(
+        "SELECT COUNT(DISTINCT agency_canonical), COUNT(DISTINCT agency) FROM expenditures"
+    ).fetchone()
+    assert r[0] < r[1]
+
+
+def test_payee_canonicalization_lge(con):
+    """LG&E / Louisville Gas & Electric variants map to a single canonical name."""
+    rows = con.execute(
+        "SELECT DISTINCT payee_canonical FROM expenditures "
+        "WHERE UPPER(payee) LIKE '%LG&E%' OR UPPER(payee) LIKE 'LOUISVILLE GAS%'"
+    ).fetchall()
+    assert [r[0] for r in rows] == ["Louisville Gas & Electric Company"]
+
+
+def test_payee_canonicalization_cdw(con):
+    """All CDW GOVT variants map to CDW LLC."""
+    rows = con.execute(
+        "SELECT DISTINCT payee_canonical FROM expenditures WHERE UPPER(payee) LIKE 'CDW%'"
+    ).fetchall()
+    assert [r[0] for r in rows] == ["CDW LLC"]
+
+
+# ── Contractors ───────────────────────────────────────────────────────────────
+
+def test_top_contractors_have_agents_and_spend(con):
+    """summary_top_contractors is pre-filtered to rows with a registered agent and a spend total."""
+    r = con.execute(
+        "SELECT COUNT(*) FROM summary_top_contractors "
+        "WHERE sos_registered_agent IS NULL OR total_spend IS NULL"
+    ).fetchone()
+    assert r[0] == 0
+
+
+def test_top_contractor_is_lge(con):
+    r = con.execute(
+        "SELECT payee FROM summary_top_contractors ORDER BY total_spend DESC LIMIT 1"
+    ).fetchone()
+    assert r[0] == "Louisville Gas & Electric Company"
+
+
+# ── Volume ────────────────────────────────────────────────────────────────────
 
 def test_total_expenditure_rows(con):
     r = con.execute("SELECT COUNT(*) FROM expenditures").fetchone()
