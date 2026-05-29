@@ -285,6 +285,18 @@
     cursor: default;
   }
 
+  /* Neutral variant for non-error recovery (e.g. "Ask again" after a user stop). */
+  .agent .retry-btn.neutral {
+    border-color: var(--border);
+    color: var(--text-muted);
+  }
+
+  .agent .retry-btn.neutral:hover {
+    background: var(--primary-light);
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
   /* Single rotating progress line shown above the typing dots while waiting. */
   .agent .status-line {
     font-size: 12.5px;
@@ -743,31 +755,7 @@
   <div class="starters" id="starters">
     <h2>Ask me about Louisville Metro Government Expenditure. I might have some answers.</h2>
     <p>Natural language queries run against Louisville Metro expenditure, salary, capital projects, contractor, and staffing data.</p>
-    <div class="chip-groups">
-      <div class="chip-group">
-        <span class="chip-group-label">Spending</span>
-        <div class="chips">
-          <button onclick="askQuestion('How has total annual spending changed from 2008 to 2026?')">How has spending changed over time?</button>
-          <button onclick="askQuestion('Which agencies have spent the most money across all fiscal years?')">Which agencies spend the most?</button>
-          <button onclick="askQuestion('Give me a year-over-year breakdown of LMPD spending')">LMPD spending by year</button>
-        </div>
-      </div>
-      <div class="chip-group">
-        <span class="chip-group-label">People &amp; pay</span>
-        <div class="chips">
-          <button onclick="askQuestion('How much does the mayor make? What about the police chief?')">What do top officials earn?</button>
-          <button onclick="askQuestion('What are the highest paid positions in Louisville Metro government?')">Highest paid positions</button>
-        </div>
-      </div>
-      <div class="chip-group">
-        <span class="chip-group-label">Contracts &amp; projects</span>
-        <div class="chips">
-          <button onclick="askQuestion('Who are the registered agents for the top 10 contractors by total spend?')">Who runs the top contractors?</button>
-          <button onclick="askQuestion('What are the largest capital projects and how much was allocated to each?')">Largest capital projects</button>
-          <button onclick="askQuestion('How much grant funding has Louisville received and from which sources?')">Grant funding breakdown</button>
-        </div>
-      </div>
-    </div>
+    <div class="chip-groups" id="starter-groups"></div>
     <div class="about-wrapper">
       <span class="about-icon" tabindex="0" role="button" aria-label="About this data" onclick="toggleAbout(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAbout(this);}">i</span>
       <div class="about-tooltip">
@@ -787,13 +775,7 @@
 
 <div id="examples-tray" hidden aria-label="Example questions">
   <span class="tray-label">Try asking</span>
-  <div class="chips">
-    <button onclick="askQuestion('How has total annual spending changed from 2008 to 2026?')">How has spending changed over time?</button>
-    <button onclick="askQuestion('Which agencies have spent the most money across all fiscal years?')">Which agencies spend the most?</button>
-    <button onclick="askQuestion('How much does the mayor make? What about the police chief?')">What do top officials earn?</button>
-    <button onclick="askQuestion('Who are the registered agents for the top 10 contractors by total spend?')">Who runs the top contractors?</button>
-    <button onclick="askQuestion('What are the largest capital projects and how much was allocated to each?')">Largest capital projects</button>
-  </div>
+  <div class="chips" id="tray-chips"></div>
 </div>
 
 <div id="input-bar">
@@ -819,6 +801,53 @@ let isStreaming = false;
 let conversationHistory = [];  // [{role: "user"|"assistant", content: "..."}]
 let activeController = null;    // abort handle for the in-flight request
 let lastQuestion = '';          // backs the Retry affordance
+
+// Single source of truth for example prompts: [label, question]. Rendered into
+// both the starter screen (grouped) and the Examples tray (flat), so they can't drift.
+const STARTER_GROUPS = [
+  { label: 'Spending', chips: [
+    ['How has spending changed over time?', 'How has total annual spending changed from 2008 to 2026?'],
+    ['Which agencies spend the most?', 'Which agencies have spent the most money across all fiscal years?'],
+    ['LMPD spending by year', 'Give me a year-over-year breakdown of LMPD spending'],
+  ] },
+  { label: 'People & pay', chips: [
+    ['What do top officials earn?', 'How much does the mayor make? What about the police chief?'],
+    ['Highest paid positions', 'What are the highest paid positions in Louisville Metro government?'],
+  ] },
+  { label: 'Contracts & projects', chips: [
+    ['Who runs the top contractors?', 'Who are the registered agents for the top 10 contractors by total spend?'],
+    ['Largest capital projects', 'What are the largest capital projects and how much was allocated to each?'],
+    ['Grant funding breakdown', 'How much grant funding has Louisville received and from which sources?'],
+  ] },
+];
+
+function chipButton(label, question) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = label;
+  b.addEventListener('click', () => askQuestion(question));
+  return b;
+}
+
+function renderChips() {
+  const groupsEl = document.getElementById('starter-groups');
+  const trayEl = document.getElementById('tray-chips');
+  for (const group of STARTER_GROUPS) {
+    const groupEl = document.createElement('div');
+    groupEl.className = 'chip-group';
+    const label = document.createElement('span');
+    label.className = 'chip-group-label';
+    label.textContent = group.label;
+    const chips = document.createElement('div');
+    chips.className = 'chips';
+    for (const [lbl, q] of group.chips) {
+      chips.appendChild(chipButton(lbl, q));
+      trayEl.appendChild(chipButton(lbl, q));  // tray shows the full set, flat
+    }
+    groupEl.append(label, chips);
+    groupsEl.appendChild(groupEl);
+  }
+}
 
 function askQuestion(q) {
   if (isStreaming) return;
@@ -1181,11 +1210,18 @@ async function streamAnswer(question, opts = {}) {
     // here), not a DOMException named 'AbortError' — so branch on signal.reason.
     const reason = controller.signal.reason;
     if (reason === 'user') {
-      // User pressed Stop. Leave a quiet note, no alarming error, no retry.
+      // User pressed Stop: a quiet note, no alarming error, plus a way back in.
       clearWaiting();
       const note = document.createElement('div');
       note.className = 'status-line';
       note.textContent = 'Stopped.';
+      const again = document.createElement('button');
+      again.type = 'button';
+      again.className = 'retry-btn neutral';
+      again.textContent = 'Ask again';
+      again.onclick = () => { agentDiv.remove(); streamAnswer(question, { isRetry: true }); };
+      note.appendChild(document.createElement('br'));
+      note.appendChild(again);
       agentDiv.appendChild(note);
     } else if (reason === 'timeout' || (err && err.name === 'AbortError')) {
       showError("The server is taking too long to respond. It may be busy or rate-limited; please try again in a minute.", { retry: true });
@@ -1217,6 +1253,9 @@ async function streamAnswer(question, opts = {}) {
   resetAskButton();
   questionEl.focus();
 }
+
+// Populate the starter chips and Examples tray from the shared source.
+renderChips();
 </script>
 </body>
 </html>
