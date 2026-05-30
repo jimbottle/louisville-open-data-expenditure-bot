@@ -715,6 +715,93 @@ def get_compact_schema_description(con: duckdb.DuckDBPyConnection) -> str:
     return "\n".join(out)
 
 
+CHART_TIME_KEYWORDS = ("year", "fiscal", "month", "date")
+CHART_LABEL_KEYWORDS = CHART_TIME_KEYWORDS + ("name", "agency", "payee", "type", "category", "fund")
+
+
+def infer_chart(df) -> tuple:
+    """Pick (chart_type, label_col, value_col) for a result DataFrame.
+
+    Pure function (no DB), so it is unit-testable in isolation.
+
+    - value (y): a numeric measure that varies and isn't a year/time id. Prefer
+      a float (dollar) measure over an integer count; otherwise the last such
+      column (aggregates are conventionally last in the SELECT).
+    - label (x): the most-varying categorical/time dimension. A constant column
+      (<=1 distinct, e.g. fiscal_year = 2025 for a "top 5 in 2025" result) is
+      never a useful axis and is skipped.
+    - chart_type: ``line`` only for a genuine time series (time-named axis with
+      one row per distinct, chronologically sortable time point); ``pie`` for a
+      few proportional slices; ``bar`` otherwise; ``None`` when no chart fits.
+    """
+    cols = list(df.columns)
+    n = len(df)
+
+    def ndist(c):
+        try:
+            return int(df[c].nunique(dropna=True))
+        except Exception:
+            return 0
+
+    def is_numeric(c):
+        return pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])
+
+    def is_time_named(c):
+        return any(k in c.lower() for k in CHART_TIME_KEYWORDS)
+
+    # Value (y): varying numeric, not a year/time id. Prefer a float (dollar)
+    # measure over an integer count so "SELECT payee, SUM(amt), COUNT(*)" charts
+    # dollars, not the invoice count.
+    value_cands = [c for c in cols if is_numeric(c) and ndist(c) > 1 and not is_time_named(c)]
+    value_col = None
+    if value_cands:
+        floats = [c for c in value_cands if pd.api.types.is_float_dtype(df[c])]
+        value_col = floats[-1] if floats else value_cands[-1]
+
+    # Label (x): most-varying dimension; skip constants and the value column.
+    label_col = None
+    best = 0
+    for c in cols:
+        if c == value_col or ndist(c) <= 1:
+            continue
+        is_dim = (
+            pd.api.types.is_string_dtype(df[c])
+            or any(k in c.lower() for k in CHART_LABEL_KEYWORDS)
+        )
+        if is_dim and ndist(c) > best:
+            best = ndist(c)
+            label_col = c
+    if label_col is None:
+        label_col = next((c for c in cols if c != value_col and ndist(c) > 1), None)
+
+    chart_type = None
+    if label_col and value_col and 2 <= n <= 50:
+        is_time = is_time_named(label_col)
+        clean_series = ndist(label_col) == n  # one row per distinct time point
+        if is_time and clean_series:
+            chart_type = "line"
+        elif n <= 5:
+            chart_type = "pie"
+        else:
+            chart_type = "bar"
+
+    # A line axis must be chronologically sortable (the caller sorts by it):
+    # numeric, datetime, or 4-digit-year strings. A non-numeric string axis
+    # (e.g. month NAMES) would mis-sort, so downgrade to a categorical chart.
+    if chart_type == "line":
+        col = df[label_col]
+        sortable = col.dtype.kind in "iufcM"
+        if not sortable:
+            try:
+                sortable = bool(col.dropna().astype(str).str.fullmatch(r"\d{4}").all())
+            except Exception:
+                sortable = False
+        if not sortable:
+            chart_type = "pie" if n <= 5 else "bar"
+
+    return chart_type, label_col, value_col
+
+
 def humanize_text(text: str, table: str = "expenditures") -> str:
     """Replace column names with semantic labels in display text.
     Falls back to converting snake_case to Title Case for unknown columns."""

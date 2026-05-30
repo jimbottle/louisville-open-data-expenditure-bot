@@ -10,8 +10,9 @@ to survive routine refreshes.
 Run: python -m pytest tests/test_known_answers.py -v
 """
 
+import pandas as pd
 import pytest
-from data_model import get_compact_schema_description, load_all_data
+from data_model import get_compact_schema_description, infer_chart, load_all_data
 
 
 @pytest.fixture(scope="module")
@@ -183,6 +184,58 @@ def test_compact_schema_enumerates_only_low_cardinality(con):
 def test_compact_schema_smaller_than_full(con):
     from data_model import get_full_schema_description
     assert len(get_compact_schema_description(con)) < len(get_full_schema_description(con))
+
+
+# ── Chart inference (infer_chart) ─────────────────────────────────────────────
+# Pure-function tests pinning the axis/type selection against regression.
+
+def test_chart_constant_year_topn_is_not_a_line():
+    """The bug: a 'top 5 in 2025' result carries a constant fiscal_year column.
+    It must chart the entity that varies, not draw a line across identical years."""
+    df = pd.DataFrame({
+        "fiscal_year": [2025] * 5,
+        "agency": list("ABCDE"),
+        "total_extended_spend": [8.3, 4.5, 2.9, 1.9, 1.4],
+    })
+    chart_type, label_col, value_col = infer_chart(df)
+    assert label_col == "agency"                 # varying dimension, not constant year
+    assert value_col == "total_extended_spend"
+    assert chart_type == "pie"                   # 5 slices, not a line
+
+
+def test_chart_annual_trend_is_a_line():
+    df = pd.DataFrame({"fiscal_year": list(range(2008, 2027)),
+                       "total_spend": [float(i) for i in range(19)]})
+    chart_type, label_col, value_col = infer_chart(df)
+    assert (chart_type, label_col, value_col) == ("line", "fiscal_year", "total_spend")
+
+
+def test_chart_numeric_month_is_a_line_but_month_names_are_not():
+    nums = pd.DataFrame({"month": list(range(1, 13)), "total": [float(i) for i in range(12)]})
+    assert infer_chart(nums)[0] == "line"
+    names = pd.DataFrame({"month": ["April", "August", "December", "February"],
+                          "total": [4.0, 3.0, 2.0, 1.0]})
+    assert infer_chart(names)[0] != "line"       # lexicographic sort would mislead
+
+
+def test_chart_prefers_dollar_measure_over_count():
+    """SELECT payee, SUM(amount) AS total, COUNT(*) AS num_invoices -> chart dollars."""
+    df = pd.DataFrame({
+        "payee": list("ABCDE"),
+        "total": [9.0, 7.0, 5.0, 3.0, 1.0],   # float measure
+        "num_invoices": [50, 40, 30, 20, 10],  # int count
+    })
+    assert infer_chart(df)[2] == "total"
+
+
+def test_chart_handles_nullable_and_string_dtypes():
+    """Int32 measure and pandas string-dtype dimension should still chart."""
+    df = pd.DataFrame({
+        "category": pd.array(["A", "B", "C", "D", "E", "F"], dtype="string"),
+        "spend": pd.array([6, 5, 4, 3, 2, 1], dtype="Int32"),
+    })
+    chart_type, label_col, value_col = infer_chart(df)
+    assert label_col == "category" and value_col == "spend" and chart_type == "bar"
 
 
 # ── Volume ────────────────────────────────────────────────────────────────────
