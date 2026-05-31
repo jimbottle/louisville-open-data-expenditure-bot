@@ -306,6 +306,25 @@
     transition: opacity 0.2s;
   }
 
+  /* Quiet per-message action (Copy answer). */
+  .agent .msg-action {
+    align-self: flex-start;
+    margin-top: 2px;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    border-radius: 14px;
+    padding: 3px 12px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+
+  .agent .msg-action:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+  }
+
   .agent .chart-block {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -753,8 +772,8 @@
 
 <main id="messages">
   <div class="starters" id="starters">
-    <h2>Ask me about Louisville Metro Government Expenditure. I might have some answers.</h2>
-    <p>Natural language queries run against Louisville Metro expenditure, salary, capital projects, contractor, and staffing data.</p>
+    <h2>Ask me about Louisville Metro Government expenditure. I might have some answers.</h2>
+    <p>Natural language queries run against Louisville Metro expenditure, salary, capital projects, contractor, and staffing data, covering fiscal years 2008 to 2026.</p>
     <div class="chip-groups" id="starter-groups"></div>
     <div class="about-wrapper">
       <span class="about-icon" tabindex="0" role="button" aria-label="About this data" onclick="toggleAbout(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAbout(this);}">i</span>
@@ -973,7 +992,14 @@ async function streamAnswer(question, opts = {}) {
 
   const clearWaiting = () => {
     typing.remove();
-    if (statusLine) { statusLine.remove(); statusLine = null; }
+    if (statusLine) {
+      // Fade the status line out (the .status-line opacity transition) rather
+      // than a hard cut, so the "Querying…" -> answer handoff reads continuously.
+      const sl = statusLine;
+      statusLine = null;
+      sl.style.opacity = '0';
+      setTimeout(() => sl.remove(), 200);
+    }
   };
 
   const showError = (text, opts = {}) => {
@@ -1095,10 +1121,14 @@ async function streamAnswer(question, opts = {}) {
           const chartDiv = document.createElement('div');
           chartDiv.className = 'chart-block';
           const canvas = document.createElement('canvas');
-          // Text alternative for screen readers (the canvas itself is opaque to them).
+          // Text alternative for screen readers (the canvas itself is opaque to
+          // them): include the values, not just the labels, so the data is conveyed.
           canvas.setAttribute('role', 'img');
-          canvas.setAttribute('aria-label',
-            `${event.title || 'Chart'}: ${event.labels.slice(0, 12).join(', ')}`);
+          const pairs = event.labels.slice(0, 12).map((l, i) => {
+            const v = event.values[i];
+            return `${l}: ${typeof v === 'number' ? v.toLocaleString() : v}`;
+          });
+          canvas.setAttribute('aria-label', `${event.title || 'Chart'}. ${pairs.join('; ')}`);
           chartDiv.appendChild(canvas);
           agentDiv.appendChild(chartDiv);
           // Deliberate civic categorical scale, anchored on the brand blue.
@@ -1244,12 +1274,31 @@ async function streamAnswer(question, opts = {}) {
     showError("No response received from the server. Please try again.", { retry: true });
   }
 
-  // Add assistant response to conversation history
+  // Add assistant response to conversation history, and offer a Copy action so
+  // a finding can be cited or shared.
   if (interpText) {
     conversationHistory.push({ role: "assistant", content: interpText });
     // Keep history manageable: last 6 messages (3 exchanges)
     if (conversationHistory.length > 6) {
       conversationHistory = conversationHistory.slice(-6);
+    }
+    if (interpBlock) {
+      const copyBtn = document.createElement('button');
+      copyBtn.type = 'button';
+      copyBtn.className = 'msg-action';
+      copyBtn.textContent = 'Copy';
+      copyBtn.setAttribute('aria-label', 'Copy this answer');
+      copyBtn.addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(interpText);
+          copyBtn.textContent = 'Copied';
+        } catch {
+          copyBtn.textContent = 'Copy failed';
+        }
+        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
+      });
+      agentDiv.appendChild(copyBtn);
+      scrollBottom();
     }
   }
 
