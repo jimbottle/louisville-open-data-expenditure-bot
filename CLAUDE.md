@@ -145,3 +145,35 @@ uvicorn app:app --host 127.0.0.1 --port 8000
 
 - Frontend calls a **same-origin relative `/api/ask`**, so the frontend and backend must be served by the same FastAPI process (this is why it can't be a static Netlify deploy).
 - Commit after impactful changes; push only when asked; deploy is a separate explicit step (see Deployment).
+
+<!-- BEGIN WYK CONVENTIONS v:1 -->
+## wyk — planning & handoff over bd
+
+This repo uses **wyk**, a view + handoff layer over **bd (beads)**. "Plan
+it in wyk" = **file the plan as bd issues** (deps via `bd dep add`), not
+markdown/TodoWrite. File with **`wyk create`** (same flags as `bd create`,
+forwarded verbatim) — it also stamps the Claude session so the TUI's
+Session column traces work back to a conversation. A PreToolUse hook
+blocks raw `bd create` and tells you to switch; that's expected — just
+re-run as `wyk create`.
+
+**Owner column** — whose move it is, label-driven (NOT bd's owner/assignee):
+- `human` → **HUMAN** (a human must act).
+- `agent-handoff` → **AGENT-HANDOFF**: another agent owns it; don't touch,
+  a human coordinates. Excluded from `wyk inbox`.
+- agent task blocked by a `human`-flagged dep → **HUMAN-BLOCK** (skip it).
+- else → **AGENT** (the default; a null owner is never blank — so a task
+  that needs a human MUST be handed off, or the human never sees it).
+
+**Hand off to a human**: `wyk handoff <id>` (or `wyk handoff -create "<title>"`)
+sets `human` + writes the runbook. Never hand-roll labels; `-a`/`--claim`
+are bd's status, not the badge.
+
+**Pick up work**: `wyk inbox` FIRST (items bounced back to you — WORK them),
+then `wyk` / `bd ready`. `wyk conventions` prints the full contract.
+
+**Something wrong? Act — don't shrug.** If a wyk/bd command errors, a
+convention looks broken, or the workflow rubs wrong, file a bd issue (with
+an owner) and fix or hand it off — don't route around it silently.
+Friction with wyk is product data; surfacing it is the job.
+<!-- END WYK CONVENTIONS -->

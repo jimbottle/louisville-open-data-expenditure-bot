@@ -9,3 +9,5 @@ __pycache__/
 .dolt/
 *.db
 .beads-credential-key
+# roborev snapshots
+/.roborev/

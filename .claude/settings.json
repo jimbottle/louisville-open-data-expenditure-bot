@@ -4,18 +4,29 @@
       {
         "hooks": [
           {
-            "command": "command -v bd >/dev/null 2>&1 && bd prime",
+            "command": "command -v bd \u003e/dev/null 2\u003e\u00261 \u0026\u0026 bd prime",
             "type": "command"
           }
         ],
         "matcher": ""
       }
     ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "wyk hook bd-create-guard",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
           {
-            "command": "command -v bd >/dev/null 2>&1 && bd prime",
+            "command": "command -v bd \u003e/dev/null 2\u003e\u00261 \u0026\u0026 bd prime",
             "type": "command"
           }
         ],
