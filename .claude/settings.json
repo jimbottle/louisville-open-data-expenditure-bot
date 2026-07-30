@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "wyk hook bd-create-guard",
+            "command": "if command -v wyk >/dev/null 2>&1; then wyk hook bd-create-guard; fi",
             "type": "command"
           }
         ],

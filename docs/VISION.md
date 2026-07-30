@@ -1,5 +1,9 @@
 # Vision: "Lou for cities" — civic analytics as a product
 
+> **Internal — not for public distribution.** This doc names prospective
+> partner relationships and sales strategy. Strip or rewrite it before any
+> open-sourcing / visibility change of this repo.
+
 Lou started as a one-evening proof of concept for Louisville, but the problem it
 solves is universal: every city with an open data portal (most on the same
 ArcGIS Hub stack Louisville uses) has data that residents, journalists, and
