@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -74,13 +75,26 @@ def ingest(db_path: str = DEFAULT_DB, since: str = DEFAULT_SINCE) -> int:
             time.sleep(0.2)
         print(f"type {type_id}: {len(rows):,} total docs so far")
 
-    # Build into a fresh .part file and swap on success (same atomic pattern
-    # as pull_socrata): a failed ingest can never destroy the existing corpus,
-    # and the swap sidesteps DuckDB's one-writer-or-many-readers file locking.
+    n = _build_db(rows, db_path)
+    print(f"Ingested {n:,} documents -> {db_path}")
+    return n
+
+
+def _remove_partials(part_path: str) -> None:
+    for p in (part_path, part_path + ".wal"):
+        if os.path.exists(p):
+            os.remove(p)
+
+
+def _build_db(rows: list, db_path: str) -> int:
+    """Build the documents DB into a fresh .part file and swap on success
+    (same atomic pattern as pull_socrata): a failed ingest can never destroy
+    the existing corpus, and the swap sidesteps DuckDB's
+    one-writer-or-many-readers file locking. Stale .part/.part.wal leftovers
+    from a hard kill are cleared before connecting."""
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     part_path = db_path + ".part"
-    if os.path.exists(part_path):
-        os.remove(part_path)
+    _remove_partials(part_path)
     try:
         con = duckdb.connect(part_path)
         try:
@@ -98,12 +112,10 @@ def ingest(db_path: str = DEFAULT_DB, since: str = DEFAULT_SINCE) -> int:
         finally:
             con.close()
         os.replace(part_path, db_path)
+        return n
     except BaseException:
-        if os.path.exists(part_path):
-            os.remove(part_path)
+        _remove_partials(part_path)
         raise
-    print(f"Ingested {n:,} documents -> {db_path}")
-    return n
 
 
 def retrieve(question: str, k: int = 3, db_path: str = DEFAULT_DB, min_score: float = 3.0) -> list:

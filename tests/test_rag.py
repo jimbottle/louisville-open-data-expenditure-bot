@@ -43,6 +43,28 @@ def fixture_db(tmp_path):
     return db
 
 
+def test_build_db_swap_and_stale_partial_cleanup(tmp_path):
+    db = str(tmp_path / "sub" / "docs.duckdb")  # parent dir must be created
+    # simulate leftovers from a hard-killed prior ingest
+    os.makedirs(os.path.dirname(db), exist_ok=True)
+    for stale in (db + ".part", db + ".part.wal"):
+        with open(stale, "w") as f:
+            f.write("garbage")
+    try:
+        n = rag._build_db(DOCS, db)
+    except Exception as e:
+        if "fts" in str(e).lower() or "extension" in str(e).lower():
+            pytest.skip("DuckDB FTS extension unavailable in this environment")
+        raise
+    assert n == len(DOCS)
+    assert os.path.exists(db)
+    assert not os.path.exists(db + ".part")
+    assert not os.path.exists(db + ".part.wal")
+    # the built DB serves retrieval end-to-end
+    hits = rag.retrieve("american rescue plan", k=1, db_path=db, min_score=0.1)
+    assert hits and hits[0]["file_no"] == "R-057-21"
+
+
 def test_retrieve_ranks_relevant_doc_first(fixture_db):
     hits = rag.retrieve("american rescue plan funding", k=2, db_path=fixture_db, min_score=0.1)
     assert hits and hits[0]["file_no"] == "R-057-21"
