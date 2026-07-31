@@ -10,6 +10,11 @@
 #     200 text/event-stream
 # errors_last_hour > 0 is a warning annotation only: with status still "ok"
 # it's <= 5 errors/hour, which is usually per-IP rate-limit noise.
+#
+# GitHub disables schedule-triggered workflows after 60 days without repo
+# activity — for a monitor, silent death is the worst failure mode. The
+# keep-alive step re-enables this workflow via the API on every run, which
+# resets that counter; it is the only reason the token needs actions:write.
 
 name: uptime
 
@@ -18,10 +23,20 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
+permissions:
+  actions: write  # keep-alive self-re-enable only; everything else defaults to none
+
 jobs:
   probe:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
+      - name: Keep-alive (reset the 60-day scheduled-workflow auto-disable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/uptime.yml/enable" \
+            || echo "::warning::keep-alive re-enable failed (non-fatal)"
       - name: Health probe
         run: |
           body=$(curl -sS --fail --max-time 20 https://louisville.raylytics.io/api/health)

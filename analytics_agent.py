@@ -17,6 +17,7 @@ import os
 import re
 import sys
 import textwrap
+import threading
 import time
 
 import duckdb
@@ -102,6 +103,7 @@ DEFAULT_MODEL_FALLBACKS = ["gpt-oss-120b", "zai-glm-4.7", "llama-3.3-70b", "llam
 
 _active_model = None          # replacement model once a fallback has engaged
 _model_fallback_event = None  # {"from", "to", "time"} of the last fallback
+_fallback_lock = threading.Lock()  # SSE requests run on threadpool threads
 
 
 def _fallback_preferences() -> list:
@@ -122,7 +124,16 @@ def get_model_fallback_event() -> dict | None:
 
 
 def _is_model_not_found(exc: Exception) -> bool:
-    return isinstance(exc, openai.NotFoundError) and "model" in str(exc).lower()
+    if not isinstance(exc, openai.NotFoundError):
+        return False
+    # Prefer the structured error code (Cerebras/OpenAI send code=model_not_found);
+    # fall back to a substring match only when no code is present.
+    code = getattr(exc, "code", None)
+    if code is None and isinstance(getattr(exc, "body", None), dict):
+        code = exc.body.get("code")
+    if code is not None:
+        return code == "model_not_found"
+    return "model" in str(exc).lower()
 
 
 def _resolve_fallback_model(client: openai.OpenAI, bad_model: str):
@@ -140,12 +151,13 @@ def _resolve_fallback_model(client: openai.OpenAI, bad_model: str):
 
 def _record_model_fallback(from_model: str, to_model: str) -> None:
     global _active_model, _model_fallback_event
-    _active_model = to_model
-    _model_fallback_event = {
-        "from": from_model,
-        "to": to_model,
-        "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    }
+    with _fallback_lock:
+        _active_model = to_model
+        _model_fallback_event = {
+            "from": from_model,
+            "to": to_model,
+            "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
     log.error("MODEL FALLBACK: '%s' no longer exists at provider; now using '%s'", from_model, to_model)
 
 
@@ -163,12 +175,18 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
     except openai.NotFoundError as e:
         if not _is_model_not_found(e):
             raise
-        replacement = _resolve_fallback_model(client, model)
+        # Another thread may have already switched while this call was in flight.
+        already = get_active_model(model)
+        replacement = already if already != model else _resolve_fallback_model(client, model)
         if not replacement:
             raise
-        _record_model_fallback(model, replacement)
+        log.warning("Model '%s' not found at provider; retrying with '%s'", model, replacement)
         fallback_fn = make_call(fallback_client, replacement) if fallback_client else None
-        return _call_with_retry(make_call(client, replacement), on_retry=on_retry, fallback_fn=fallback_fn)
+        result = _call_with_retry(make_call(client, replacement), on_retry=on_retry, fallback_fn=fallback_fn)
+        # Record only after the replacement actually worked, so /api/health
+        # never advertises a fallback that failed.
+        _record_model_fallback(model, replacement)
+        return result
 
 
 def init_database(csv_path: str) -> tuple[duckdb.DuckDBPyConnection, str]:

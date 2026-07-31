@@ -97,6 +97,37 @@ def test_no_preference_match_uses_any_available():
     assert result == "ok:some-new-model"
 
 
+def test_paid_fallback_client_rebinds_to_replacement_model():
+    free = FakeClient(["gpt-oss-120b"])
+    paid = FakeClient(["gpt-oss-120b"])
+    built = []
+
+    def mk(c, m):
+        built.append((c, m))
+        return lambda: c.complete(m)
+
+    result = aa._call_with_model_fallback(mk, free, "dead-model", fallback_client=paid)
+    assert result == "ok:gpt-oss-120b"
+    # after the fallback engaged, the paid-tier callable must be rebuilt with
+    # the REPLACEMENT model, not left bound to the dead one
+    assert (paid, "gpt-oss-120b") in built
+    assert (paid, "dead-model") in built  # pre-fallback build used the configured model
+
+
+def test_failed_replacement_is_not_recorded():
+    # models.list() advertises a model that itself 404s: the retry fails, and
+    # neither _active_model nor the health event may claim the switch worked.
+    class LyingClient(FakeClient):
+        def __init__(self):
+            super().__init__(available=[])
+            self.models = FakeModels(["also-dead"])
+
+    with pytest.raises(openai.NotFoundError):
+        aa._call_with_model_fallback(make_call, LyingClient(), "dead-model")
+    assert aa.get_model_fallback_event() is None
+    assert aa.get_active_model("dead-model") == "dead-model"
+
+
 def test_non_model_errors_propagate():
     class Boom(Exception):
         pass
