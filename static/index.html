@@ -946,6 +946,35 @@ function scrollBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// Build a mailto: link to report a bad answer, prefilled with whatever
+// conversation detail this answer produced (SQL/results/debug only exist when
+// the dev view was on — the backend doesn't send them otherwise). Truncation
+// keeps the URL within what common mail clients accept.
+function buildReportHref(report, interpText) {
+  const cut = (s, n) => (s && s.length > n ? s.slice(0, n) + ' …[truncated]' : s || '');
+  const parts = [
+    'A Lou answer may be off.',
+    '',
+    'Page: ' + location.href,
+    'Time: ' + new Date().toISOString(),
+    '',
+    'Question:',
+    cut(report.question, 400),
+    '',
+    'Answer:',
+    cut(interpText, 1000) || '(no answer produced)',
+  ];
+  if (report.sql) parts.push('', 'SQL:', cut(report.sql, 700));
+  if (report.results) parts.push('', `Results (${report.rows ?? '?'} rows):`, cut(report.results, 600));
+  if (report.debug.length) parts.push('', 'Debug:', cut(report.debug.join('\n'), 400));
+  parts.push('', 'What looked wrong (please describe):', '');
+  const subject = 'Lou answer report: ' + report.question.slice(0, 80);
+  let href = 'mailto:dev@raylytics.io?subject=' + encodeURIComponent(subject)
+           + '&body=' + encodeURIComponent(parts.join('\n'));
+  if (href.length > 6000) href = href.slice(0, 6000);  // last-resort cap for picky clients
+  return href;
+}
+
 async function streamAnswer(question, opts = {}) {
   const isRetry = !!opts.isRetry;
   lastQuestion = question;
@@ -971,6 +1000,9 @@ async function streamAnswer(question, opts = {}) {
   let interpBlock = null;
   let statusLine = null;  // rotating progress line shown while waiting
   let interpText = '';  // collect full interpretation for history
+  // Everything the report-answer email can include (populated as events arrive;
+  // sql/results/debug only arrive when dev mode is on)
+  const report = { question, sql: '', results: '', rows: null, debug: [] };
 
   // Send prior history (not including current question) for context
   const historyToSend = conversationHistory.slice(-6);
@@ -1101,20 +1133,27 @@ async function streamAnswer(question, opts = {}) {
           agentDiv.appendChild(rb);
         }
 
-        else if (event.type === 'sql' && devMode) {
-          sqlBlock = document.createElement('div');
-          sqlBlock.className = 'sql-block';
-          sqlBlock.innerHTML = '<span class="label">SQL</span>';
-          sqlBlock.appendChild(document.createTextNode(event.content));
-          agentDiv.appendChild(sqlBlock);
+        else if (event.type === 'sql') {
+          report.sql = event.content;
+          if (devMode) {
+            sqlBlock = document.createElement('div');
+            sqlBlock.className = 'sql-block';
+            sqlBlock.innerHTML = '<span class="label">SQL</span>';
+            sqlBlock.appendChild(document.createTextNode(event.content));
+            agentDiv.appendChild(sqlBlock);
+          }
         }
 
-        else if (event.type === 'results' && devMode) {
-          resultsBlock = document.createElement('div');
-          resultsBlock.className = 'results-block';
-          resultsBlock.innerHTML = `<span class="label">Results (${event.row_count} rows)</span>`;
-          resultsBlock.appendChild(document.createTextNode(event.content));
-          agentDiv.appendChild(resultsBlock);
+        else if (event.type === 'results') {
+          report.results = event.content;
+          report.rows = event.row_count;
+          if (devMode) {
+            resultsBlock = document.createElement('div');
+            resultsBlock.className = 'results-block';
+            resultsBlock.innerHTML = `<span class="label">Results (${event.row_count} rows)</span>`;
+            resultsBlock.appendChild(document.createTextNode(event.content));
+            agentDiv.appendChild(resultsBlock);
+          }
         }
 
         else if (event.type === 'chart') {
@@ -1201,6 +1240,7 @@ async function streamAnswer(question, opts = {}) {
         }
 
         else if (event.type === 'debug') {
+          report.debug.push(event.content);
           const dbg = document.createElement('div');
           dbg.className = 'debug-block';
           dbg.textContent = event.content;
@@ -1298,6 +1338,19 @@ async function streamAnswer(question, opts = {}) {
         setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
       });
       agentDiv.appendChild(copyBtn);
+      // Report-an-answer: opens the user's mail client to dev@raylytics.io,
+      // prefilled with this answer's available details (built at click time
+      // so it captures the final state).
+      const reportBtn = document.createElement('button');
+      reportBtn.type = 'button';
+      reportBtn.className = 'msg-action';
+      reportBtn.textContent = 'Report an issue';
+      reportBtn.setAttribute('aria-label', 'Email dev@raylytics.io about a problem with this answer');
+      reportBtn.title = 'Something off? Email us this answer’s details';
+      reportBtn.addEventListener('click', () => {
+        window.location.href = buildReportHref(report, interpText);
+      });
+      agentDiv.appendChild(reportBtn);
       scrollBottom();
     }
   }
