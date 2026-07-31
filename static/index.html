@@ -183,6 +183,18 @@
     gap: 8px;
   }
 
+  /* Dev-view visibility is class-driven (body.dev-visible, synced to the
+     toggle) so flipping Dev retroactively shows/hides blocks on answers that
+     are already rendered. .report-fallback borrows .debug-block styling but
+     is not a dev element — it stays visible either way. */
+  body:not(.dev-visible) .reasoning-block,
+  body:not(.dev-visible) .sql-block,
+  body:not(.dev-visible) .results-block,
+  body:not(.dev-visible) .log-block,
+  body:not(.dev-visible) .debug-block:not(.report-fallback) {
+    display: none;
+  }
+
   .agent .sql-block {
     background: var(--code-bg);
     border: 1px solid var(--border);
@@ -811,6 +823,15 @@ const startersEl = document.getElementById('starters');
 const questionEl = document.getElementById('question');
 const submitBtn = document.getElementById('submit-btn');
 const devModeEl = document.getElementById('dev-mode');
+// Keep a body-level class in sync with the toggle: dev blocks are always
+// rendered when their data arrives and shown/hidden purely via CSS, so the
+// toggle works retroactively on past answers. (Answers asked with Dev OFF
+// only carry a results block — the backend doesn't send SQL/reasoning/debug
+// unless they were requested.)
+const syncDevVisibility = () =>
+  document.body.classList.toggle('dev-visible', devModeEl.checked);
+devModeEl.addEventListener('change', syncDevVisibility);
+syncDevVisibility();
 
 const newChatBtn = document.getElementById('newchat-btn');
 const examplesBtn = document.getElementById('examples-btn');
@@ -1146,7 +1167,7 @@ async function streamAnswer(question, opts = {}) {
         receivedAnyEvent = true;
         clearWaiting();
 
-        if (event.type === 'reasoning' && devMode) {
+        if (event.type === 'reasoning') {
           const rb = document.createElement('div');
           rb.className = 'reasoning-block';
           rb.innerHTML = '<span class="label">Query Reasoning</span>';
@@ -1160,25 +1181,21 @@ async function streamAnswer(question, opts = {}) {
 
         else if (event.type === 'sql') {
           report.sql = event.content;
-          if (devMode) {
-            sqlBlock = document.createElement('div');
-            sqlBlock.className = 'sql-block';
-            sqlBlock.innerHTML = '<span class="label">SQL</span>';
-            sqlBlock.appendChild(document.createTextNode(event.content));
-            agentDiv.appendChild(sqlBlock);
-          }
+          sqlBlock = document.createElement('div');
+          sqlBlock.className = 'sql-block';
+          sqlBlock.innerHTML = '<span class="label">SQL</span>';
+          sqlBlock.appendChild(document.createTextNode(event.content));
+          agentDiv.appendChild(sqlBlock);
         }
 
         else if (event.type === 'results') {
           report.results = event.content;
           report.rows = event.row_count;
-          if (devMode) {
-            resultsBlock = document.createElement('div');
-            resultsBlock.className = 'results-block';
-            resultsBlock.innerHTML = `<span class="label">Results (${event.row_count} rows)</span>`;
-            resultsBlock.appendChild(document.createTextNode(event.content));
-            agentDiv.appendChild(resultsBlock);
-          }
+          resultsBlock = document.createElement('div');
+          resultsBlock.className = 'results-block';
+          resultsBlock.innerHTML = `<span class="label">Results (${event.row_count} rows)</span>`;
+          resultsBlock.appendChild(document.createTextNode(event.content));
+          agentDiv.appendChild(resultsBlock);
         }
 
         else if (event.type === 'chart') {
