@@ -94,6 +94,24 @@ def test_refine_success_streams_only_refined_text():
     assert any(e["type"] == "debug" and e["content"].startswith("Refined in") for e in events)
 
 
+def test_refine_timeout_truncates_and_stops_consuming():
+    consumed = []
+
+    def two_chunks():
+        for c in ("First chunk. ", "Second chunk."):
+            consumed.append(c)
+            yield c
+
+    events = list(aa.refine_events_with_fallback(
+        two_chunks(), "the draft answer", _send, timeout=0,
+    ))
+    text = _interps(events)
+    assert text.startswith("First chunk. ")
+    assert "(Response truncated due to timeout)" in text
+    assert consumed == ["First chunk. "]  # the break stops the stream
+    assert "the draft answer" not in text
+
+
 def test_refine_stream_yields_chunks_and_uses_lean_context(monkeypatch):
     monkeypatch.setattr(aa, "_active_model", None)
     client = FakeStreamingClient(["Refined ", "answer."])

@@ -780,7 +780,9 @@ Explain in plain text (no markdown) why this likely returned no results based on
         if draft_error is not None:
             # The user already saw the error (or apology). Never refine a
             # partial draft into a complete-looking answer on top of it — and
-            # never re-hit an already-exhausted API 2s later.
+            # never re-hit an already-exhausted API 2s later. Tokens streamed
+            # before the failure were still consumed — account for them.
+            track_usage(0, interp_tokens)
             yield send("done", {})
             return
 
@@ -837,11 +839,14 @@ Explain in plain text (no markdown) why this likely returned no results based on
 
         yield send("done", {})
 
-        # Cache the response only if it has a valid interpretation (not errors/empty)
+        # Cache the response only if it has a valid interpretation — never
+        # errors, and never truncated/degraded answers (a one-off slow stream
+        # must not become the permanent replay for every future asker).
         if should_cache and cache_events:
             has_interpretation = any('"type": "interpretation"' in e for e in cache_events)
             has_error = any('"type": "error"' in e for e in cache_events)
-            if has_interpretation and not has_error:
+            has_truncation = any("Response truncated" in e for e in cache_events)
+            if has_interpretation and not has_error and not has_truncation:
                 response_cache[cache_key] = cache_events
                 _save_cache()
                 log.info("Cached response for: %s", question[:50])
