@@ -65,6 +65,24 @@ def test_build_db_swap_and_stale_partial_cleanup(tmp_path):
     assert hits and hits[0]["file_no"] == "R-057-21"
 
 
+def test_failed_build_preserves_existing_corpus(tmp_path):
+    db = str(tmp_path / "docs.duckdb")
+    try:
+        rag._build_db(DOCS, db)
+    except Exception as e:
+        if "fts" in str(e).lower() or "extension" in str(e).lower():
+            pytest.skip("DuckDB FTS extension unavailable in this environment")
+        raise
+    # a rebuild with malformed rows (wrong tuple arity) must fail...
+    with pytest.raises(Exception):
+        rag._build_db([("only", "three", "fields")], db)
+    # ...while the original corpus stays intact and queryable
+    hits = rag.retrieve("american rescue plan", k=1, db_path=db, min_score=0.1)
+    assert hits and hits[0]["file_no"] == "R-057-21"
+    assert not os.path.exists(db + ".part")
+    assert not os.path.exists(db + ".part.wal")
+
+
 def test_retrieve_ranks_relevant_doc_first(fixture_db):
     hits = rag.retrieve("american rescue plan funding", k=2, db_path=fixture_db, min_score=0.1)
     assert hits and hits[0]["file_no"] == "R-057-21"
