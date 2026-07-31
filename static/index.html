@@ -946,12 +946,13 @@ function scrollBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
-// Build a mailto: link to report a bad answer, prefilled with whatever
-// conversation detail this answer produced (SQL/results/debug only exist when
-// the dev view was on — the backend doesn't send them otherwise). Truncation
-// keeps the URL within what common mail clients accept.
-function buildReportHref(report, interpText) {
-  const cut = (s, n) => (s && s.length > n ? s.slice(0, n) + ' …[truncated]' : s || '');
+// Build the report-a-bad-answer email, prefilled with whatever conversation
+// detail this answer produced (SQL/results/debug only exist when the dev view
+// was on — the backend doesn't send them otherwise).
+const REPORT_EMAIL = 'dev@raylytics.io';
+
+function buildReportBody(report, interpText, scale) {
+  const cut = (s, n) => (s && s.length > n ? s.slice(0, Math.floor(n * scale)) + ' …[truncated]' : s || '');
   const parts = [
     'A Lou answer may be off.',
     '',
@@ -959,20 +960,30 @@ function buildReportHref(report, interpText) {
     'Time: ' + new Date().toISOString(),
     '',
     'Question:',
-    cut(report.question, 400),
+    cut(report.question, 300),
     '',
     'Answer:',
-    cut(interpText, 1000) || '(no answer produced)',
+    cut(interpText, 800) || '(no answer produced)',
   ];
-  if (report.sql) parts.push('', 'SQL:', cut(report.sql, 700));
-  if (report.results) parts.push('', `Results (${report.rows ?? '?'} rows):`, cut(report.results, 600));
-  if (report.debug.length) parts.push('', 'Debug:', cut(report.debug.join('\n'), 400));
+  if (report.sql) parts.push('', 'SQL:', cut(report.sql, 500));
+  if (report.results) parts.push('', `Results (${report.rows ?? '?'} rows):`, cut(report.results, 400));
+  if (report.debug.length) parts.push('', 'Debug:', cut(report.debug.join('\n'), 250));
   parts.push('', 'What looked wrong (please describe):', '');
+  return parts.join('\n');
+}
+
+function buildReport(report, interpText) {
   const subject = 'Lou answer report: ' + report.question.slice(0, 80);
-  let href = 'mailto:dev@raylytics.io?subject=' + encodeURIComponent(subject)
-           + '&body=' + encodeURIComponent(parts.join('\n'));
-  if (href.length > 6000) href = href.slice(0, 6000);  // last-resort cap for picky clients
-  return href;
+  // Shrink the body until the URL fits conservative external-handler limits —
+  // over-long mailto: URLs are one way browsers silently drop the handoff.
+  let body = buildReportBody(report, interpText, 1);
+  let href = `mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  for (const scale of [0.5, 0.25]) {
+    if (href.length <= 1900) break;
+    body = buildReportBody(report, interpText, scale);
+    href = `mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  }
+  return { subject, body, href };
 }
 
 async function streamAnswer(question, opts = {}) {
@@ -1347,8 +1358,30 @@ async function streamAnswer(question, opts = {}) {
       reportBtn.textContent = 'Report an issue';
       reportBtn.setAttribute('aria-label', 'Email dev@raylytics.io about a problem with this answer');
       reportBtn.title = 'Something off? Email us this answer’s details';
-      reportBtn.addEventListener('click', () => {
-        window.location.href = buildReportHref(report, interpText);
+      reportBtn.addEventListener('click', async () => {
+        const r = buildReport(report, interpText);
+        // Fallback first: copy the full report so the user always ends up with
+        // something actionable, even when the browser silently blocks the
+        // mailto handoff or no mail client is configured.
+        let copied = false;
+        try {
+          await navigator.clipboard.writeText(
+            `To: ${REPORT_EMAIL}\nSubject: ${r.subject}\n\n${r.body}`
+          );
+          copied = true;
+        } catch { /* clipboard unavailable; the mailto attempt still runs */ }
+        reportBtn.textContent = copied
+          ? `Opening email… (report copied — paste to ${REPORT_EMAIL} if nothing opens)`
+          : 'Opening email…';
+        setTimeout(() => { reportBtn.textContent = 'Report an issue'; }, 6000);
+        // A real anchor click is the most reliably-handled mailto trigger
+        // (location.href assignment is the variant browsers most often drop).
+        const a = document.createElement('a');
+        a.href = r.href;
+        a.rel = 'noopener';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
       });
       agentDiv.appendChild(reportBtn);
       scrollBottom();
