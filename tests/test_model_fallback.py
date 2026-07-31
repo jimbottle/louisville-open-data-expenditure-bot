@@ -128,6 +128,34 @@ def test_failed_replacement_is_not_recorded():
     assert aa.get_active_model("dead-model") == "dead-model"
 
 
+def test_raced_request_reuses_other_threads_switch():
+    # A request in flight when the model died: by the time its 404 lands,
+    # another thread has already switched. It must reuse that switch without
+    # consulting models.list(), and must not re-record the event.
+    client = FakeClient(["raced-model"])
+    list_calls = []
+    orig_list = client.models.list
+    client.models.list = lambda: (list_calls.append(1), orig_list())[1]
+
+    attempted = []
+
+    def mk(c, m):
+        def _c():
+            attempted.append(m)
+            if m == "dead-model":
+                aa._active_model = "raced-model"  # the "other thread" wins mid-flight
+                raise _not_found()
+            return c.complete(m)
+        return _c
+
+    result = aa._call_with_model_fallback(mk, client, "dead-model")
+    assert result == "ok:raced-model"
+    assert attempted == ["dead-model", "raced-model"]
+    assert not list_calls, "models.list() must not be consulted when already switched"
+    # idempotent recording: _active_model already held the target, so no event
+    assert aa.get_model_fallback_event() is None
+
+
 def test_non_model_errors_propagate():
     class Boom(Exception):
         pass

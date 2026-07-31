@@ -130,6 +130,9 @@ def _is_model_not_found(exc: Exception) -> bool:
     # fall back to a substring match only when no code is present.
     code = getattr(exc, "code", None)
     if code is None and isinstance(getattr(exc, "body", None), dict):
+        # The openai SDK populates .code from a dict body itself; this branch
+        # only guards non-standard OpenAI-compatible providers / hand-rolled
+        # exceptions where that didn't happen.
         code = exc.body.get("code")
     if code is not None:
         return code == "model_not_found"
@@ -150,8 +153,12 @@ def _resolve_fallback_model(client: openai.OpenAI, bad_model: str):
 
 
 def _record_model_fallback(from_model: str, to_model: str) -> None:
+    """Idempotent: concurrent requests that raced through the same deprecation
+    record (and ERROR-log) the switch exactly once."""
     global _active_model, _model_fallback_event
     with _fallback_lock:
+        if _active_model == to_model:
+            return
         _active_model = to_model
         _model_fallback_event = {
             "from": from_model,
