@@ -438,6 +438,60 @@ def interpret_results_stream(
             yield chunk.choices[0].delta.content
 
 
+REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
+    You are the final editor for a civic data assistant that answers questions
+    about city government spending for the general public.
+
+    Rewrite the DRAFT ANSWER following every rule:
+    - Plain, non-technical language: no SQL, database, or column-name jargon
+      (say "department", never "agency_canonical").
+    - Lead with the direct answer to the question in the first sentence.
+    - Consistent number style: dollar amounts with $ and thousands separators;
+      rounding for readability is fine ($19.6M, $267,811) but NEVER change a
+      number's magnitude — check every figure against the RESULTS table
+      (192,770.57 is about $192.8K, not $192.77M).
+    - Every number and claim must come from the RESULTS table or be directly
+      computable from it. Delete anything the results don't support. Do not
+      add coverage claims (year ranges, "plus benefits", etc.) the results
+      don't show.
+    - Short numbered lines for lists; keep the whole answer under 180 words
+      unless the draft genuinely needs more.
+    - Plain text only — no markdown headers or tables.
+
+    Return ONLY the rewritten answer, nothing else.""")
+
+
+def refine_interpretation_stream(client, model, question, sql, results, draft, on_retry=None, fallback_client=None):
+    """Stream a refined (plain-language, consistency- and accuracy-checked)
+    rewrite of a draft interpretation.
+
+    Lean context by design: rubric + question + SQL + results + draft — no
+    schema (the results table is the accuracy anchor). Keeps the pass at
+    ~1-2K tokens instead of the ~7K a schema-bearing prompt would cost.
+    """
+    user_msg = (
+        f"QUESTION: {question}\n\nSQL EXECUTED:\n{sql}\n\n"
+        f"RESULTS:\n{results}\n\nDRAFT ANSWER:\n{draft}"
+    )
+    def _make_call(c, m):
+        def _call():
+            return c.chat.completions.create(
+                model=m,
+                messages=[
+                    {"role": "system", "content": REFINE_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.2,
+                max_tokens=4096,
+                stream=True,
+            )
+        return _call
+    stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client)
+    for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
+
+
 BLOCKED_SQL = re.compile(
     r'\b(COPY|EXPORT|ATTACH|DETACH|LOAD|INSTALL|CREATE\s+MACRO|DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|'
     r'read_csv|read_parquet|read_json|read_csv_auto|write_csv|httpfs|postgres_scan|sqlite_scan)\b',

@@ -56,6 +56,7 @@ from analytics_agent import (
     interpret_results_stream,
     make_client,
     make_paid_client,
+    refine_interpretation_stream,
 )
 from data_model import (
     DATA_DICTIONARY,
@@ -726,17 +727,20 @@ Explain in plain text (no markdown) why this likely returned no results based on
         yield send("status", {"content": "Summarizing the results…"})
         t_start = time.time()
         interp_tokens = 0
-        stream_timeout = 90  # max seconds for entire interpretation stream
+        stream_timeout = 90  # max seconds per LLM stream
+        # The draft interpretation accumulates server-side; the user-visible
+        # stream is the refinement pass below (plain language, consistent
+        # formatting, numbers checked against the results table).
+        draft = ""
         try:
             for chunk in interpret_results_stream(
                 client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry, history=history, fallback_client=paid_client
             ):
-                yield send("interpretation", {"content": humanize_text(chunk)})
+                draft += chunk
                 interp_tokens += 1
                 if time.time() - t_start > stream_timeout:
                     log.warning("Interpretation stream timed out after %ds", stream_timeout)
                     track_error("interpretation", f"Stream timeout after {stream_timeout}s")
-                    yield send("interpretation", {"content": "\n\n(Response truncated due to timeout)"})
                     break
         except GeneratorExit:
             log.info("Client disconnected during interpretation stream")
@@ -757,6 +761,43 @@ Explain in plain text (no markdown) why this likely returned no results based on
                 yield send("log", {"content": f"Interpretation error: {type(e).__name__}"})
                 yield send("debug", {"content": f"Interpretation error detail: {e}"})
                 yield send("interpretation", {"content": "\n\n(I ran the query but had trouble summarizing the results. The data above is still accurate.)"})
+        t_draft = time.time() - t_start
+
+        # Refinement pass: rewrite the draft for plain language, consistency,
+        # and accuracy against the results table. A failure here must NEVER
+        # lose the answer — the draft is the fallback.
+        if draft:
+            yield send("log", {"content": "Refining the answer..."})
+            yield send("debug", {"content": f"Draft interpretation in {t_draft:.1f}s | ~{interp_tokens} chunks"})
+            time.sleep(2)  # RPM pacing between back-to-back LLM calls
+            t_refine_start = time.time()
+            refined_any = False
+            try:
+                for chunk in refine_interpretation_stream(
+                    client, MODEL, question, sql, result_str, draft, on_retry=on_retry, fallback_client=paid_client
+                ):
+                    refined_any = True
+                    yield send("interpretation", {"content": humanize_text(chunk)})
+                    interp_tokens += 1
+                    if time.time() - t_refine_start > stream_timeout:
+                        log.warning("Refinement stream timed out after %ds", stream_timeout)
+                        yield send("interpretation", {"content": "\n\n(Response truncated due to timeout)"})
+                        break
+            except GeneratorExit:
+                log.info("Client disconnected during refinement stream")
+                return
+            except Exception as e:
+                log.warning("Refinement failed (%s); serving draft", e)
+                track_error("interpretation", f"Refine failed: {str(e)[:150]}")
+                yield send("debug", {"content": f"Refinement failed ({type(e).__name__}); serving the draft answer"})
+                if refined_any:
+                    # Partial refined text already reached the client; don't
+                    # append the full draft after it.
+                    yield send("interpretation", {"content": "\n\n(Response truncated.)"})
+            if not refined_any:
+                yield send("interpretation", {"content": humanize_text(draft)})
+            else:
+                yield send("debug", {"content": f"Refined in {time.time() - t_refine_start:.1f}s"})
         track_usage(0, interp_tokens)
         log.info("Request complete — %d chunks streamed", interp_tokens)
 
