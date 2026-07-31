@@ -72,6 +72,11 @@ def test_louisville_pack_matches_engine_expectations():
 
 
 def test_city_config_env_override(monkeypatch):
-    monkeypatch.setenv("CITY_CONFIG", LOUISVILLE)
+    # Must point at a NON-default pack, or a broken env lookup would fall
+    # through to the Louisville default and pass anyway. Loading a paper pack
+    # through CityConfig is safe — only load_all_data needs a real reader.
+    monkeypatch.setenv(
+        "CITY_CONFIG", os.path.join(REPO, "cities", "cincinnati", "city.yaml")
+    )
     cfg = load_city_config()
-    assert cfg.city["name"] == "Louisville"
+    assert cfg.city["name"] == "Cincinnati"
