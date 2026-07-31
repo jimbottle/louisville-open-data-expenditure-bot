@@ -66,10 +66,12 @@ def _load_expenditures(con, cfg: CityConfig, data_dir: str) -> None:
     loaded_years = []
 
     for source in cfg.expenditures.get("sources", []):
+        reader = source.get("reader", "duckdb_union")
+        if reader not in ("duckdb_union", "pandas_mapped"):
+            raise ValueError(f"Unknown reader '{reader}' for source {source.get('id')}")
         files = _source_files(source, data_dir)
         if not files:
             continue
-        reader = source.get("reader", "duckdb_union")
 
         if reader == "duckdb_union":
             file_list = ", ".join(f"'{_sql_quote(p)}'" for _, p in files)
@@ -85,7 +87,7 @@ def _load_expenditures(con, cfg: CityConfig, data_dir: str) -> None:
                 """)
             loaded_years.extend(str(y) for y, _ in files)
 
-        elif reader == "pandas_mapped":
+        else:  # pandas_mapped
             column_map = source.get("column_map", {})
             drop = source.get("drop", [])
             coerce = source.get("coerce", {})
@@ -105,9 +107,6 @@ def _load_expenditures(con, cfg: CityConfig, data_dir: str) -> None:
                     df = df[existing_cols]
                     con.execute(f"INSERT INTO {table} SELECT * FROM df")
                 loaded_years.append(str(year))
-
-        else:
-            raise ValueError(f"Unknown reader '{reader}' for source {source.get('id')}")
 
     total = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     print(f"{table}: {total:,} rows across {len(loaded_years)} years ({', '.join(sorted(loaded_years))})")
@@ -132,9 +131,12 @@ def _apply_canonicalization(con, cfg: CityConfig) -> None:
             lhs = f"UPPER({src})" if upper else src
             cases.append(f"WHEN {lhs} LIKE '{key}%' THEN '{_sql_quote(v)}'")
 
+        # An unseeded (empty) map is a valid onboarding state: the canonical
+        # column just mirrors the source column until curation fills the map.
+        expr = f"CASE {' '.join(cases)} ELSE {src} END" if cases else src
         con.execute(f"""
             ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {target} VARCHAR;
-            UPDATE {table} SET {target} = CASE {' '.join(cases)} ELSE {src} END;
+            UPDATE {table} SET {target} = {expr};
         """)
         before = con.execute(
             f"SELECT COUNT(DISTINCT {src}) FROM {table} WHERE {src} IS NOT NULL"
