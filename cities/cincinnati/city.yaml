@@ -1,0 +1,67 @@
+# PAPER CONFIG — Cincinnati, OH (not runnable yet)
+#
+# Written against the schema verified live in docs/city-survey.md to prove the
+# config format holds for a Socrata city. Blockers before this runs:
+#   - `reader: socrata` is not implemented (needs bulk-CSV pull, types from
+#     /api/views; see survey — simpler than the ArcGIS path)
+#   - a pull step (pull_socrata.py analog of pull_arcgis.py)
+# Note: this pack maps onto canonical v0 names (payee/amount/category, see
+# docs/canonical-model.md §2); the Louisville pack keeps its legacy column
+# names until prompts/summaries are migrated.
+
+city:
+  name: Cincinnati
+  state: OH
+  title: Cincinnati Open Data
+  fiscal_year_start_month: 7
+
+expenditures:
+  table: expenditures
+  sources:
+    - id: vendor_payments
+      reader: socrata            # NOT IMPLEMENTED — paper only
+      domain: data.cincinnati-oh.gov
+      dataset_id: qrj9-83t8      # City of Cincinnati Vendor Payments, FY2014+, weekly
+      column_map:
+        vendor_name: payee
+        amount: amount
+        record_date: payment_date
+        dept_desc: agency
+        fund_desc: fund
+        exp_acct_cat_desc: category
+        check_no: payment_number
+        fiscal_year: fiscal_year
+      # extensions kept verbatim: acct_period, trans_id, trans_line_no,
+      # dept_code, fund_code, exp_acct_cat
+
+canonicalization:
+  - table: expenditures
+    source_column: agency
+    target_column: agency_canonical
+    exact_map: agency_map.csv    # to be seeded during onboarding
+    case_insensitive: false
+  - table: expenditures
+    source_column: payee
+    target_column: payee_canonical
+    exact_map: payee_map.csv     # to be seeded during onboarding
+    case_insensitive: true
+
+data_quality:
+  table: expenditures
+  amount_column: amount
+  offsetting:
+    group_key: trans_id
+    tolerance: 0.01
+  artifact:
+    group_key: trans_id
+    threshold: 100000000
+
+enrichment_tables:
+  salary_data: salary_data.csv          # wmj4-ygbf (includes demographics columns)
+  business_licenses: business_licenses.csv  # 7dk3-gngs
+  budget: budget.csv                    # hv35-hdk2, FY2004+
+
+summaries: []   # to be authored during onboarding against canonical names
+
+dictionary: {}  # to be curated during onboarding — the survey confirmed the
+                # portal's own column descriptions are blank

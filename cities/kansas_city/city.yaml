@@ -1,0 +1,91 @@
+# PAPER CONFIG — Kansas City, MO (not runnable yet)
+#
+# Written against the schema verified live in docs/city-survey.md to prove the
+# config format holds for a per-year-fragmented Socrata city. Blockers:
+#   - `reader: socrata` not implemented
+#   - `derive: fiscal_year` (from payment_date + fiscal_year_start_month) not
+#     implemented — KC publishes calendar-year datasets with no FY column
+# Note: canonical v0 names, like the Cincinnati pack.
+
+city:
+  name: Kansas City
+  state: MO
+  title: Kansas City Open Data
+  fiscal_year_start_month: 5
+
+expenditures:
+  table: expenditures
+  sources:
+    # Column names identical 2016-2025; 2026 broke fund/deptid/account from
+    # number to text, so the earlier years cast to text to match (survey §KC).
+    - id: vendor_payments_2016_2025
+      reader: socrata            # NOT IMPLEMENTED — paper only
+      domain: data.kcmo.org
+      dataset_ids:               # one Socrata 4x4 per calendar year
+        2016: 4mdg-usvj
+        2017: ajsz-qffb
+        2018: m9b5-66q2
+        2019: iq96-2r3h
+        2020: ump5-5ufb
+        2021: ivun-83kd
+        2022: gbmr-uec3
+        2023: 4fvj-uyvc
+        2024: 39kh-2k2z
+        2025: u8bc-eqh2
+      column_map: &kc_map
+        vendor_name: payee
+        sum_amount: amount           # line-level measure; payment_amount is the
+        payment_no: payment_number   # check-level total (double-counts if summed)
+        payment_date: payment_date
+        deptid_descr: agency
+        fund_descr: fund
+        account_descr: category
+      # extensions kept verbatim: voucher, payment_method, payment_amount,
+      # fund, deptid, account (code columns)
+      coerce:
+        fund: text
+        deptid: text
+        account: text
+      derive:
+        fiscal_year: from payment_date   # NOT IMPLEMENTED — uses fiscal_year_start_month
+    - id: vendor_payments_2026
+      reader: socrata
+      domain: data.kcmo.org
+      dataset_ids:
+        2026: w3zd-mhbv
+      column_map: *kc_map
+      derive:
+        fiscal_year: from payment_date
+
+canonicalization:
+  - table: expenditures
+    source_column: agency
+    target_column: agency_canonical
+    exact_map: agency_map.csv    # to be seeded during onboarding
+    case_insensitive: false
+  - table: expenditures
+    source_column: payee
+    target_column: payee_canonical
+    exact_map: payee_map.csv     # to be seeded during onboarding
+    case_insensitive: true
+
+data_quality:
+  table: expenditures
+  amount_column: amount
+  offsetting:
+    group_key: voucher   # extension column; KC documents voucher-level
+    tolerance: 0.01      # double-counting — same pattern as Louisville's
+  artifact:              # offsetting invoice groups
+    group_key: voucher
+    threshold: 100000000
+
+enrichment_tables:
+  budget: budget.csv                      # hqpu-fehi + ygzn-3xmu (line-item)
+  capital_projects: capital_projects.csv  # s53g-jzn9
+  business_licenses: business_licenses.csv  # pnm4-68wg
+  staff_demographics: staff_demographics.csv  # y5ky-3d6r (all columns documented)
+  # no salary data — KC does not publish it (survey)
+
+summaries: []   # to be authored during onboarding
+
+dictionary: {}  # to be curated during onboarding
