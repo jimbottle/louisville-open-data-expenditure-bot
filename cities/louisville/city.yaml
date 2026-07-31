@@ -430,8 +430,9 @@ dictionary:
   summary_top_salaries:
     description: Average and maximum total pay by job title and department for the
       most recent COMPLETE calendar year. Values are in dollars (a value like
-      192770.57 is ~$193K, not millions). High averages for field titles (e.g.
-      EMS paramedics) are usually overtime-driven.
+      192770.57 is ~$193K, not millions) and are the sum of pay components
+      (regular, overtime, incentive, other) — benefits are NOT included. High
+      averages for field titles (e.g. EMS paramedics) are usually overtime-driven.
     record_scope: Each row is one (job title, department) group in the latest complete
       calendar year.
     columns:

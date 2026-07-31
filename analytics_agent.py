@@ -279,9 +279,10 @@ def build_interpret_prompt(schema_desc: str) -> str:
           192,770.57 is about $192.8K (thousands), NOT $192.77M. Only write M or B
           if the digits in the results actually reach millions/billions.
         - Only state facts that appear in the schema context or the results. Do NOT
-          claim what years a dataset covers, or what a compensation/amount figure
-          includes (e.g. "plus benefits"), unless the schema context says so
-          explicitly for THAT table — never borrow another table's coverage.
+          claim what years a dataset covers or what a compensation/amount figure
+          includes unless the schema context says so explicitly for THAT table —
+          never borrow another table's coverage. Compensation data here contains
+          pay components only; the data has no benefits information.
         - If results are empty, explain what that likely means.
         - If the data shows something notable or unexpected, call it out.
         - Keep responses under 200 words unless the user asked for detail.
@@ -451,9 +452,11 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       number's magnitude — check every figure against the RESULTS table
       (192,770.57 is about $192.8K, not $192.77M).
     - Every number and claim must come from the RESULTS table or be directly
-      computable from it. Delete anything the results don't support. Do not
-      add coverage claims (year ranges, "plus benefits", etc.) the results
-      don't show.
+      computable from it. Delete anything the results don't support,
+      including any sentence describing what a figure includes or what years
+      it covers when the results don't state that. Compensation data here
+      contains pay components only; the data has no benefits information, so
+      remove any claim that an amount includes benefits.
     - NEVER total or net a long list yourself: arithmetic is only allowed
       over a handful of values you can verify digit by digit. If the results
       have no total row, do not state an overall total — describe the top
