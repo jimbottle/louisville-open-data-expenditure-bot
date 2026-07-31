@@ -108,11 +108,14 @@ def test_top_salaries_magnitudes_and_scope(con):
         assert avg_comp <= max_comp
         assert n >= 1
     # Police Chief is a single position: distinct-person count must be tiny,
-    # not a person-year rollup across years
-    chief_n = con.execute(
-        "SELECT employee_count FROM summary_top_salaries WHERE job_title = 'Police Chief'"
-    ).fetchone()[0]
-    assert chief_n <= 3
+    # not a person-year rollup across years. MAX across departments (the title
+    # could theoretically appear in more than one) and assert presence first
+    # so an absent row fails meaningfully instead of raising TypeError.
+    row = con.execute(
+        "SELECT MAX(employee_count) FROM summary_top_salaries WHERE job_title = 'Police Chief'"
+    ).fetchone()
+    assert row is not None and row[0] is not None, "Police Chief missing from summary_top_salaries"
+    assert row[0] <= 3
 
 
 # ── Expenditure types ─────────────────────────────────────────────────────────

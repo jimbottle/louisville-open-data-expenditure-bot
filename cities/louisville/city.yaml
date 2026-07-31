@@ -108,9 +108,12 @@ summaries:
   - salary_data
   sql: |-
     CREATE TABLE summary_top_salaries AS
-    -- Latest COMPLETE calendar year only (the max year is in progress, so its
-    -- partial YTD totals would drag averages down); distinct people, not
-    -- person-year rows.
+    -- Latest COMPLETE calendar year only; distinct people, not person-year
+    -- rows. MAX(CalYear)-1 ASSUMES the newest loaded year is always the
+    -- in-progress one (true for this dataset's refresh cadence, where the
+    -- portal publishes the current year as it accrues). If a refresh ever
+    -- loads only finalized years, this would skip the true latest complete
+    -- year — revisit alongside the salary_data dictionary prose.
     SELECT jobTitle AS job_title, Department AS department,
            CalYear AS calendar_year,
            ROUND(AVG(YTD_Total), 2) AS avg_total_comp,
@@ -392,9 +395,11 @@ dictionary:
       WORK_LOCATION: Work location.
   salary_data:
     description: Annual salary and compensation data for Louisville Metro employees,
-      calendar years 2021-2026 ONLY. The most recent year is in progress, so its
-      year-to-date totals are partial. YTD_Total is the sum of pay components
-      (regular, overtime, incentive, other) and does NOT include benefits.
+      calendar year 2021 to present ONLY (2021-2026 as of mid-2026) — it does NOT
+      reach back to 2008 like the expenditures table. The newest year is in
+      progress, so its year-to-date totals are partial. YTD_Total is the sum of
+      pay components (regular, overtime, incentive, other) and does NOT include
+      benefits.
     record_scope: Each row is one employee's compensation for one calendar year
       (a person-year, not a person — the same employee appears once per year).
     joins: Join to expenditures on Department <-> agency (fuzzy match needed).

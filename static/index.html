@@ -947,12 +947,18 @@ function scrollBottom() {
 }
 
 // Build the report-a-bad-answer email, prefilled with whatever conversation
-// detail this answer produced (SQL/results/debug only exist when the dev view
-// was on — the backend doesn't send them otherwise).
+// detail this answer produced. `results` always arrives from the backend
+// (humanized when dev mode is off); `sql` and `debug` are dev-view-only.
 const REPORT_EMAIL = 'dev@raylytics.io';
 
-function buildReportBody(report, interpText, scale) {
-  const cut = (s, n) => (s && s.length > n ? s.slice(0, Math.floor(n * scale)) + ' …[truncated]' : s || '');
+function buildReportBody(report, interpText, scale, extras = true) {
+  // Compare against the SCALED limit so every field genuinely shrinks with
+  // scale — comparing against the base limit would leave under-cap fields
+  // untouched and the shrink loop a no-op.
+  const cut = (s, n) => {
+    const lim = Math.max(40, Math.floor(n * scale));
+    return s && s.length > lim ? s.slice(0, lim) + ' …[truncated]' : (s || '');
+  };
   const parts = [
     'A Lou answer may be off.',
     '',
@@ -965,24 +971,32 @@ function buildReportBody(report, interpText, scale) {
     'Answer:',
     cut(interpText, 800) || '(no answer produced)',
   ];
-  if (report.sql) parts.push('', 'SQL:', cut(report.sql, 500));
-  if (report.results) parts.push('', `Results (${report.rows ?? '?'} rows):`, cut(report.results, 400));
-  if (report.debug.length) parts.push('', 'Debug:', cut(report.debug.join('\n'), 250));
+  if (extras) {
+    if (report.sql) parts.push('', 'SQL:', cut(report.sql, 500));
+    if (report.results) parts.push('', `Results (${report.rows ?? '?'} rows):`, cut(report.results, 400));
+    if (report.debug.length) parts.push('', 'Debug:', cut(report.debug.join('\n'), 250));
+  }
   parts.push('', 'What looked wrong (please describe):', '');
   return parts.join('\n');
 }
 
 function buildReport(report, interpText) {
   const subject = 'Lou answer report: ' + report.question.slice(0, 80);
-  // Shrink the body until the URL fits conservative external-handler limits —
-  // over-long mailto: URLs are one way browsers silently drop the handoff.
+  const mk = (body) =>
+    `mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  const BUDGET = 1900;  // conservative: MAPI-based handlers reject ~2000+
+  // Shrink on the PLAIN-TEXT side (never slice the encoded URL — that can cut
+  // a %-escape in half and drop the trailing prompt): smaller scales, then
+  // drop the SQL/results/debug extras entirely.
   let body = buildReportBody(report, interpText, 1);
-  let href = `mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
-  for (const scale of [0.5, 0.25]) {
-    if (href.length <= 1900) break;
-    body = buildReportBody(report, interpText, scale);
-    href = `mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  let href = mk(body);
+  for (const [scale, extras] of [[0.5, true], [0.25, true], [0.25, false], [0.1, false]]) {
+    if (href.length <= BUDGET) break;
+    body = buildReportBody(report, interpText, scale, extras);
+    href = mk(body);
   }
+  // Backstop only (unreachable for realistic inputs): strip any half escape.
+  if (href.length > 6000) href = href.slice(0, 6000).replace(/%[0-9A-Fa-f]?$/, '');
   return { subject, body, href };
 }
 
@@ -1011,8 +1025,8 @@ async function streamAnswer(question, opts = {}) {
   let interpBlock = null;
   let statusLine = null;  // rotating progress line shown while waiting
   let interpText = '';  // collect full interpretation for history
-  // Everything the report-answer email can include (populated as events arrive;
-  // sql/results/debug only arrive when dev mode is on)
+  // Everything the report-answer email can include (populated as events
+  // arrive; results always arrives, sql/debug only when dev mode is on)
   const report = { question, sql: '', results: '', rows: null, debug: [] };
 
   // Send prior history (not including current question) for context
@@ -1360,25 +1374,51 @@ async function streamAnswer(question, opts = {}) {
       reportBtn.title = 'Something off? Email us this answer’s details';
       reportBtn.addEventListener('click', async () => {
         const r = buildReport(report, interpText);
+        const reportText = `To: ${REPORT_EMAIL}\nSubject: ${r.subject}\n\n${r.body}`;
         // Fallback first: copy the full report so the user always ends up with
         // something actionable, even when the browser silently blocks the
         // mailto handoff or no mail client is configured.
         let copied = false;
         try {
-          await navigator.clipboard.writeText(
-            `To: ${REPORT_EMAIL}\nSubject: ${r.subject}\n\n${r.body}`
-          );
+          await navigator.clipboard.writeText(reportText);
           copied = true;
-        } catch { /* clipboard unavailable; the mailto attempt still runs */ }
-        reportBtn.textContent = copied
-          ? `Opening email… (report copied — paste to ${REPORT_EMAIL} if nothing opens)`
-          : 'Opening email…';
-        setTimeout(() => { reportBtn.textContent = 'Report an issue'; }, 6000);
+        } catch {
+          // Older/locked-down browsers: temporary-textarea copy
+          try {
+            const ta = document.createElement('textarea');
+            ta.value = reportText;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            copied = document.execCommand('copy');
+            ta.remove();
+          } catch { /* fall through to the inline details below */ }
+        }
+        if (copied) {
+          reportBtn.textContent = `Opening email… (report copied — paste to ${REPORT_EMAIL} if nothing opens)`;
+          setTimeout(() => { reportBtn.textContent = 'Report an issue'; }, 6000);
+        } else if (!agentDiv.querySelector('.report-fallback')) {
+          // Neither clipboard path worked: show the report inline so the user
+          // can select and copy it manually — never a silent no-op.
+          reportBtn.textContent = 'Report an issue';
+          const det = document.createElement('details');
+          det.className = 'debug-block report-fallback';
+          const sum = document.createElement('summary');
+          sum.textContent = `Couldn't copy automatically — report details (email to ${REPORT_EMAIL}):`;
+          const pre = document.createElement('pre');
+          pre.style.whiteSpace = 'pre-wrap';
+          pre.textContent = reportText;
+          det.appendChild(sum);
+          det.appendChild(pre);
+          det.open = true;
+          agentDiv.appendChild(det);
+          scrollBottom();
+        }
         // A real anchor click is the most reliably-handled mailto trigger
         // (location.href assignment is the variant browsers most often drop).
         const a = document.createElement('a');
         a.href = r.href;
-        a.rel = 'noopener';
         document.body.appendChild(a);
         a.click();
         a.remove();
