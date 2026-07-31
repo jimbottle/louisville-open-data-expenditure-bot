@@ -831,6 +831,9 @@ const devModeEl = document.getElementById('dev-mode');
 const syncDevVisibility = () =>
   document.body.classList.toggle('dev-visible', devModeEl.checked);
 devModeEl.addEventListener('change', syncDevVisibility);
+// pageshow re-sync: Firefox form restoration / bfcache can re-check the box
+// AFTER scripts run without firing 'change', desyncing toggle and body class.
+window.addEventListener('pageshow', syncDevVisibility);
 syncDevVisibility();
 
 const newChatBtn = document.getElementById('newchat-btn');
@@ -1041,13 +1044,12 @@ async function streamAnswer(question, opts = {}) {
   agentDiv.appendChild(typing);
   scrollBottom();
 
-  let sqlBlock = null;
-  let resultsBlock = null;
   let interpBlock = null;
   let statusLine = null;  // rotating progress line shown while waiting
   let interpText = '';  // collect full interpretation for history
-  // Everything the report-answer email can include (populated as events
-  // arrive; results always arrives, sql/debug only when dev mode is on)
+  // Everything the report-answer email can include — the backend streams all
+  // detail events (sql/results/log/debug) regardless of the Dev toggle now,
+  // so every answer's report carries full detail.
   const report = { question, sql: '', results: '', rows: null, debug: [] };
 
   // Send prior history (not including current question) for context
@@ -1168,8 +1170,11 @@ async function streamAnswer(question, opts = {}) {
         // to everyone so the Dev toggle works retroactively. For a non-dev
         // viewer those blocks are CSS-hidden, so they must NOT tear down the
         // typing indicator / status line — only visibly-rendered content may.
+        // NOTE: 'results' is CSS-hidden for non-dev viewers too, so it is
+        // deliberately NOT in this list — the "Summarizing…" status line must
+        // survive through it until the (visible) interpretation streams.
         const visibleContent = devMode
-          || ['results', 'chart', 'interpretation', 'error', 'info'].includes(event.type);
+          || ['chart', 'interpretation', 'error', 'info'].includes(event.type);
         if (visibleContent) {
           receivedAnyEvent = true;
           clearWaiting();
@@ -1189,7 +1194,7 @@ async function streamAnswer(question, opts = {}) {
 
         else if (event.type === 'sql') {
           report.sql = event.content;
-          sqlBlock = document.createElement('div');
+          const sqlBlock = document.createElement('div');
           sqlBlock.className = 'sql-block';
           sqlBlock.innerHTML = '<span class="label">SQL</span>';
           sqlBlock.appendChild(document.createTextNode(event.content));
@@ -1199,9 +1204,14 @@ async function streamAnswer(question, opts = {}) {
         else if (event.type === 'results') {
           report.results = event.content;
           report.rows = event.row_count;
-          resultsBlock = document.createElement('div');
+          const resultsBlock = document.createElement('div');
           resultsBlock.className = 'results-block';
-          resultsBlock.innerHTML = `<span class="label">Results (${event.row_count} rows)</span>`;
+          // Non-dev asks carry humanized (prose-labeled) results, not the raw
+          // table — label the difference for retroactive dev-view inspection.
+          const resultsLabel = event.humanized
+            ? `Results (${event.row_count} rows, humanized labels)`
+            : `Results (${event.row_count} rows)`;
+          resultsBlock.innerHTML = `<span class="label">${resultsLabel}</span>`;
           resultsBlock.appendChild(document.createTextNode(event.content));
           agentDiv.appendChild(resultsBlock);
         }
