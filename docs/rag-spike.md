@@ -48,7 +48,10 @@ dependencies, and a clear integration path.
 - **Citations:** a new `sources` SSE event carrying file numbers + Legistar
   URLs so the frontend can render links; instruct the interpreter to cite
   file numbers inline when it uses a document.
-- **Refresh:** re-run `rag.py ingest` in `refresh_data.py`'s cadence.
+- **Refresh:** re-run `rag.py ingest` in `refresh_data.py`'s cadence. DuckDB
+  allows one writer OR many readers per file, never both — `ingest` therefore
+  builds a `.part` file and `os.replace`s it in, and `retrieve` opens
+  read-only per query, so a refresh never collides with serving reads.
 - **Config-pack fit:** the corpus source belongs in the city pack — Legistar
   client name + matter type ids per city (most Legistar cities expose the same
   API; Cincinnati is on Legistar too).

@@ -62,7 +62,7 @@ def ingest(db_path: str = DEFAULT_DB, since: str = DEFAULT_SINCE) -> int:
                     m.get("MatterFile"),
                     m.get("MatterTypeName"),
                     m.get("MatterStatusName"),
-                    (m.get("MatterIntroDate") or "")[:10],
+                    (m.get("MatterIntroDate") or "")[:10] or None,
                     (m.get("MatterPassedDate") or "")[:10] or None,
                     m.get("MatterEnactmentNumber"),
                     text,
@@ -74,20 +74,34 @@ def ingest(db_path: str = DEFAULT_DB, since: str = DEFAULT_SINCE) -> int:
             time.sleep(0.2)
         print(f"type {type_id}: {len(rows):,} total docs so far")
 
-    con = duckdb.connect(db_path)
-    con.execute("DROP TABLE IF EXISTS documents")
-    con.execute("""
-        CREATE TABLE documents (
-            doc_id INTEGER, file_no VARCHAR, matter_type VARCHAR, status VARCHAR,
-            intro_date VARCHAR, passed_date VARCHAR, enactment_no VARCHAR,
-            text VARCHAR, url VARCHAR
-        )
-    """)
-    con.executemany("INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?)", rows)
-    con.execute("INSTALL fts; LOAD fts;")
-    con.execute("PRAGMA create_fts_index('documents', 'doc_id', 'text', overwrite=1)")
-    n = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-    con.close()
+    # Build into a fresh .part file and swap on success (same atomic pattern
+    # as pull_socrata): a failed ingest can never destroy the existing corpus,
+    # and the swap sidesteps DuckDB's one-writer-or-many-readers file locking.
+    os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
+    part_path = db_path + ".part"
+    if os.path.exists(part_path):
+        os.remove(part_path)
+    try:
+        con = duckdb.connect(part_path)
+        try:
+            con.execute("""
+                CREATE TABLE documents (
+                    doc_id INTEGER, file_no VARCHAR, matter_type VARCHAR, status VARCHAR,
+                    intro_date VARCHAR, passed_date VARCHAR, enactment_no VARCHAR,
+                    text VARCHAR, url VARCHAR
+                )
+            """)
+            con.executemany("INSERT INTO documents VALUES (?,?,?,?,?,?,?,?,?)", rows)
+            con.execute("INSTALL fts; LOAD fts;")
+            con.execute("PRAGMA create_fts_index('documents', 'doc_id', 'text', overwrite=1)")
+            n = con.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+        finally:
+            con.close()
+        os.replace(part_path, db_path)
+    except BaseException:
+        if os.path.exists(part_path):
+            os.remove(part_path)
+        raise
     print(f"Ingested {n:,} documents -> {db_path}")
     return n
 
@@ -99,17 +113,19 @@ def retrieve(question: str, k: int = 3, db_path: str = DEFAULT_DB, min_score: fl
     "no document context" rather than padding the prompt with weak hits.
     """
     con = duckdb.connect(db_path, read_only=True)
-    con.execute("LOAD fts;")
-    hits = con.execute("""
-        SELECT file_no, matter_type, status, intro_date, passed_date, enactment_no,
-               text, url,
-               fts_main_documents.match_bm25(doc_id, ?) AS score
-        FROM documents
-        WHERE score IS NOT NULL AND score >= ?
-        ORDER BY score DESC
-        LIMIT ?
-    """, [question, min_score, k]).fetchall()
-    con.close()
+    try:
+        con.execute("LOAD fts;")
+        hits = con.execute("""
+            SELECT file_no, matter_type, status, intro_date, passed_date, enactment_no,
+                   text, url,
+                   fts_main_documents.match_bm25(doc_id, ?) AS score
+            FROM documents
+            WHERE score IS NOT NULL AND score >= ?
+            ORDER BY score DESC
+            LIMIT ?
+        """, [question, min_score, k]).fetchall()
+    finally:
+        con.close()
     cols = ["file_no", "matter_type", "status", "intro_date", "passed_date",
             "enactment_no", "text", "url", "score"]
     return [dict(zip(cols, h)) for h in hits]
@@ -122,7 +138,8 @@ def format_context(hits: list) -> str:
     lines = ["## Related city legislation (cite by file number when used)"]
     for h in hits:
         lines.append(
-            f"- [{h['file_no']}] ({h['matter_type']}, {h['status']}, introduced {h['intro_date']}): {h['text'][:600]}"
+            f"- [{h['file_no']}] ({h['matter_type']}, {h['status']}, "
+            f"introduced {h['intro_date'] or 'n.d.'}): {h['text'][:600]}"
         )
     return "\n".join(lines)
 
