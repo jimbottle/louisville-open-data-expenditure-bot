@@ -10,6 +10,8 @@ to survive routine refreshes.
 Run: python -m pytest tests/test_known_answers.py -v
 """
 
+import os
+
 import pandas as pd
 import pytest
 from data_model import get_compact_schema_description, infer_chart, load_all_data
@@ -120,16 +122,26 @@ def test_top_salaries_magnitudes_and_scope(con):
 
 # ── Grants ────────────────────────────────────────────────────────────────────
 
+GRANT_ROLLUP_QUERY = (
+    "SELECT COALESCE(fund, 'TOTAL - ALL GRANT FUNDS') AS fund, "
+    "ROUND(SUM(total_amount), 2) AS total_amount FROM summary_grant_funding "
+    "GROUP BY ROLLUP(fund) ORDER BY total_amount DESC NULLS LAST"
+)
+
+
 def test_grant_rollup_prompt_query_stays_valid(con):
     """The SQL prompt tells the model to use EXACTLY this query for grant
     totals — if it ever breaks against the schema, the model will faithfully
-    reproduce broken SQL. Pin it: TOTAL row present, equal to the sum of the
-    per-fund rows, with a plausible source count and magnitude."""
-    df = con.execute(
-        "SELECT COALESCE(fund, 'TOTAL - ALL GRANT FUNDS') AS fund, "
-        "ROUND(SUM(total_amount), 2) AS total_amount FROM summary_grant_funding "
-        "GROUP BY ROLLUP(fund) ORDER BY total_amount DESC NULLS LAST"
-    ).fetchdf()
+    reproduce broken SQL. Pin it two ways: the string tested here must still
+    appear verbatim in app.py's prompt (no silent drift between prompt and
+    test), and executing it must yield a TOTAL row equal to the sum of the
+    per-fund rows with a plausible source count and magnitude."""
+    app_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")).read()
+    assert GRANT_ROLLUP_QUERY in app_src, (
+        "the prompt's copy-exact grant query no longer matches the tested one — "
+        "update GRANT_ROLLUP_QUERY and this assertion together"
+    )
+    df = con.execute(GRANT_ROLLUP_QUERY).fetchdf()
     totals = df[df["fund"] == "TOTAL - ALL GRANT FUNDS"]
     assert len(totals) == 1, "exactly one grand-total row"
     funds = df[df["fund"] != "TOTAL - ALL GRANT FUNDS"]

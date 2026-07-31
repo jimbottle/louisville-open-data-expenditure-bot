@@ -7,6 +7,7 @@ scans the prompt-bearing sources for the known past offenders so the bug
 class can't be silently reintroduced by a future prompt edit.
 """
 
+import glob
 import os
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -17,10 +18,15 @@ PAST_OFFENDERS = [
     "agency_canonical = 'Louisville Metro'",
 ]
 
-PROMPT_SOURCES = ["app.py", "analytics_agent.py"]
+# Everything whose text reaches a system prompt: the two prompt-building
+# modules plus every city pack (data_facts is injected verbatim).
+PROMPT_SOURCES = ["app.py", "analytics_agent.py"] + sorted(
+    os.path.relpath(p, REPO) for p in glob.glob(os.path.join(REPO, "cities", "*", "city.yaml"))
+)
 
 
 def test_no_quoted_model_voice_anti_phrases_in_prompt_sources():
+    assert any("city.yaml" in s for s in PROMPT_SOURCES)
     for fname in PROMPT_SOURCES:
         src = open(os.path.join(REPO, fname)).read()
         for offender in PAST_OFFENDERS:

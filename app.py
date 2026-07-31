@@ -48,7 +48,6 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from analytics_agent import (
-    build_interpret_prompt,
     execute_sql_safe,
     generate_sql,
     get_active_model,
@@ -723,9 +722,11 @@ async def ask(request: Request):
                     # Sort by the time/label column so the line reads chronologically
                     # instead of zig-zagging in rank order.
                     chart_df = result_df.sort_values(label_col) if chart_type == "line" else result_df
-                    # Grand-total rows (e.g. the ROLLUP 'TOTAL - ...' row) would
-                    # double the axis scale and dwarf the real bars — never chart them.
-                    chart_df = chart_df[~chart_df[label_col].astype(str).str.strip().str.upper().str.startswith("TOTAL")]
+                    # Grand-total rows (the ROLLUP label shape 'TOTAL - ...') would
+                    # double the axis scale and dwarf the real bars — never chart
+                    # them. Match the 'TOTAL - ' shape specifically: real vendors
+                    # are named 'TOTAL TOOL SUPPLY INC' etc. and must keep their bars.
+                    chart_df = chart_df[~chart_df[label_col].astype(str).str.strip().str.upper().str.match(r"TOTAL\s*-\s")]
                     if len(chart_df) < 2:
                         raise ValueError("too few chartable rows after dropping total rows")
                     labels = chart_df[label_col].astype(str).tolist()[:30]

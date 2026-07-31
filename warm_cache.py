@@ -25,6 +25,18 @@ STARTER_QUESTIONS = [
 ]
 
 
+def fetch_entries(host: str) -> dict:
+    """Cache entries keyed by question text.
+
+    Server keys are "<prompt-version>:<question>" so that a prompt change
+    invalidates old answers; strip the version so status checks keep working
+    across versions.
+    """
+    resp = requests.get(f"{host}/api/cache", timeout=10)
+    resp.raise_for_status()
+    return {k.split(":", 1)[-1]: v for k, v in resp.json().get("entries", {}).items()}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Warm response cache for starter questions")
     parser.add_argument("--host", default="http://localhost:8000")
@@ -34,19 +46,16 @@ def main():
 
     # Check current cache status
     try:
-        resp = requests.get(f"{args.host}/api/cache", timeout=10)
-        cache = resp.json()
-        cached_keys = set(cache.get("entries", {}).keys())
-        print(f"Currently cached: {len(cached_keys)} questions")
+        entries = fetch_entries(args.host)
+        print(f"Currently cached: {len(entries)} questions")
     except Exception as e:
         print(f"Could not reach bot at {args.host}: {e}")
         return
 
     if args.check_only:
         for q in STARTER_QUESTIONS:
-            key = q.lower().strip()
-            status = "CACHED" if key in cached_keys else "NOT CACHED"
-            info = cache["entries"].get(key, {})
+            info = entries.get(q.lower().strip(), {})
+            status = "CACHED" if info else "NOT CACHED"
             extra = ""
             if info:
                 extra = f" ({info['events']} events, interp={info['has_interpretation']}, error={info['has_error']})"
@@ -56,9 +65,8 @@ def main():
     # Warm uncached questions
     need_warming = []
     for q in STARTER_QUESTIONS:
-        key = q.lower().strip()
-        info = cache.get("entries", {}).get(key, {})
-        if key not in cached_keys or info.get("has_error") or not info.get("has_interpretation"):
+        info = entries.get(q.lower().strip(), {})
+        if not info or info.get("has_error") or not info.get("has_interpretation"):
             need_warming.append(q)
 
     if not need_warming:
@@ -88,11 +96,9 @@ def main():
     # Verify final cache status
     print("\nFinal cache status:")
     try:
-        resp = requests.get(f"{args.host}/api/cache", timeout=10)
-        cache = resp.json()
+        entries = fetch_entries(args.host)
         for q in STARTER_QUESTIONS:
-            key = q.lower().strip()
-            info = cache.get("entries", {}).get(key, {})
+            info = entries.get(q.lower().strip(), {})
             if info:
                 status = "GOOD" if info["has_interpretation"] and not info["has_error"] else "BAD"
             else:

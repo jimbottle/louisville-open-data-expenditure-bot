@@ -267,8 +267,12 @@ def build_system_prompt(schema_desc: str, metadata_context: str = "") -> str:
         {meta_section}""")
 
 
-def build_interpret_prompt(schema_desc: str) -> str:
-    """Build system prompt for result interpretation."""
+def build_interpret_prompt(schema_desc: str, extra_facts=None) -> str:
+    """Build system prompt for result interpretation.
+
+    extra_facts: per-city data facts (from the city config pack) to enforce —
+    mirrors refine_interpretation_stream's channel so the CLI path can carry
+    city facts too."""
     return textwrap.dedent(f"""\
         You are a data analytics assistant interpreting query results from government expenditure data.
 
@@ -287,7 +291,11 @@ def build_interpret_prompt(schema_desc: str) -> str:
         - Keep responses under 200 words unless the user asked for detail.
 
         ## Schema context
-        {schema_desc}""")
+        {schema_desc}""") + (
+        "\n\n## Facts about this city's data (enforce these)\n"
+        + "\n".join(f"- {f}" for f in extra_facts)
+        if extra_facts else ""
+    )
 
 
 def load_metadata_context(metadata_path: str) -> str:
