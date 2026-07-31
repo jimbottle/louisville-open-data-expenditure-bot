@@ -32,6 +32,11 @@ def _sql_quote(s: str) -> str:
     return s.replace("'", "''")
 
 
+def _ident_quote(s: str) -> str:
+    """Quote a SQL identifier (column name), escaping embedded double quotes."""
+    return '"' + s.replace('"', '""') + '"'
+
+
 def _source_files(source: dict, data_dir: str) -> list:
     """Resolve a source's file pattern to existing (year, path) pairs.
 
@@ -88,7 +93,9 @@ def _load_expenditures(con, cfg: CityConfig, data_dir: str) -> None:
             column_map = source.get("column_map", {})
             select = "*"
             if column_map:
-                renames = ", ".join(f'"{s}" AS "{d}"' for s, d in column_map.items() if s != d)
+                renames = ", ".join(
+                    f"{_ident_quote(s)} AS {_ident_quote(d)}" for s, d in column_map.items() if s != d
+                )
                 if renames:
                     select = f"* RENAME ({renames})"
             if not _table_exists(con, table):
@@ -122,7 +129,8 @@ def _load_expenditures(con, cfg: CityConfig, data_dir: str) -> None:
                             df[col] = None
                     df = df[existing_cols]
                     con.execute(f"INSERT INTO {table} SELECT * FROM df")
-                loaded_years.append(str(year))
+                if year is not None:
+                    loaded_years.append(str(year))
 
     total = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
     years_note = f" across {len(loaded_years)} years ({', '.join(sorted(loaded_years))})" if loaded_years else ""

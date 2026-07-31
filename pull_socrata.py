@@ -24,20 +24,29 @@ RETRY_DELAY = 5  # seconds
 
 
 def pull_csv(domain: str, dataset_id: str, out_path: str) -> int:
-    """Stream the bulk CSV export to out_path. Returns bytes written."""
+    """Stream the bulk CSV export to out_path. Returns bytes written.
+
+    Streams to a .part file and renames only on success, so an interrupted
+    download can never leave a truncated CSV that a later load would silently
+    ingest as complete.
+    """
     url = f"https://{domain}/api/views/{dataset_id}/rows.csv?accessType=DOWNLOAD"
+    part_path = out_path + ".part"
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             with requests.get(url, stream=True, timeout=600) as r:
                 r.raise_for_status()
                 written = 0
-                with open(out_path, "wb") as f:
+                with open(part_path, "wb") as f:
                     for chunk in r.iter_content(chunk_size=1 << 20):
                         f.write(chunk)
                         written += len(chunk)
-                return written
+            os.replace(part_path, out_path)
+            return written
         except requests.RequestException as e:
             if attempt == MAX_RETRIES:
+                if os.path.exists(part_path):
+                    os.remove(part_path)
                 raise
             print(f"  attempt {attempt} failed ({e}); retrying in {RETRY_DELAY}s")
             time.sleep(RETRY_DELAY)
