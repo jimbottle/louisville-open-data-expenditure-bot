@@ -1077,6 +1077,9 @@ async function streamAnswer(question, opts = {}) {
       // than a hard cut, so the "Querying…" -> answer handoff reads continuously.
       const sl = statusLine;
       statusLine = null;
+      // Mark as fading so the end-of-stream safety net doesn't count this
+      // dying element as visible content during its 200ms removal window.
+      sl.classList.add('fading');
       sl.style.opacity = '0';
       setTimeout(() => sl.remove(), 200);
     }
@@ -1208,7 +1211,9 @@ async function streamAnswer(question, opts = {}) {
           resultsBlock.className = 'results-block';
           // Non-dev asks carry humanized (prose-labeled) results, not the raw
           // table — label the difference for retroactive dev-view inspection.
-          const resultsLabel = event.humanized
+          // Absent flag (cache entries persisted before the flag existed) means
+          // humanized: only non-dev responses are ever cached.
+          const resultsLabel = event.humanized !== false
             ? `Results (${event.row_count} rows, humanized labels)`
             : `Results (${event.row_count} rows)`;
           resultsBlock.innerHTML = `<span class="label">${resultsLabel}</span>`;
@@ -1370,7 +1375,7 @@ async function streamAnswer(question, opts = {}) {
   // Safety net: if the stream ended without producing any renderable content,
   // remove the spinner and surface a fallback so the UI never hangs silently.
   clearWaiting();
-  if (!receivedAnyEvent && !agentDiv.querySelector('.error, .info, .status-line')) {
+  if (!receivedAnyEvent && !agentDiv.querySelector('.error, .info, .status-line:not(.fading)')) {
     showError("No response received from the server. Please try again.", { retry: true });
   }
 
