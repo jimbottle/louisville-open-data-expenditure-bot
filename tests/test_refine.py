@@ -102,8 +102,10 @@ def test_refine_timeout_truncates_and_stops_consuming():
             consumed.append(c)
             yield c
 
+    # timeout=-1: any elapsed time exceeds it, deterministic regardless of
+    # platform clock resolution (timeout=0 could see a 0.0 delta on coarse clocks)
     events = list(aa.refine_events_with_fallback(
-        two_chunks(), "the draft answer", _send, timeout=0,
+        two_chunks(), "the draft answer", _send, timeout=-1,
     ))
     text = _interps(events)
     assert text.startswith("First chunk. ")

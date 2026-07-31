@@ -851,7 +851,8 @@ Explain in plain text (no markdown) why this likely returned no results based on
                 _save_cache()
                 log.info("Cached response for: %s", question[:50])
             else:
-                log.info("Skipped caching (error or empty): %s", question[:50])
+                reason = "error" if has_error else ("truncated" if has_truncation else "no interpretation")
+                log.info("Skipped caching (%s): %s", reason, question[:50])
 
     def safe_stream():
         """Wrap event_stream so any unhandled error still terminates the SSE
