@@ -50,7 +50,9 @@ from analytics_agent import (
     build_interpret_prompt,
     execute_sql_safe,
     generate_sql,
+    get_active_model,
     get_last_tier_used,
+    get_model_fallback_event,
     interpret_results_stream,
     make_client,
     make_paid_client,
@@ -430,7 +432,12 @@ async def health():
     return {
         "status": status,
         "tables": stats,
-        "model": MODEL,
+        # "model" is the model actually in use; if a provider deprecation
+        # triggered a runtime fallback, model != model_configured and
+        # model_fallback carries the {from, to, time} of the switch.
+        "model": get_active_model(MODEL),
+        "model_configured": MODEL,
+        "model_fallback": get_model_fallback_event(),
         "errors": errors,
     }
 
@@ -626,7 +633,7 @@ async def ask(request: Request):
             for evt in flush_retry_logs():
                 yield evt
             yield send("sql", {"content": sql})
-            yield send("debug", {"content": f"SQL generated in {t_sql:.1f}s | {sql_usage.get('total_tokens', 0)} tokens | Model: {MODEL} | Tier: {get_last_tier_used()}"})
+            yield send("debug", {"content": f"SQL generated in {t_sql:.1f}s | {sql_usage.get('total_tokens', 0)} tokens | Model: {get_active_model(MODEL)} | Tier: {get_last_tier_used()}"})
 
         # Execute SQL
         if dev_mode:

@@ -91,6 +91,86 @@ DEFAULT_MODEL = "qwen-3-235b-a22b-instruct-2507"
 DEFAULT_BASE_URL = "https://api.cerebras.ai/v1"
 
 
+# ── Model fallback ───────────────────────────────────────────────────────────
+# Providers deprecate models without notice (qwen-3-235b 404'd in prod while
+# the container env still named it). On a model_not_found error we resolve a
+# replacement from MODEL_FALLBACKS (then anything the account offers), record
+# it module-wide so every later request uses it directly, and retry — no
+# container rebuild or env change needed. /api/health surfaces the switch.
+
+DEFAULT_MODEL_FALLBACKS = ["gpt-oss-120b", "zai-glm-4.7", "llama-3.3-70b", "llama3.1-8b"]
+
+_active_model = None          # replacement model once a fallback has engaged
+_model_fallback_event = None  # {"from", "to", "time"} of the last fallback
+
+
+def _fallback_preferences() -> list:
+    env = os.environ.get("MODEL_FALLBACKS", "")
+    if env.strip():
+        return [m.strip() for m in env.split(",") if m.strip()]
+    return list(DEFAULT_MODEL_FALLBACKS)
+
+
+def get_active_model(configured: str) -> str:
+    """The model actually in use: the configured one unless a fallback engaged."""
+    return _active_model or configured
+
+
+def get_model_fallback_event() -> dict | None:
+    """Details of the last model fallback, or None if none has occurred."""
+    return _model_fallback_event
+
+
+def _is_model_not_found(exc: Exception) -> bool:
+    return isinstance(exc, openai.NotFoundError) and "model" in str(exc).lower()
+
+
+def _resolve_fallback_model(client: openai.OpenAI, bad_model: str):
+    """Pick a replacement: first preference the provider offers, else anything."""
+    try:
+        available = [m.id for m in client.models.list().data]
+    except Exception as e:
+        log.error("Model fallback: could not list provider models: %s", e)
+        return None
+    for pref in _fallback_preferences():
+        if pref != bad_model and pref in available:
+            return pref
+    return next((m for m in available if m != bad_model), None)
+
+
+def _record_model_fallback(from_model: str, to_model: str) -> None:
+    global _active_model, _model_fallback_event
+    _active_model = to_model
+    _model_fallback_event = {
+        "from": from_model,
+        "to": to_model,
+        "time": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    log.error("MODEL FALLBACK: '%s' no longer exists at provider; now using '%s'", from_model, to_model)
+
+
+def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_client=None):
+    """Run an LLM call, surviving provider model deprecation.
+
+    make_call(client, model) must return a zero-arg callable. On a
+    model_not_found error the replacement is resolved once, recorded
+    module-wide, and the call retried with it.
+    """
+    model = get_active_model(model)
+    fallback_fn = make_call(fallback_client, model) if fallback_client else None
+    try:
+        return _call_with_retry(make_call(client, model), on_retry=on_retry, fallback_fn=fallback_fn)
+    except openai.NotFoundError as e:
+        if not _is_model_not_found(e):
+            raise
+        replacement = _resolve_fallback_model(client, model)
+        if not replacement:
+            raise
+        _record_model_fallback(model, replacement)
+        fallback_fn = make_call(fallback_client, replacement) if fallback_client else None
+        return _call_with_retry(make_call(client, replacement), on_retry=on_retry, fallback_fn=fallback_fn)
+
+
 def init_database(csv_path: str) -> tuple[duckdb.DuckDBPyConnection, str]:
     """Load CSV into DuckDB and return connection + schema description."""
     con = duckdb.connect()
@@ -225,21 +305,20 @@ Return a short analysis (3-5 sentences max) of your query plan, ending with the 
 
 def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None) -> tuple[str, dict, object]:
     """Think about the query before generating SQL. Returns (reasoning, usage_dict, raw_response)."""
-    def _make_call(c):
+    def _make_call(c, m):
         def _call():
             messages = [{"role": "system", "content": system_prompt + "\n\n" + REASONING_PROMPT}]
             if history:
                 messages.extend(history[-6:])
             messages.append({"role": "user", "content": question})
             return c.with_raw_response.chat.completions.create(
-                model=model,
+                model=m,
                 messages=messages,
                 temperature=0.2,
                 max_tokens=300,
             )
         return _call
-    fallback_fn = _make_call(fallback_client) if fallback_client else None
-    raw = _call_with_retry(_make_call(client), on_retry=on_retry, fallback_fn=fallback_fn)
+    raw = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client)
     response = raw.parse()
     usage = {}
     if hasattr(response, "usage") and response.usage:
@@ -253,7 +332,7 @@ def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, qu
 
 def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, reasoning: str = None, fallback_client: openai.OpenAI = None) -> tuple[str, dict, object]:
     """Ask the model to generate SQL. Returns (sql, usage_dict, raw_response)."""
-    def _make_call(c):
+    def _make_call(c, m):
         def _call():
             messages = [{"role": "system", "content": system_prompt}]
             if history:
@@ -263,14 +342,13 @@ def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question
                 user_content = f"Question: {question}\n\nQuery plan:\n{reasoning}\n\nNow write ONLY the SQL query based on this plan."
             messages.append({"role": "user", "content": user_content})
             return c.with_raw_response.chat.completions.create(
-                model=model,
+                model=m,
                 messages=messages,
                 temperature=0.1,
                 max_tokens=2048,
             )
         return _call
-    fallback_fn = _make_call(fallback_client) if fallback_client else None
-    raw = _call_with_retry(_make_call(client), on_retry=on_retry, fallback_fn=fallback_fn)
+    raw = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client)
     response = raw.parse()
     usage = {}
     if hasattr(response, "usage") and response.usage:
@@ -287,17 +365,19 @@ def interpret_results(
 ) -> str:
     """Ask the model to interpret SQL results in plain English."""
     user_msg = f"Question: {question}\n\nSQL executed:\n{sql}\n\nResults:\n{results}"
-    def _call():
-        return client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=0.3,
-            max_tokens=4096,
-        )
-    response = _call_with_retry(_call)
+    def _make_call(c, m):
+        def _call():
+            return c.chat.completions.create(
+                model=m,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=0.3,
+                max_tokens=4096,
+            )
+        return _call
+    response = _call_with_model_fallback(_make_call, client, model)
     return response.choices[0].message.content.strip()
 
 
@@ -306,22 +386,21 @@ def interpret_results_stream(
 ):
     """Stream interpretation chunks as a generator."""
     user_msg = f"Question: {question}\n\nSQL executed:\n{sql}\n\nResults:\n{results}"
-    def _make_call(c):
+    def _make_call(c, m):
         def _call():
             messages = [{"role": "system", "content": system_prompt}]
             if history:
                 messages.extend(history[-6:])
             messages.append({"role": "user", "content": user_msg})
             return c.chat.completions.create(
-                model=model,
+                model=m,
                 messages=messages,
                 temperature=0.3,
                 max_tokens=4096,
                 stream=True,
             )
         return _call
-    fallback_fn = _make_call(fallback_client) if fallback_client else None
-    stream = _call_with_retry(_make_call(client), on_retry=on_retry, fallback_fn=fallback_fn)
+    stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client)
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
