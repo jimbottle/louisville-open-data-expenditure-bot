@@ -454,6 +454,10 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       computable from it. Delete anything the results don't support. Do not
       add coverage claims (year ranges, "plus benefits", etc.) the results
       don't show.
+    - NEVER total or net a long list yourself: arithmetic is only allowed
+      over a handful of values you can verify digit by digit. If the results
+      have no total row, do not state an overall total — describe the top
+      items instead (a wrong grand total is worse than none).
     - Short numbered lines for lists; keep the whole answer under 180 words
       unless the draft genuinely needs more.
     - Plain text only — no markdown headers or tables.
