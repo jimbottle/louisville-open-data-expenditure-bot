@@ -56,6 +56,7 @@ from analytics_agent import (
     interpret_results_stream,
     make_client,
     make_paid_client,
+    refine_events_with_fallback,
     refine_interpretation_stream,
 )
 from data_model import (
@@ -730,22 +731,35 @@ Explain in plain text (no markdown) why this likely returned no results based on
         stream_timeout = 90  # max seconds per LLM stream
         # The draft interpretation accumulates server-side; the user-visible
         # stream is the refinement pass below (plain language, consistent
-        # formatting, numbers checked against the results table).
+        # formatting, numbers checked against the results table). Periodic
+        # keepalive frames flow during accumulation so the client's stall
+        # watchdog keeps resetting and disconnects remain detectable.
         draft = ""
+        draft_truncated = False
+        draft_error = None
+        last_beat = time.time()
         try:
             for chunk in interpret_results_stream(
                 client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry, history=history, fallback_client=paid_client
             ):
                 draft += chunk
                 interp_tokens += 1
-                if time.time() - t_start > stream_timeout:
+                now = time.time()
+                if now - last_beat > 8:
+                    last_beat = now
+                    for evt in flush_retry_logs():
+                        yield evt
+                    yield send("status", {"content": "Summarizing the results…"})
+                if now - t_start > stream_timeout:
                     log.warning("Interpretation stream timed out after %ds", stream_timeout)
                     track_error("interpretation", f"Stream timeout after {stream_timeout}s")
+                    draft_truncated = True
                     break
         except GeneratorExit:
             log.info("Client disconnected during interpretation stream")
             return
         except Exception as e:
+            draft_error = e
             log.error("Interpretation failed: %s", e)
             if is_rate_limit_error(e):
                 track_error("rate_limit", "Interpretation")
@@ -763,41 +777,38 @@ Explain in plain text (no markdown) why this likely returned no results based on
                 yield send("interpretation", {"content": "\n\n(I ran the query but had trouble summarizing the results. The data above is still accurate.)"})
         t_draft = time.time() - t_start
 
-        # Refinement pass: rewrite the draft for plain language, consistency,
-        # and accuracy against the results table. A failure here must NEVER
-        # lose the answer — the draft is the fallback.
-        if draft:
+        if draft_error is not None:
+            # The user already saw the error (or apology). Never refine a
+            # partial draft into a complete-looking answer on top of it — and
+            # never re-hit an already-exhausted API 2s later.
+            yield send("done", {})
+            return
+
+        if draft and draft_truncated:
+            # A timed-out draft is served as-is with a visible marker instead
+            # of being polished into something that reads as complete.
+            yield send("interpretation", {"content": humanize_text(draft)})
+            yield send("interpretation", {"content": "\n\n(Response truncated due to timeout)"})
+        elif draft:
+            # Refinement pass: rewrite the draft for plain language,
+            # consistency, and accuracy against the results table. A failure
+            # here must NEVER lose the answer — the draft is the fallback.
             yield send("log", {"content": "Refining the answer..."})
             yield send("debug", {"content": f"Draft interpretation in {t_draft:.1f}s | ~{interp_tokens} chunks"})
             time.sleep(2)  # RPM pacing between back-to-back LLM calls
-            t_refine_start = time.time()
-            refined_any = False
-            try:
-                for chunk in refine_interpretation_stream(
+            refine_counter = {"n": 0}
+            yield from refine_events_with_fallback(
+                refine_interpretation_stream(
                     client, MODEL, question, sql, result_str, draft, on_retry=on_retry, fallback_client=paid_client
-                ):
-                    refined_any = True
-                    yield send("interpretation", {"content": humanize_text(chunk)})
-                    interp_tokens += 1
-                    if time.time() - t_refine_start > stream_timeout:
-                        log.warning("Refinement stream timed out after %ds", stream_timeout)
-                        yield send("interpretation", {"content": "\n\n(Response truncated due to timeout)"})
-                        break
-            except GeneratorExit:
-                log.info("Client disconnected during refinement stream")
-                return
-            except Exception as e:
-                log.warning("Refinement failed (%s); serving draft", e)
-                track_error("interpretation", f"Refine failed: {str(e)[:150]}")
-                yield send("debug", {"content": f"Refinement failed ({type(e).__name__}); serving the draft answer"})
-                if refined_any:
-                    # Partial refined text already reached the client; don't
-                    # append the full draft after it.
-                    yield send("interpretation", {"content": "\n\n(Response truncated.)"})
-            if not refined_any:
-                yield send("interpretation", {"content": humanize_text(draft)})
-            else:
-                yield send("debug", {"content": f"Refined in {time.time() - t_refine_start:.1f}s"})
+                ),
+                draft,
+                send,
+                transform=humanize_text,
+                on_fail=lambda e: track_error("interpretation", f"Refine failed: {str(e)[:150]}"),
+                timeout=stream_timeout,
+                counter=refine_counter,
+            )
+            interp_tokens += refine_counter["n"]
         track_usage(0, interp_tokens)
         log.info("Request complete — %d chunks streamed", interp_tokens)
 

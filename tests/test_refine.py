@@ -53,6 +53,47 @@ class FakeStreamingClient:
         self.chat = _Chat()
 
 
+def _send(event_type, data):
+    return {"type": event_type, **data}
+
+
+def _interps(events):
+    return "".join(e["content"] for e in events if e["type"] == "interpretation")
+
+
+def test_fallback_serves_draft_when_refiner_fails_before_first_chunk():
+    def dead_iter():
+        raise RuntimeError("boom")
+        yield  # pragma: no cover
+
+    events = list(aa.refine_events_with_fallback(dead_iter(), "the draft answer", _send))
+    assert _interps(events) == "the draft answer"
+    assert any(e["type"] == "debug" and "serving the draft" in e["content"] for e in events)
+
+
+def test_fallback_truncation_note_when_refiner_fails_mid_stream():
+    def partial_iter():
+        yield "Refined so far. "
+        raise RuntimeError("boom")
+
+    events = list(aa.refine_events_with_fallback(partial_iter(), "the draft answer", _send))
+    text = _interps(events)
+    assert text.startswith("Refined so far. ")
+    assert "(Response truncated.)" in text
+    assert "the draft answer" not in text  # never append the draft after partial refined text
+
+
+def test_refine_success_streams_only_refined_text():
+    counter = {"n": 0}
+    events = list(aa.refine_events_with_fallback(
+        iter(["Clean ", "answer."]), "the draft answer", _send,
+        transform=str.upper, counter=counter,
+    ))
+    assert _interps(events) == "CLEAN ANSWER."
+    assert counter["n"] == 2
+    assert any(e["type"] == "debug" and e["content"].startswith("Refined in") for e in events)
+
+
 def test_refine_stream_yields_chunks_and_uses_lean_context(monkeypatch):
     monkeypatch.setattr(aa, "_active_model", None)
     client = FakeStreamingClient(["Refined ", "answer."])

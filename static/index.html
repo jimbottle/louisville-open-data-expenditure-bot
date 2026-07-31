@@ -1061,7 +1061,10 @@ async function streamAnswer(question, opts = {}) {
   // Watchdog: abort if the server sends nothing for too long, so the typing
   // indicator can never spin forever on a stalled or rate-limited backend.
   const controller = new AbortController();
-  const STALL_MS = 90000;  // max gap with no data before we give up
+  // Max gap with no data before we give up. Must exceed the server's worst
+  // silent stretch: an in-call rate-limit retry sleep (up to ~60s) can block
+  // before the first draft chunk, before the server's 8s keepalives start.
+  const STALL_MS = 120000;
   let stallTimer = setTimeout(() => controller.abort('timeout'), STALL_MS);
   const resetStall = () => {
     clearTimeout(stallTimer);

@@ -492,6 +492,44 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
             yield chunk.choices[0].delta.content
 
 
+def refine_events_with_fallback(refine_iter, draft, send, transform=None, on_fail=None, timeout=90, counter=None):
+    """Yield SSE events for the refine pass with the no-lost-answer invariant:
+    if the refiner fails before producing anything, the draft is served
+    verbatim; if it fails mid-stream, a visible truncation note is appended
+    (never the full draft after partial refined text).
+
+    Pure orchestration (no app globals) so it is unit-testable: `send` builds
+    the SSE frame, `transform` post-processes text (e.g. humanize), `on_fail`
+    receives the exception, `counter['n']` counts streamed chunks.
+    """
+    transform = transform or (lambda s: s)
+    t0 = time.time()
+    refined_any = False
+    try:
+        for chunk in refine_iter:
+            refined_any = True
+            if counter is not None:
+                counter["n"] += 1
+            yield send("interpretation", {"content": transform(chunk)})
+            if time.time() - t0 > timeout:
+                log.warning("Refinement stream timed out after %ds", timeout)
+                yield send("interpretation", {"content": "\n\n(Response truncated due to timeout)"})
+                break
+    except GeneratorExit:
+        raise
+    except Exception as e:
+        log.warning("Refinement failed (%s); serving draft", e)
+        if on_fail:
+            on_fail(e)
+        yield send("debug", {"content": f"Refinement failed ({type(e).__name__}); serving the draft answer"})
+        if refined_any:
+            yield send("interpretation", {"content": "\n\n(Response truncated.)"})
+    if not refined_any:
+        yield send("interpretation", {"content": transform(draft)})
+    else:
+        yield send("debug", {"content": f"Refined in {time.time() - t0:.1f}s"})
+
+
 BLOCKED_SQL = re.compile(
     r'\b(COPY|EXPORT|ATTACH|DETACH|LOAD|INSTALL|CREATE\s+MACRO|DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE|'
     r'read_csv|read_parquet|read_json|read_csv_auto|write_csv|httpfs|postgres_scan|sqlite_scan)\b',
