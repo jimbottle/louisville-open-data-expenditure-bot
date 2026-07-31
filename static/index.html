@@ -1164,8 +1164,16 @@ async function streamAnswer(question, opts = {}) {
           continue;
         }
 
-        receivedAnyEvent = true;
-        clearWaiting();
+        // The backend now streams dev events (log/sql/debug/usage/reasoning)
+        // to everyone so the Dev toggle works retroactively. For a non-dev
+        // viewer those blocks are CSS-hidden, so they must NOT tear down the
+        // typing indicator / status line — only visibly-rendered content may.
+        const visibleContent = devMode
+          || ['results', 'chart', 'interpretation', 'error', 'info'].includes(event.type);
+        if (visibleContent) {
+          receivedAnyEvent = true;
+          clearWaiting();
+        }
 
         if (event.type === 'reasoning') {
           const rb = document.createElement('div');

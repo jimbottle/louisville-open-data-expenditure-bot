@@ -345,6 +345,7 @@ and interpret results. You work with Louisville Metro government open data.
 - When asked about "largest single payments", use invoice_amount (the actual invoice value) rather than extended_amount, and filter for invoice_amount > 0.
 - When ranking payees or agencies by total spend, use SUM(extended_amount) grouped by the entity. Do NOT use MAX() or pick individual rows, as single rows may contain erroneous outlier values that are offset by other rows.
 - If a query asks for individual transactions (not aggregates), add WHERE is_data_artifact = FALSE to exclude known erroneous records.
+- NEVER invent filters the user did not ask for. Do not add fiscal_year = <some year>, agency, or fund constraints unless the question names them explicitly. Questions like "how much X has Louisville received/spent" mean ALL years and ALL agencies. (A real failure: adding fiscal_year = 2025 AND agency_canonical = 'Louisville Metro' — not even a real agency value — turned a good question into 0 rows.)
 - The `is_offsetting` column flags rows that are part of zero-sum offsetting pairs. The `is_data_artifact` column flags extreme outliers with offsetting counterparts (e.g., $224M SUSTEEN entry that nets to zero). Exclude these when looking for individual large transactions.
 
 ## Pre-computed Summary Tables (use these for common questions — they are pre-validated and faster)
@@ -359,7 +360,7 @@ and interpret results. You work with Louisville Metro government open data.
 - `contractor_profiles` — top 200 payees by total spend, enriched with KY Secretary of State data. IMPORTANT: this table only contains the 200 highest-spending vendors. For questions about small vendors, low-spend contractors, or the full universe of payees, query the `expenditures` table directly (GROUP BY payee_canonical).
 - `summary_top_contractors` — pre-filtered list of contractors WITH registered agents, ranked by total spend. Use this for "who are the registered agents" or "who runs the top contractors" questions. Already excludes government entities and null agents. ALWAYS SELECT payee, total_spend, AND sos_registered_agent together — never omit total_spend. Example: SELECT payee, total_spend, sos_registered_agent FROM summary_top_contractors ORDER BY total_spend DESC LIMIT 10.
 - Government entities (JEFFERSON COUNTY CLERK, LOUISVILLE METRO AFFORDABLE HOUSING TRUST FUND, FLEETONE, KENTUCKY STATE TREASURER) are NOT contractors — exclude them from contractor queries.
-- `summary_grant_funding` — grant/federal funding by fund source with total amounts, transaction counts, and year ranges. Use for "how much grant funding" or "funding sources" questions. Already filtered to grant-related funds.
+- `summary_grant_funding` — grant/federal funding by fund source with total amounts, transaction counts, and year ranges. For ANY question about grant funding, grant sources, or federal funding you MUST query this table (SELECT fund, total_amount, transaction_count, first_year, last_year FROM summary_grant_funding). NEVER hand-roll fund LIKE '%grant%' filters on expenditures — that misses federal, CARES, CDBG, HOME, stimulus and other grant funds that don't contain the word "grant"; this summary already encodes the full pattern list.
 - Use summary tables for quick overviews and the starter questions. For questions asking about specific entities, full breakdowns, "all" of something, outliers, filtering, or any detailed analysis, query the raw `expenditures` table directly. When computing totals or sums, NEVER limit the query to a subset — include all matching rows unless the user explicitly asks for a top-N.
 - When the user asks for a total, sum, or aggregate, do NOT add a LIMIT clause that would exclude data. Only use LIMIT when the user asks for "top N" or the result set would be unreasonably large (>100 rows).
 
@@ -589,13 +590,11 @@ async def ask(request: Request):
         reasoning = None
 
         # Generate SQL
-        if dev_mode:
-            yield send("log", {"content": "Generating SQL query..."})
-        else:
-            yield send("status", {"content": "Writing the query…"})
+        yield send("log", {"content": "Generating SQL query..."})
+        yield send("status", {"content": "Writing the query…"})
         t_start = time.time()
         try:
-            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry if dev_mode else None, history=history, reasoning=reasoning, fallback_client=paid_client)
+            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry, history=history, reasoning=reasoning, fallback_client=paid_client)
             track_usage(sql_usage.get("prompt_tokens", 0), sql_usage.get("completion_tokens", 0))
             update_limits_from_headers(raw_resp)
             log.info("SQL generated in %.1fs (%d tokens)", time.time() - t_start, sql_usage.get("total_tokens", 0))
@@ -611,71 +610,60 @@ async def ask(request: Request):
             log.error("SQL generation failed: %s", e)
             if is_rate_limit_error(e):
                 track_error("rate_limit", "SQL generation")
-                if dev_mode:
-                    yield send("log", {"content": "Rate limit hit during SQL generation. Retries exhausted."})
+                yield send("log", {"content": "Rate limit hit during SQL generation. Retries exhausted."})
                 yield send("error", {"content": RATE_LIMIT_MSG})
             elif is_service_error(e):
                 track_error("service", str(e)[:200])
-                if dev_mode:
-                    yield send("log", {"content": f"Service error: {type(e).__name__}"})
-                    yield send("debug", {"content": f"LLM service error detail: {e}"})
+                yield send("log", {"content": f"Service error: {type(e).__name__}"})
+                yield send("debug", {"content": f"LLM service error detail: {e}"})
                 yield send("error", {"content": SERVICE_ERROR_MSG})
             else:
                 track_error("sql_gen", str(e)[:200])
-                if dev_mode:
-                    yield send("log", {"content": f"SQL generation error: {type(e).__name__}"})
-                    yield send("debug", {"content": f"SQL gen error detail: {e}"})
+                yield send("log", {"content": f"SQL generation error: {type(e).__name__}"})
+                yield send("debug", {"content": f"SQL gen error detail: {e}"})
                 yield send("error", {"content": "I couldn't turn that into a query. Try rewording it, or ask about spending, salaries, contractors, or capital projects."})
             return
         t_sql = time.time() - t_start
 
-        if dev_mode:
-            for evt in flush_retry_logs():
-                yield evt
-            yield send("sql", {"content": sql})
-            yield send("debug", {"content": f"SQL generated in {t_sql:.1f}s | {sql_usage.get('total_tokens', 0)} tokens | Model: {get_active_model(MODEL)} | Tier: {get_last_tier_used()}"})
+        for evt in flush_retry_logs():
+            yield evt
+        yield send("sql", {"content": sql})
+        yield send("debug", {"content": f"SQL generated in {t_sql:.1f}s | {sql_usage.get('total_tokens', 0)} tokens | Model: {get_active_model(MODEL)} | Tier: {get_last_tier_used()}"})
 
         # Execute SQL
-        if dev_mode:
-            yield send("log", {"content": "Executing query against database..."})
-        else:
-            yield send("status", {"content": "Querying the data…"})
+        yield send("log", {"content": "Executing query against database..."})
+        yield send("status", {"content": "Querying the data…"})
         t_start = time.time()
         try:
             with db_lock:
                 result_df, result_str = execute_sql_safe(con, sql)
         except Exception as e:
             log.warning("SQL execution failed: %s — retrying", e)
-            if dev_mode:
-                yield send("log", {"content": f"Query failed: {type(e).__name__}. Asking model to fix..."})
+            yield send("log", {"content": f"Query failed: {type(e).__name__}. Asking model to fix..."})
             try:
                 fix_prompt = f"The following SQL failed with error: {e}\n\nOriginal SQL:\n{sql}\n\nFix the SQL query. Return ONLY the corrected SQL."
-                sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry if dev_mode else None, history=history, fallback_client=paid_client)
+                sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry, history=history, fallback_client=paid_client)
                 track_usage(retry_usage.get("prompt_tokens", 0), retry_usage.get("completion_tokens", 0))
                 update_limits_from_headers(raw_resp)
                 log.info("SQL retry generated")
-                if dev_mode:
-                    yield send("log", {"content": "Retrying with corrected SQL..."})
-                    yield send("sql", {"content": sql})
+                yield send("log", {"content": "Retrying with corrected SQL..."})
+                yield send("sql", {"content": sql})
                 with db_lock:
                     result_df, result_str = execute_sql_safe(con, sql)
             except Exception as e2:
                 if is_rate_limit_error(e2):
                     track_error("rate_limit", "SQL retry")
-                    if dev_mode:
-                        yield send("log", {"content": "Rate limit hit during SQL retry."})
+                    yield send("log", {"content": "Rate limit hit during SQL retry."})
                     yield send("error", {"content": RATE_LIMIT_MSG})
                 elif is_service_error(e2):
                     track_error("service", str(e2)[:200])
-                    if dev_mode:
-                        yield send("log", {"content": f"Service error during retry: {type(e2).__name__}"})
-                        yield send("debug", {"content": f"LLM service error detail: {e2}"})
+                    yield send("log", {"content": f"Service error during retry: {type(e2).__name__}"})
+                    yield send("debug", {"content": f"LLM service error detail: {e2}"})
                     yield send("error", {"content": SERVICE_ERROR_MSG})
                 else:
                     track_error("sql_exec", str(e2)[:200])
-                    if dev_mode:
-                        yield send("log", {"content": f"Retry also failed: {type(e2).__name__}"})
-                        yield send("debug", {"content": f"SQL exec error detail: {e2}"})
+                    yield send("log", {"content": f"Retry also failed: {type(e2).__name__}"})
+                    yield send("debug", {"content": f"SQL exec error detail: {e2}"})
                     yield send("error", {"content": "That query couldn't be run against the data, even after a retry. Try simplifying or rephrasing your question."})
                 return
         t_exec = time.time() - t_start
@@ -683,8 +671,7 @@ async def ask(request: Request):
         display_str = result_str if dev_mode else humanize_text(result_str)
         yield send("results", {"content": display_str, "row_count": len(result_df)})
 
-        if dev_mode:
-            yield send("debug", {"content": f"Query executed in {t_exec:.2f}s | {len(result_df)} rows returned"})
+        yield send("debug", {"content": f"Query executed in {t_exec:.2f}s | {len(result_df)} rows returned"})
 
         # Chart visualization
         if len(result_df) >= 2:
@@ -735,16 +722,14 @@ Explain in plain text (no markdown) why this likely returned no results based on
             yield send("done", {})
             return
 
-        if dev_mode:
-            yield send("log", {"content": "Interpreting results..."})
-        else:
-            yield send("status", {"content": "Summarizing the results…"})
+        yield send("log", {"content": "Interpreting results..."})
+        yield send("status", {"content": "Summarizing the results…"})
         t_start = time.time()
         interp_tokens = 0
         stream_timeout = 90  # max seconds for entire interpretation stream
         try:
             for chunk in interpret_results_stream(
-                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry if dev_mode else None, history=history, fallback_client=paid_client
+                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry, history=history, fallback_client=paid_client
             ):
                 yield send("interpretation", {"content": humanize_text(chunk)})
                 interp_tokens += 1
@@ -760,47 +745,43 @@ Explain in plain text (no markdown) why this likely returned no results based on
             log.error("Interpretation failed: %s", e)
             if is_rate_limit_error(e):
                 track_error("rate_limit", "Interpretation")
-                if dev_mode:
-                    yield send("log", {"content": "Rate limit hit during interpretation. Retries exhausted."})
+                yield send("log", {"content": "Rate limit hit during interpretation. Retries exhausted."})
                 yield send("error", {"content": RATE_LIMIT_MSG})
             elif is_service_error(e):
                 track_error("service", str(e)[:200])
-                if dev_mode:
-                    yield send("log", {"content": f"Service error during interpretation: {type(e).__name__}"})
-                    yield send("debug", {"content": f"LLM service error detail: {e}"})
+                yield send("log", {"content": f"Service error during interpretation: {type(e).__name__}"})
+                yield send("debug", {"content": f"LLM service error detail: {e}"})
                 yield send("error", {"content": SERVICE_ERROR_MSG})
             else:
                 track_error("interpretation", str(e)[:200])
-                if dev_mode:
-                    yield send("log", {"content": f"Interpretation error: {type(e).__name__}"})
-                    yield send("debug", {"content": f"Interpretation error detail: {e}"})
+                yield send("log", {"content": f"Interpretation error: {type(e).__name__}"})
+                yield send("debug", {"content": f"Interpretation error detail: {e}"})
                 yield send("interpretation", {"content": "\n\n(I ran the query but had trouble summarizing the results. The data above is still accurate.)"})
         track_usage(0, interp_tokens)
         log.info("Request complete — %d chunks streamed", interp_tokens)
 
-        if dev_mode:
-            for evt in flush_retry_logs():
-                yield evt
-            t_interp = time.time() - t_start
-            u = get_usage_summary()
-            yield send("debug", {"content": f"Interpretation streamed in {t_interp:.1f}s | ~{interp_tokens} chunks | Tier: {get_last_tier_used()}"})
-            # Per-request token count (SQL gen tokens + estimated interpretation tokens)
-            request_tokens = sql_usage.get("total_tokens", 0) + interp_tokens
-            tpd = u["limits"]["tpd"] or 1000000
-            tpd_remaining = tpd - u["tokens_today"]
-            yield send("usage", {
-                "requests_today": u["requests_today"],
-                "rpd_remaining": u["rpd_remaining"],
-                "rpd_pct": u["rpd_pct"],
-                "rpm_used": u["requests_per_minute"],
-                "rpm_remaining": u["rpm_remaining"],
-                "tokens_today": u["tokens_today"],
-                "tokens_remaining": max(0, tpd_remaining),
-                "tokens_limit": tpd,
-                "request_tokens": request_tokens,
-                "local_prompt_tokens_today": u["local_prompt_tokens_today"],
-                "local_completion_tokens_today": u["local_completion_tokens_today"],
-            })
+        for evt in flush_retry_logs():
+            yield evt
+        t_interp = time.time() - t_start
+        u = get_usage_summary()
+        yield send("debug", {"content": f"Interpretation streamed in {t_interp:.1f}s | ~{interp_tokens} chunks | Tier: {get_last_tier_used()}"})
+        # Per-request token count (SQL gen tokens + estimated interpretation tokens)
+        request_tokens = sql_usage.get("total_tokens", 0) + interp_tokens
+        tpd = u["limits"]["tpd"] or 1000000
+        tpd_remaining = tpd - u["tokens_today"]
+        yield send("usage", {
+            "requests_today": u["requests_today"],
+            "rpd_remaining": u["rpd_remaining"],
+            "rpd_pct": u["rpd_pct"],
+            "rpm_used": u["requests_per_minute"],
+            "rpm_remaining": u["rpm_remaining"],
+            "tokens_today": u["tokens_today"],
+            "tokens_remaining": max(0, tpd_remaining),
+            "tokens_limit": tpd,
+            "request_tokens": request_tokens,
+            "local_prompt_tokens_today": u["local_prompt_tokens_today"],
+            "local_completion_tokens_today": u["local_completion_tokens_today"],
+        })
 
         yield send("done", {})
 
