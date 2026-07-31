@@ -61,9 +61,13 @@ def test_louisville_pack_matches_engine_expectations():
     # the two Louisville eras with the schema break
     readers = [s["reader"] for s in cfg.expenditures["sources"]]
     assert readers == ["duckdb_union", "pandas_mapped"]
-    # dictionary covers all seven curated tables
-    assert len(cfg.dictionary) == 7
-    assert "expenditures" in cfg.dictionary
+    # dictionary covers all seven curated source tables (summary-table entries
+    # may be added on top, so no exact-count pin)
+    source_tables = {
+        "expenditures", "salary_data", "capital_projects", "active_contractors",
+        "staff_demographics", "hr_requisitions", "contractor_profiles",
+    }
+    assert source_tables <= set(cfg.dictionary)
     # all eight summary tables present
     assert len(cfg.summaries) == 8
     # app.py depends on these legacy shapes being non-empty for expenditures

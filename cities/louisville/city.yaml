@@ -108,12 +108,17 @@ summaries:
   - salary_data
   sql: |-
     CREATE TABLE summary_top_salaries AS
+    -- Latest COMPLETE calendar year only (the max year is in progress, so its
+    -- partial YTD totals would drag averages down); distinct people, not
+    -- person-year rows.
     SELECT jobTitle AS job_title, Department AS department,
+           CalYear AS calendar_year,
            ROUND(AVG(YTD_Total), 2) AS avg_total_comp,
            ROUND(MAX(YTD_Total), 2) AS max_total_comp,
-           COUNT(*) AS employee_count
+           COUNT(DISTINCT Employee_Name) AS employee_count
     FROM salary_data
-    GROUP BY jobTitle, Department
+    WHERE CalYear = (SELECT MAX(CalYear) - 1 FROM salary_data)
+    GROUP BY jobTitle, Department, CalYear
     ORDER BY avg_total_comp DESC
 - table: summary_expenditure_type
   question: How does spending break down between operating and capital?
@@ -386,8 +391,12 @@ dictionary:
       TYPE_OF_HIRE: Type of hire (new, replacement, etc.).
       WORK_LOCATION: Work location.
   salary_data:
-    description: Annual salary and compensation data for Louisville Metro employees.
-    record_scope: Each row is one employee's compensation for a calendar year.
+    description: Annual salary and compensation data for Louisville Metro employees,
+      calendar years 2021-2026 ONLY. The most recent year is in progress, so its
+      year-to-date totals are partial. YTD_Total is the sum of pay components
+      (regular, overtime, incentive, other) and does NOT include benefits.
+    record_scope: Each row is one employee's compensation for one calendar year
+      (a person-year, not a person — the same employee appears once per year).
     joins: Join to expenditures on Department <-> agency (fuzzy match needed).
     labels:
       CalYear: Calendar Year
@@ -410,7 +419,23 @@ dictionary:
       Overtime_Rate: Overtime pay received.
       Incentive_Allowance: Incentive and allowance pay.
       Other: Other compensation.
-      YTD_Total: Total year-to-date compensation.
+      YTD_Total: Total year-to-date pay (regular + overtime + incentive + other; no
+        benefits). Dollar amounts — a value like 192770.57 is ~$193K. Partial for
+        the in-progress year.
+  summary_top_salaries:
+    description: Average and maximum total pay by job title and department for the
+      most recent COMPLETE calendar year. Values are in dollars (a value like
+      192770.57 is ~$193K, not millions). High averages for field titles (e.g.
+      EMS paramedics) are usually overtime-driven.
+    record_scope: Each row is one (job title, department) group in the latest complete
+      calendar year.
+    columns:
+      job_title: Job title/position.
+      department: Department name (the same title can appear in several departments).
+      calendar_year: The complete calendar year the figures cover.
+      avg_total_comp: Average total pay in dollars across employees in the group.
+      max_total_comp: Highest individual total pay in dollars in the group.
+      employee_count: Number of DISTINCT employees in the group that year.
   staff_demographics:
     description: Workforce demographics by department, gender, ethnicity, and education level.
     record_scope: Each row is a demographic group count within a department.

@@ -275,6 +275,13 @@ def build_interpret_prompt(schema_desc: str) -> str:
         ## Rules
         - Give concise, insightful answers. Lead with the key finding.
         - Mention specific numbers and comparisons.
+        - NEVER rescale numbers. Repeat values at the magnitude shown in the results:
+          192,770.57 is about $192.8K (thousands), NOT $192.77M. Only write M or B
+          if the digits in the results actually reach millions/billions.
+        - Only state facts that appear in the schema context or the results. Do NOT
+          claim what years a dataset covers, or what a compensation/amount figure
+          includes (e.g. "plus benefits"), unless the schema context says so
+          explicitly for THAT table — never borrow another table's coverage.
         - If results are empty, explain what that likely means.
         - If the data shows something notable or unexpected, call it out.
         - Keep responses under 200 words unless the user asked for detail.

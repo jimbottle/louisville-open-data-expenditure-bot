@@ -92,6 +92,29 @@ def test_top_salary_is_police_chief(con):
     assert r[0] == "Police Chief"
 
 
+def test_top_salaries_magnitudes_and_scope(con):
+    """Regression for the 'highest paid positions' answer (louisville-open-data-kxm):
+    the summary must cover ONLY the latest complete year, count distinct people,
+    and carry dollar magnitudes in the low hundreds of thousands (the LLM once
+    rendered these as millions — the deterministic layer must not feed that)."""
+    rows = con.execute("""
+        SELECT calendar_year, avg_total_comp, max_total_comp, employee_count
+        FROM summary_top_salaries ORDER BY avg_total_comp DESC LIMIT 10
+    """).fetchall()
+    max_year = con.execute("SELECT MAX(CalYear) FROM salary_data").fetchone()[0]
+    for year, avg_comp, max_comp, n in rows:
+        assert year == max_year - 1, "must use the latest COMPLETE year, not the partial one"
+        assert 100_000 < avg_comp < 500_000, f"top-10 avg comp {avg_comp} outside plausible $K range"
+        assert avg_comp <= max_comp
+        assert n >= 1
+    # Police Chief is a single position: distinct-person count must be tiny,
+    # not a person-year rollup across years
+    chief_n = con.execute(
+        "SELECT employee_count FROM summary_top_salaries WHERE job_title = 'Police Chief'"
+    ).fetchone()[0]
+    assert chief_n <= 3
+
+
 # ── Expenditure types ─────────────────────────────────────────────────────────
 
 def test_expenditure_types_exist(con):
