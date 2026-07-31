@@ -962,7 +962,7 @@ function buildReportBody(report, interpText, scale, extras = true) {
   const parts = [
     'A Lou answer may be off.',
     '',
-    'Page: ' + location.href,
+    'Page: ' + cut(location.href, 200),
     'Time: ' + new Date().toISOString(),
     '',
     'Question:',
@@ -1383,17 +1383,19 @@ async function streamAnswer(question, opts = {}) {
           await navigator.clipboard.writeText(reportText);
           copied = true;
         } catch {
-          // Older/locked-down browsers: temporary-textarea copy
+          // Older/locked-down browsers: temporary-textarea copy. The remove()
+          // sits in a finally so a throwing select()/execCommand can never
+          // leave the report text parked invisibly in the DOM.
+          const ta = document.createElement('textarea');
           try {
-            const ta = document.createElement('textarea');
             ta.value = reportText;
             ta.style.position = 'fixed';
             ta.style.opacity = '0';
             document.body.appendChild(ta);
             ta.select();
             copied = document.execCommand('copy');
-            ta.remove();
           } catch { /* fall through to the inline details below */ }
+          finally { ta.remove(); }
         }
         if (copied) {
           reportBtn.textContent = `Opening email… (report copied — paste to ${REPORT_EMAIL} if nothing opens)`;
