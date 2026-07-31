@@ -1,0 +1,55 @@
+# External uptime probe for the production bot (louisville-open-data-5q5).
+# Runs from GitHub's network through Cloudflare — the same path real users
+# take. A failing run triggers GitHub's workflow-failure notification.
+#
+# Failure conditions:
+#   - /api/health unreachable, non-200, or status != "ok"
+#   - model_fallback non-null (the configured model was deprecated at the
+#     provider; the app survived via runtime fallback but wants attention)
+#   - /api/ask SSE probe (empty question — free, no LLM call) not returning
+#     200 text/event-stream
+# errors_last_hour > 0 is a warning annotation only: with status still "ok"
+# it's <= 5 errors/hour, which is usually per-IP rate-limit noise.
+
+name: uptime
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Health probe
+        run: |
+          body=$(curl -sS --fail --max-time 20 https://louisville.raylytics.io/api/health)
+          echo "$body" | jq .
+          status=$(echo "$body" | jq -r .status)
+          fallback=$(echo "$body" | jq -c '.model_fallback // empty')
+          errs=$(echo "$body" | jq -r '.errors.errors_last_hour // 0')
+          if [ "$status" != "ok" ]; then
+            echo "::error::/api/health status=$status"
+            exit 1
+          fi
+          if [ -n "$fallback" ]; then
+            echo "::error::model fallback engaged (configured model deprecated at provider): $fallback"
+            exit 1
+          fi
+          if [ "$errs" != "0" ]; then
+            echo "::warning::errors_last_hour=$errs (status still ok — likely rate-limit noise)"
+          fi
+
+      - name: API end-to-end probe (SSE handshake, no LLM cost)
+        run: |
+          code_type=$(curl -sS -o /dev/null --max-time 30 \
+            -w '%{http_code} %{content_type}' \
+            -X POST https://louisville.raylytics.io/api/ask \
+            -H 'Content-Type: application/json' \
+            --data '{"question":""}')
+          echo "probe result: $code_type"
+          case "$code_type" in
+            "200 text/event-stream"*) echo "SSE probe ok" ;;
+            *) echo "::error::/api/ask probe failed: $code_type"; exit 1 ;;
+          esac
