@@ -1,13 +1,11 @@
-# PAPER CONFIG — Cincinnati, OH (not runnable yet)
-#
-# Written against the schema verified live in docs/city-survey.md to prove the
-# config format holds for a Socrata city. Blockers before this runs:
-#   - `reader: socrata` is not implemented (needs bulk-CSV pull, types from
-#     /api/views; see survey — simpler than the ArcGIS path)
-#   - a pull step (pull_socrata.py analog of pull_arcgis.py)
-# Note: this pack maps onto canonical v0 names (payee/amount/category, see
-# docs/canonical-model.md §2); the Louisville pack keeps its legacy column
-# names until prompts/summaries are migrated.
+# Cincinnati, OH city config pack — RUNNABLE (second-city portability proof,
+# louisville-open-data-ftq). Data pulled via:
+#   python pull_socrata.py data.cincinnati-oh.gov qrj9-83t8 -n vendor_payments -o data_cincinnati --metadata
+#   (+ wmj4-ygbf salary_data, 7dk3-gngs business_licenses, hv35-hdk2 budget)
+# Run with: CITY_CONFIG=cities/cincinnati/city.yaml DATA_DIR=data_cincinnati uvicorn app:app
+# Uses canonical v0 column names (docs/canonical-model.md); canonical maps are
+# unseeded stubs — curation is a later onboarding step, the engine mirrors the
+# source columns until then.
 
 city:
   name: Cincinnati
@@ -19,31 +17,35 @@ expenditures:
   table: expenditures
   sources:
     - id: vendor_payments
-      reader: socrata            # NOT IMPLEMENTED — paper only
-      domain: data.cincinnati-oh.gov
-      dataset_id: qrj9-83t8      # City of Cincinnati Vendor Payments, FY2014+, weekly
+      reader: duckdb_union
+      files: vendor_payments.csv     # Socrata qrj9-83t8, FY2014+, refreshed weekly
       column_map:
-        vendor_name: payee
-        amount: amount
-        record_date: payment_date
-        dept_desc: agency
-        fund_desc: fund
-        exp_acct_cat_desc: category
-        check_no: payment_number
-        fiscal_year: fiscal_year
-      # extensions kept verbatim: acct_period, trans_id, trans_line_no,
-      # dept_code, fund_code, exp_acct_cat
+        VENDOR_NAME: payee
+        AMOUNT: amount
+        RECORD_DATE: payment_date
+        DEPT_DESC: agency
+        FUND_DESC: fund
+        EXP_ACCT_CAT_DESC: category
+        CHECK_NO: payment_number
+        FISCAL_YEAR: fiscal_year
+        # extensions (kept, lowercased for consistency)
+        ACCT_PERIOD: acct_period
+        DEPT_CODE: dept_code
+        FUND_CODE: fund_code
+        EXP_ACCT_CAT: category_code
+        TRANS_ID: trans_id
+        TRANS_LINE_NO: trans_line_no
 
 canonicalization:
   - table: expenditures
     source_column: agency
     target_column: agency_canonical
-    exact_map: agency_map.csv    # to be seeded during onboarding
+    exact_map: agency_map.csv        # unseeded — mirror until curated
     case_insensitive: false
   - table: expenditures
     source_column: payee
     target_column: payee_canonical
-    exact_map: payee_map.csv     # to be seeded during onboarding
+    exact_map: payee_map.csv         # unseeded — mirror until curated
     case_insensitive: true
 
 data_quality:
@@ -57,11 +59,158 @@ data_quality:
     threshold: 100000000
 
 enrichment_tables:
-  salary_data: salary_data.csv          # wmj4-ygbf (includes demographics columns)
+  salary_data: salary_data.csv           # wmj4-ygbf — includes demographics columns
   business_licenses: business_licenses.csv  # 7dk3-gngs
-  budget: budget.csv                    # hv35-hdk2, FY2004+
+  budget: budget.csv                     # hv35-hdk2 — approved budget FY2004+
 
-summaries: []   # to be authored during onboarding against canonical names
+summaries:
+  - table: summary_agency_spend
+    question: "Which departments have spent the most money?"
+    sql: |
+      CREATE TABLE summary_agency_spend AS
+      SELECT agency_canonical AS agency, ROUND(SUM(amount), 2) AS total_spend,
+             COUNT(*) AS transaction_count, MIN(fiscal_year) AS first_year, MAX(fiscal_year) AS last_year
+      FROM expenditures WHERE is_data_artifact = FALSE
+      GROUP BY agency_canonical ORDER BY total_spend DESC
+  - table: summary_annual_spend
+    question: "How has total annual spending changed over time?"
+    sql: |
+      CREATE TABLE summary_annual_spend AS
+      SELECT fiscal_year, ROUND(SUM(amount), 2) AS total_spend,
+             COUNT(*) AS transaction_count
+      FROM expenditures WHERE is_data_artifact = FALSE AND fiscal_year IS NOT NULL
+      GROUP BY fiscal_year ORDER BY fiscal_year
+  - table: summary_top_payees
+    question: "Which vendors have received the most money?"
+    sql: |
+      CREATE TABLE summary_top_payees AS
+      SELECT payee_canonical AS payee, ROUND(SUM(amount), 2) AS total_spend,
+             COUNT(*) AS transaction_count,
+             COUNT(DISTINCT agency_canonical) AS agencies_served,
+             MIN(fiscal_year) AS first_year, MAX(fiscal_year) AS last_year
+      FROM expenditures WHERE is_data_artifact = FALSE AND payee_canonical IS NOT NULL
+      GROUP BY payee_canonical ORDER BY total_spend DESC
+  - table: summary_largest_payments
+    question: "What are the largest single payments ever made?"
+    sql: |
+      CREATE TABLE summary_largest_payments AS
+      SELECT payee_canonical AS payee, agency_canonical AS agency, amount,
+             trans_id, payment_date, fiscal_year, fund
+      FROM expenditures
+      WHERE amount IS NOT NULL AND amount > 0 AND is_data_artifact = FALSE
+      ORDER BY amount DESC
+  - table: summary_budget_by_department
+    question: "How does the approved budget break down by department and year?"
+    requires: [budget]
+    sql: |
+      CREATE TABLE summary_budget_by_department AS
+      SELECT FISCAL_YEAR AS fiscal_year, DEPARTMENT_NAME AS department,
+             ROUND(SUM(CURRENT_BUDGET), 2) AS approved_budget
+      FROM budget
+      GROUP BY FISCAL_YEAR, DEPARTMENT_NAME
+      ORDER BY fiscal_year, approved_budget DESC
 
-dictionary: {}  # to be curated during onboarding — the survey confirmed the
-                # portal's own column descriptions are blank
+dictionary:
+  expenditures:
+    description: "City of Cincinnati vendor payment transactions, FY2014-present, from the city's financial system (CFS). Refreshed weekly on the open data portal."
+    record_scope: "Each row is a single payment line item (a transaction line within a check/EFT)."
+    labels:
+      fiscal_year: Fiscal Year
+      payment_date: Payment Date
+      payment_number: Check Number
+      amount: Amount
+      payee: Vendor
+      agency: Department
+      fund: Fund
+      category: Expense Category
+      acct_period: Accounting Period
+      dept_code: Department Code
+      fund_code: Fund Code
+      category_code: Expense Category Code
+      trans_id: Transaction ID
+      trans_line_no: Transaction Line Number
+      agency_canonical: Department (Normalized)
+      payee_canonical: Vendor (Normalized)
+      is_offsetting: Offsetting Entry
+      is_data_artifact: Data Artifact
+    columns:
+      fiscal_year: "Fiscal year of the payment (July-June cycle). Integer."
+      payment_date: "Date of the payment record (TIMESTAMP)."
+      payment_number: "Check/EFT number, zero-padded string."
+      amount: "Dollar amount of this payment line. Use this for spend analysis."
+      payee: "Vendor/recipient name."
+      agency: "City department responsible for the payment."
+      fund: "Funding source (e.g. General Fund, Metropolitan Sewer District)."
+      category: "Expense account category (e.g. Building Equipment Parts, Consultant Services)."
+      acct_period: "Accounting period within the fiscal year (1-13)."
+      trans_id: "Financial-system transaction identifier; lines of one transaction share it."
+      trans_line_no: "Line number within the transaction."
+      agency_canonical: "Normalized department name. Use for aggregations (mirrors agency until the canonical map is curated)."
+      payee_canonical: "Normalized vendor name. Use when grouping or filtering by vendor (mirrors payee until the canonical map is curated)."
+  salary_data:
+    description: "City of Cincinnati employees with salaries, job details, and workforce demographics (age range, gender, race, EEO job group). Current snapshot."
+    record_scope: "Each row is one current employee position."
+    joins: "Join to expenditures on DEPTNAME <-> agency (fuzzy match needed)."
+    labels:
+      NAME: Employee Name
+      JOBTITLE: Job Title
+      DEPTNAME: Department
+      ANNUAL_RT: Annual Salary
+      AGE_RANGE: Age Range
+      GENDER: Gender
+      RACE: Race
+      EEO_JOB_GROUP: EEO Job Group
+      FTE: Full-Time Equivalent
+      HIRE_DATE: Hire Date
+      GRADE: Pay Grade
+      STEP: Pay Step
+    columns:
+      NAME: "Employee full name."
+      JOBTITLE: "Position title."
+      DEPTNAME: "Department name."
+      ANNUAL_RT: "Annual salary rate in dollars."
+      AGE_RANGE: "Employee age bracket (demographics)."
+      GENDER: "Gender (demographics)."
+      RACE: "Race/ethnicity (demographics)."
+      EEO_JOB_GROUP: "Federal EEO job classification group."
+      FTE: "Full-time equivalency (1.0 = full time)."
+      HIRE_DATE: "Date of hire."
+  business_licenses:
+    description: "Business licenses issued by the City of Cincinnati, with license type, location, and amounts received."
+    record_scope: "Each row is a license record for a business."
+    joins: "Join to expenditures on BUSINESS_NAME <-> payee (fuzzy match needed)."
+    labels:
+      BUSINESS_NAME: Business Name
+      LICENSE: License Type
+      LOCADDRESS: Location Address
+      NEIGHBORHOOD: Neighborhood
+      EFFECTIVEFROM: Effective From
+      EFFECTIVETO: Effective To
+      TOTAL_RECEIVED: Total Received
+      DEPARTMENT_NAME: Issuing Department
+    columns:
+      BUSINESS_NAME: "Name of the licensed business."
+      LICENSE: "License type/code."
+      LOCADDRESS: "Business location street address."
+      NEIGHBORHOOD: "Cincinnati neighborhood of the business location."
+      EFFECTIVEFROM: "License effective start date."
+      EFFECTIVETO: "License expiration date."
+      TOTAL_RECEIVED: "Total license fees received."
+  budget:
+    description: "City of Cincinnati approved operating budget by department and object code, FY2004-present."
+    record_scope: "Each row is a budget line (department x object code x fund x year)."
+    joins: "Join to expenditures on DEPARTMENT_NAME <-> agency and FISCAL_YEAR <-> fiscal_year (budget vs actual)."
+    labels:
+      FISCAL_YEAR: Fiscal Year
+      DEPARTMENT_NAME: Department
+      OBJECT_NAME: Object
+      OBJECT_CATEGORY_GROUP: Object Category
+      CURRENT_BUDGET: Approved Budget
+      FUND_DESC: Fund
+    columns:
+      FISCAL_YEAR: "Fiscal year of the budget line."
+      DEPARTMENT_NAME: "Department the budget line belongs to."
+      OBJECT_NAME: "Expense object (what the money is budgeted for)."
+      OBJECT_CATEGORY_GROUP: "High-level object category grouping."
+      CURRENT_BUDGET: "Approved budget amount in dollars."
+      FUND_DESC: "Funding source."

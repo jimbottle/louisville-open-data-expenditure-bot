@@ -33,15 +33,23 @@ def _sql_quote(s: str) -> str:
 
 
 def _source_files(source: dict, data_dir: str) -> list:
-    """Resolve a source's file pattern + year range to existing paths."""
+    """Resolve a source's file pattern to existing (year, path) pairs.
+
+    With a "years" range the pattern is formatted per year (Louisville's
+    per-FY files); without one it's a literal filename or glob (single-file
+    cities like Cincinnati), yielding year=None entries.
+    """
+    import glob as _glob
     pattern = source["files"]
-    lo, hi = source["years"]
-    files = []
-    for year in range(lo, hi + 1):
-        path = os.path.join(data_dir, pattern.format(year=year))
-        if os.path.exists(path):
-            files.append((year, path))
-    return files
+    if "years" in source:
+        lo, hi = source["years"]
+        files = []
+        for year in range(lo, hi + 1):
+            path = os.path.join(data_dir, pattern.format(year=year))
+            if os.path.exists(path):
+                files.append((year, path))
+        return files
+    return [(None, p) for p in sorted(_glob.glob(os.path.join(data_dir, pattern)))]
 
 
 def _coerce(df: pd.DataFrame, rules: dict) -> pd.DataFrame:
@@ -75,17 +83,25 @@ def _load_expenditures(con, cfg: CityConfig, data_dir: str) -> None:
 
         if reader == "duckdb_union":
             file_list = ", ".join(f"'{_sql_quote(p)}'" for _, p in files)
+            # Optional source->canonical renames applied in-query (fast path
+            # for cities whose CSVs need mapping but no pandas-level coercion)
+            column_map = source.get("column_map", {})
+            select = "*"
+            if column_map:
+                renames = ", ".join(f'"{s}" AS "{d}"' for s, d in column_map.items() if s != d)
+                if renames:
+                    select = f"* RENAME ({renames})"
             if not _table_exists(con, table):
                 con.execute(f"""
                     CREATE TABLE {table} AS
-                    SELECT * FROM read_csv_auto([{file_list}], union_by_name=true)
+                    SELECT {select} FROM read_csv_auto([{file_list}], union_by_name=true)
                 """)
             else:
                 con.execute(f"""
                     INSERT INTO {table} BY NAME
-                    SELECT * FROM read_csv_auto([{file_list}], union_by_name=true)
+                    SELECT {select} FROM read_csv_auto([{file_list}], union_by_name=true)
                 """)
-            loaded_years.extend(str(y) for y, _ in files)
+            loaded_years.extend(str(y) for y, _ in files if y is not None)
 
         else:  # pandas_mapped
             column_map = source.get("column_map", {})
@@ -109,7 +125,8 @@ def _load_expenditures(con, cfg: CityConfig, data_dir: str) -> None:
                 loaded_years.append(str(year))
 
     total = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-    print(f"{table}: {total:,} rows across {len(loaded_years)} years ({', '.join(sorted(loaded_years))})")
+    years_note = f" across {len(loaded_years)} years ({', '.join(sorted(loaded_years))})" if loaded_years else ""
+    print(f"{table}: {total:,} rows{years_note}")
 
 
 def _apply_canonicalization(con, cfg: CityConfig) -> None:

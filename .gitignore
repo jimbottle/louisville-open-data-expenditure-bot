@@ -11,3 +11,4 @@ __pycache__/
 .beads-credential-key
 # roborev snapshots
 /.roborev/
+data_cincinnati/
