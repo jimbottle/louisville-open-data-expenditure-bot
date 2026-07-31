@@ -46,7 +46,7 @@ onboard. `fiscal_year` is *not* required as a source column — it is derived
 ### Recommended (unlocks the high-value question classes)
 `fiscal_year`, `fund`, `category` (the city's main spend classification —
 spend_category/exp_acct_cat_desc/Category), `invoice_number`, `payment_number`
-(check_no/voucher/Check_Number), `payment_amount` (check-level total, distinct
+(check_no/payment_no/Check_Number), `payment_amount` (check-level total, distinct
 from line `amount` — KC/Lou/Balt publish both; summing it double-counts, see §6).
 
 ### Optional (extra dimensions when published)
@@ -117,8 +117,9 @@ effort is the real onboarding cost the second-city proof (ftq) must measure.
 
 ## 6. Data-quality flags (engine mechanism, per-city parameters)
 
-- **Offsetting**: flag zero-sum groups. Parameter: `group_key` (Lou:
-  `invoice_number`; KC: `voucher`). KC's documented voucher/sum_amount
+- **Offsetting**: flag zero-sum groups. Parameter: `group_key`, which may
+  name a canonical or extension column (Lou: `invoice_number`; KC: the
+  `voucher` extension). KC's documented voucher/sum_amount
   double-counting caveat is this same pattern — its rule is "sum `amount`
   (line), never `payment_amount` per group", which the model encodes by making
   `amount` the only blessed measure.
@@ -143,12 +144,12 @@ Every column of Louisville's unified schema, mapped:
 - **Engine-derived**: agency_canonical, payee_canonical, is_offsetting,
   is_data_artifact — regenerated, not mapped ✓
 
-24/24 source columns land; 23 canonical, 1 extension. Zero loss. ✓
+25/25 source columns land; 24 canonical, 1 extension. Zero loss. ✓
 
 Shortlist fit: **Cincinnati** maps 14/14 (desc-pair rule; acct_period,
 trans_id, trans_line_no as extensions; explicit fiscal_year). **KC** maps
-13/13 (sum_amount→amount, voucher→payment_number, desc pairs; derived FY,
-group_key=voucher). **Baltimore** FY22+ and FY2020 are two eras of one
+13/13 (sum_amount→amount, payment_no→payment_number, desc pairs; `voucher`
+kept as an extension column; derived FY, group_key=`voucher`). **Baltimore** FY22+ and FY2020 are two eras of one
 config — its "two schemas" problem is Louisville's, already solved.
 **Chicago** maps 6/6 with text-date coercion and a grain_note.
 
