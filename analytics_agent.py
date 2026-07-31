@@ -281,8 +281,7 @@ def build_interpret_prompt(schema_desc: str) -> str:
         - Only state facts that appear in the schema context or the results. Do NOT
           claim what years a dataset covers or what a compensation/amount figure
           includes unless the schema context says so explicitly for THAT table —
-          never borrow another table's coverage. Compensation data here contains
-          pay components only; the data has no benefits information.
+          never borrow another table's coverage.
         - If results are empty, explain what that likely means.
         - If the data shows something notable or unexpected, call it out.
         - Keep responses under 200 words unless the user asked for detail.
@@ -454,9 +453,7 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
     - Every number and claim must come from the RESULTS table or be directly
       computable from it. Delete anything the results don't support,
       including any sentence describing what a figure includes or what years
-      it covers when the results don't state that. Compensation data here
-      contains pay components only; the data has no benefits information, so
-      remove any claim that an amount includes benefits.
+      it covers when the results don't state that.
     - NEVER total or net a long list yourself: arithmetic is only allowed
       over a handful of values you can verify digit by digit. If the results
       have no total row, do not state an overall total — describe the top
@@ -468,14 +465,20 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
     Return ONLY the rewritten answer, nothing else.""")
 
 
-def refine_interpretation_stream(client, model, question, sql, results, draft, on_retry=None, fallback_client=None):
+def refine_interpretation_stream(client, model, question, sql, results, draft, on_retry=None, fallback_client=None, extra_facts=None):
     """Stream a refined (plain-language, consistency- and accuracy-checked)
     rewrite of a draft interpretation.
 
     Lean context by design: rubric + question + SQL + results + draft — no
     schema (the results table is the accuracy anchor). Keeps the pass at
     ~1-2K tokens instead of the ~7K a schema-bearing prompt would cost.
+    extra_facts: per-city data facts (from the city config pack) the rewrite
+    must enforce — city specifics never live in this shared rubric.
     """
+    system_prompt = REFINE_SYSTEM_PROMPT
+    if extra_facts:
+        system_prompt += "\n\n## Facts about this city's data (enforce these)\n" + \
+            "\n".join(f"- {f}" for f in extra_facts)
     user_msg = (
         f"QUESTION: {question}\n\nSQL EXECUTED:\n{sql}\n\n"
         f"RESULTS:\n{results}\n\nDRAFT ANSWER:\n{draft}"
@@ -485,7 +488,7 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
             return c.chat.completions.create(
                 model=m,
                 messages=[
-                    {"role": "system", "content": REFINE_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=0.2,

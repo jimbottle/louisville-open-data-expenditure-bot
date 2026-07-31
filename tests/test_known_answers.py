@@ -118,6 +118,26 @@ def test_top_salaries_magnitudes_and_scope(con):
     assert row[0] <= 3
 
 
+# ── Grants ────────────────────────────────────────────────────────────────────
+
+def test_grant_rollup_prompt_query_stays_valid(con):
+    """The SQL prompt tells the model to use EXACTLY this query for grant
+    totals — if it ever breaks against the schema, the model will faithfully
+    reproduce broken SQL. Pin it: TOTAL row present, equal to the sum of the
+    per-fund rows, with a plausible source count and magnitude."""
+    df = con.execute(
+        "SELECT COALESCE(fund, 'TOTAL - ALL GRANT FUNDS') AS fund, "
+        "ROUND(SUM(total_amount), 2) AS total_amount FROM summary_grant_funding "
+        "GROUP BY ROLLUP(fund) ORDER BY total_amount DESC NULLS LAST"
+    ).fetchdf()
+    totals = df[df["fund"] == "TOTAL - ALL GRANT FUNDS"]
+    assert len(totals) == 1, "exactly one grand-total row"
+    funds = df[df["fund"] != "TOTAL - ALL GRANT FUNDS"]
+    assert abs(totals["total_amount"].iloc[0] - funds["total_amount"].sum()) < 1.0
+    assert len(funds) >= 50
+    assert totals["total_amount"].iloc[0] > 1e9  # ~$1.17B as of 2026-07
+
+
 # ── Expenditure types ─────────────────────────────────────────────────────────
 
 def test_expenditure_types_exist(con):

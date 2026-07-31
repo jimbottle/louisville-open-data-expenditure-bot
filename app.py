@@ -5,6 +5,7 @@ Serves a chat interface that translates natural language questions into SQL,
 executes them against DuckDB, and streams interpreted results via SSE.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -58,8 +59,10 @@ from analytics_agent import (
     make_paid_client,
     refine_events_with_fallback,
     refine_interpretation_stream,
+    REFINE_SYSTEM_PROMPT,
 )
 from data_model import (
+    CONFIG,
     DATA_DICTIONARY,
     get_compact_schema_description,
     get_data_dictionary_text,
@@ -347,14 +350,14 @@ and interpret results. You work with Louisville Metro government open data.
 - When asked about "largest single payments", use invoice_amount (the actual invoice value) rather than extended_amount, and filter for invoice_amount > 0.
 - When ranking payees or agencies by total spend, use SUM(extended_amount) grouped by the entity. Do NOT use MAX() or pick individual rows, as single rows may contain erroneous outlier values that are offset by other rows.
 - If a query asks for individual transactions (not aggregates), add WHERE is_data_artifact = FALSE to exclude known erroneous records.
-- NEVER invent filters the user did not ask for: no fiscal-year filter, no agency filter, no fund filter unless the question names them explicitly. Questions like "how much X has Louisville received/spent" mean ALL years and ALL agencies — "Louisville" is the whole government, never an agency value to filter on.
+- NEVER invent filters the user did not ask for: no fiscal-year filter, no agency filter, no fund filter unless the question names them explicitly OR a summary-table bullet below directs a specific filter for that question type. Questions like "how much X has Louisville received/spent" mean ALL years and ALL agencies — "Louisville" is the whole government, never an agency value to filter on.
 - The `is_offsetting` column flags rows that are part of zero-sum offsetting pairs. The `is_data_artifact` column flags extreme outliers with offsetting counterparts (e.g., $224M SUSTEEN entry that nets to zero). Exclude these when looking for individual large transactions.
 
 ## Pre-computed Summary Tables (use these for common questions — they are pre-validated and faster)
 - `summary_agency_spend` — total spend by agency (canonical names), transaction count, year range. Use for "which agencies spend the most".
 - `summary_annual_spend` — total spend by fiscal year. Use for "how has spending changed over time".
 - `summary_largest_payments` — all payments ranked by invoice_amount with payee, agency, date. Use for "largest single payments".
-- `summary_top_salaries` — (job_title, department) groups for the MOST RECENT COMPLETE calendar year only, ranked by avg total pay, with calendar_year and DISTINCT-employee counts. The same job title can appear in several departments — select department alongside job_title. Use for "highest paid positions". NOTE: For salary queries about specific people or titles, query the `salary_data` table directly, filtered to the most recent complete calendar year (the max CalYear is in progress — its YTD totals are partial; use CalYear = (SELECT MAX(CalYear) - 1 FROM salary_data) unless the user asks about the current year). The salary_data table has Employee_Name, jobTitle, Department, CalYear, YTD_Total, Annual_Rate, Regular_Rate, Overtime_Rate columns.
+- `summary_top_salaries` — (job_title, department) groups for the MOST RECENT COMPLETE calendar year only, ranked by avg total pay, with calendar_year and DISTINCT-employee counts. The same job title can appear in several departments — select department alongside job_title. Use for "highest paid positions". NOTE: For salary queries about specific people or titles, query the `salary_data` table directly, filtered to the most recent complete calendar year (the max CalYear is in progress — its YTD totals are partial; use CalYear = (SELECT MAX(CalYear) - 1 FROM salary_data) unless the user asks about the current year). The salary_data table has Employee_Name, jobTitle, Department, CalYear, YTD_Total, Annual_Rate, Regular_Rate, Overtime_Rate, Incentive_Allowance, Other columns.
 - IMPORTANT for salary queries: When asked about a specific role like "Mayor" or "Police Chief", show INDIVIDUAL employee records (Employee_Name, jobTitle, YTD_Total) rather than grouping by jobTitle. Multiple people may share a title (e.g., 6 Deputy Mayors). SUM by jobTitle would be misleading — show each person's individual compensation.
 - Follow-up questions about a previous answer ("is that true?", "are you sure?", "what does that include?", "can you verify that?") ARE answerable — never treat them as off-topic. Write SQL that verifies or decomposes the earlier claim using the conversation history. Example: to check what a compensation total includes, SELECT Employee_Name, Annual_Rate, Regular_Rate, Overtime_Rate, Incentive_Allowance, Other, YTD_Total FROM salary_data for the relevant people/year — the components show exactly what the total is made of (pay only; the data contains no benefits figures).
 - `summary_expenditure_type` — spending by type (Operating/Capital) per fiscal year. Use for "spending by type".
@@ -402,7 +405,28 @@ This data covers expenditures from FY2008-FY2026, employee salaries, capital pro
 - Separate the list from any commentary with a blank line.
 - Put caveats or footnotes at the end as a short, plainly written note.
 - Use plain line breaks between sections, not headers.
+
+## Accuracy Rules (CRITICAL)
+- NEVER rescale numbers: repeat values at the magnitude shown in the results (a value like 192,770.57 is about $192.8K, not millions).
+- Only state facts that appear in the results or the question. Do not describe what a figure includes or what years a dataset covers unless the results show it.
 """
+    if CONFIG.data_facts:
+        interpret_system += "\n## Facts about this city's data (enforce these)\n" + \
+            "\n".join(f"- {f}" for f in CONFIG.data_facts) + "\n"
+
+    # Cache entries are keyed with a version derived from the prompts, so any
+    # prompt change automatically invalidates stale cached answers (re-warm
+    # the starter questions after deploys that change prompts).
+    global CACHE_VERSION
+    CACHE_VERSION = hashlib.sha1(
+        (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CONFIG.data_facts)).encode()
+    ).hexdigest()[:8]
+    stale = [k for k in response_cache if not k.startswith(CACHE_VERSION + ":")]
+    if stale:
+        for k in stale:
+            del response_cache[k]
+        _save_cache()
+        log.info("Pruned %d cache entries from older prompt versions", len(stale))
 
     client = make_client()
     paid_client = make_paid_client()
@@ -481,8 +505,9 @@ async def clear_cache(request: Request):
     body = await request.json() if request.headers.get("content-type") == "application/json" else {}
     question = body.get("question", "").strip().lower()
     if question:
-        if question in response_cache:
-            del response_cache[question]
+        key = _cache_key(question)
+        if key in response_cache:
+            del response_cache[key]
             _save_cache()
             return {"cleared": question}
         return {"error": "Not in cache"}
@@ -496,6 +521,15 @@ async def clear_cache(request: Request):
 # Cache full SSE responses. Persisted to disk so it survives restarts.
 
 CACHE_FILE = os.path.join(os.environ.get("STATS_DIR", os.environ.get("DATA_DIR", "data")), ".response_cache.json")
+
+# Set at startup from a hash of the assembled prompts: a prompt edit changes
+# the version, orphaning (and pruning) every previously cached answer, so a
+# fix can never be shadowed by a stale cache entry.
+CACHE_VERSION = "unversioned"
+
+
+def _cache_key(question: str) -> str:
+    return f"{CACHE_VERSION}:{question.lower().strip()}"
 
 
 def _load_cache() -> dict[str, list[str]]:
@@ -551,7 +585,7 @@ async def ask(request: Request):
         return _sse_message("error", "That's a lot of questions in a short time. Please wait a few seconds, then ask again.")
 
     # Serve from cache if question is cached
-    cache_key = question.lower().strip()
+    cache_key = _cache_key(question)
     if cache_key in response_cache:
         log.info("Cache hit: %s", question[:50])
         def cached_stream():
@@ -689,6 +723,11 @@ async def ask(request: Request):
                     # Sort by the time/label column so the line reads chronologically
                     # instead of zig-zagging in rank order.
                     chart_df = result_df.sort_values(label_col) if chart_type == "line" else result_df
+                    # Grand-total rows (e.g. the ROLLUP 'TOTAL - ...' row) would
+                    # double the axis scale and dwarf the real bars — never chart them.
+                    chart_df = chart_df[~chart_df[label_col].astype(str).str.strip().str.upper().str.startswith("TOTAL")]
+                    if len(chart_df) < 2:
+                        raise ValueError("too few chartable rows after dropping total rows")
                     labels = chart_df[label_col].astype(str).tolist()[:30]
                     values = chart_df[value_col].tolist()[:30]
                     title = humanize_text(value_col)
@@ -802,7 +841,8 @@ Explain in plain text (no markdown) why this likely returned no results based on
             refine_counter = {"n": 0}
             yield from refine_events_with_fallback(
                 refine_interpretation_stream(
-                    client, MODEL, question, sql, result_str, draft, on_retry=on_retry, fallback_client=paid_client
+                    client, MODEL, question, sql, result_str, draft, on_retry=on_retry, fallback_client=paid_client,
+                    extra_facts=CONFIG.data_facts,
                 ),
                 draft,
                 send,

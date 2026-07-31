@@ -28,6 +28,7 @@ class CityConfig:
         self.enrichment_tables = raw.get("enrichment_tables", {})
         self.summaries = raw.get("summaries", [])
         self.dictionary = raw.get("dictionary", {})
+        self.data_facts = raw.get("data_facts", [])
 
     @property
     def title(self) -> str:

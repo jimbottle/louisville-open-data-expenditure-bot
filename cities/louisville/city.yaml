@@ -6,6 +6,16 @@ city:
   state: KY
   title: Louisville Open Data
   fiscal_year_start_month: 7
+
+# Facts the answer-writing prompts must enforce (injected into the interpret
+# and refine system prompts — per-city, so a city whose data DOES include
+# benefits simply states different facts here).
+data_facts:
+  - Compensation figures are pay components only (regular, overtime, incentive,
+    other); the data contains no benefits information, so never describe an
+    amount as including benefits.
+  - The newest fiscal/calendar year in the data is in progress — its totals
+    are partial, not a full year.
 expenditures:
   table: expenditures
   sources:
