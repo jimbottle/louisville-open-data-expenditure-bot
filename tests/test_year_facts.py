@@ -209,3 +209,28 @@ def test_year_context_handles_no_usable_fiscal_years():
     # Empty table must not TypeError on newest_year - 1; callers get nothing.
     yc = year_context(_con(fiscal_rows=()), fy_start_month=7)
     assert yc["values"] == {} and yc["rules"] == "" and yc["facts"] == []
+
+
+def test_year_context_reports_a_failed_salary_derivation_distinctly():
+    # A salary_data table that exists but whose CalYear can't be used must be
+    # reported as its own state — not as "no salary table" (it exists) and not
+    # as the single-year case (the derivation never got that far).
+    import duckdb
+    con = duckdb.connect()
+    con.execute("CREATE TABLE expenditures (payment_date VARCHAR, fiscal_year INTEGER)")
+    con.execute("INSERT INTO expenditures VALUES ('2026-03-16', 2026), ('2025-06-30', 2025)")
+    # renamed column: the table exists but CalYear does not (BinderException)
+    con.execute("CREATE TABLE salary_data (calendar_year INTEGER)")
+    con.execute("INSERT INTO salary_data VALUES (2026)")
+    yc = year_context(con, fy_start_month=7, today=date(2026, 8, 1))
+    assert yc["salary"] is None
+    assert yc["salary_error"] is True
+    assert yc["newest_cal_year"] is None
+    assert "CalYear" not in yc["rules"]      # no salary guidance emitted
+    assert len(yc["facts"]) == 1             # expenditure fact only
+
+
+def test_year_context_healthy_paths_are_not_flagged_as_errors():
+    assert year_context(_con(), fy_start_month=7, today=date(2026, 8, 1))["salary_error"] is False
+    assert year_context(_con(salary_years=None), fy_start_month=7)["salary_error"] is False
+    assert year_context(_con(salary_years=(2026,)), fy_start_month=7)["salary_error"] is False

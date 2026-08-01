@@ -130,6 +130,10 @@ def test_top_salaries_magnitudes_and_scope(con):
         "SELECT MAX(CalYear) FROM salary_data "
         "WHERE CalYear < (SELECT MAX(CalYear) FROM salary_data)"
     ).fetchone()[0]
+    # Guard against a vacuous pass: with a single loaded CalYear the summary
+    # materializes empty and every assertion below would silently skip.
+    assert expected_year is not None, "no complete CalYear loaded to summarize"
+    assert rows, "summary_top_salaries is empty"
     for year, avg_comp, max_comp, n in rows:
         assert year == expected_year, "must use the latest COMPLETE year, not the partial one"
         assert 100_000 < avg_comp < 500_000, f"top-10 avg comp {avg_comp} outside plausible $K range"

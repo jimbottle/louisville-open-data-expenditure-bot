@@ -355,10 +355,11 @@ def startup():
         "PARTIAL" if yc["expenditures"]["is_partial"] else "complete",
         yc["expenditures"]["covered_through"],
         last_complete_year,
-        "no salary table" if yc["newest_cal_year"] is None
-        else (f"CalYear {yc['newest_cal_year']} only; no complete year to cite"
-              if yc["salary"] is None
-              else f"CalYear partial, latest complete {yc['salary']['last_complete_year']}"),
+        "derivation failed — see warning above" if yc["salary_error"]
+        else ("no salary table" if yc["newest_cal_year"] is None
+              else (f"CalYear {yc['newest_cal_year']} only; no complete year to cite"
+                    if yc["salary"] is None
+                    else f"CalYear partial, latest complete {yc['salary']['last_complete_year']}")),
     )
 
     sql_system = f"""You are a data analytics assistant. You translate natural language questions into SQL queries

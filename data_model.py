@@ -242,13 +242,22 @@ def _build_summaries(con, cfg: CityConfig) -> None:
             # An advertised-but-empty summary is worse than a missing one: the
             # prompt still recommends it, so every question routed there
             # returns nothing with no explanation.
-            n = con.execute(f"SELECT COUNT(*) FROM {spec['table']}").fetchone()[0]
-            if n == 0:
+            try:
+                n = con.execute(f"SELECT COUNT(*) FROM {spec['table']}").fetchone()[0]
+            except duckdb.CatalogException:
+                # A diagnostics probe must never abort data loading: the pack's
+                # `table:` key doesn't name what its SQL actually created.
                 log.warning(
-                    "%s materialized EMPTY — the prompt still recommends it; "
-                    "check this city pack's source data for the years it filters on",
-                    spec["table"],
+                    "summary spec names table %r but its SQL created something else; "
+                    "cannot check whether it is empty", spec["table"],
                 )
+            else:
+                if n == 0:
+                    log.warning(
+                        "%s materialized EMPTY — the prompt still recommends it; "
+                        "check this city pack's source data for the years it filters on",
+                        spec["table"],
+                    )
         else:
             print(f"{spec['table']}: skipped (requires {requires})")
     print(f"Summary tables created: {', '.join(built)}")
@@ -608,7 +617,7 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         # than deriving from None. Callers get no rules and no facts.
         log.warning("year_context: no usable fiscal_year values; skipping year guidance")
         return {"values": {}, "rules": "", "facts": [], "expenditures": None,
-                "salary": None, "newest_cal_year": None}
+                "salary": None, "newest_cal_year": None, "salary_error": False}
 
     max_covered = con.execute(
         "SELECT MAX(payment_date) FROM expenditures WHERE fiscal_year = ?", [newest_year]
@@ -616,7 +625,7 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
     yf = derive_year_facts(newest_year, fy_start_month, max_covered, today=today)
 
     rules, facts = [yf["rules"]], [yf["fact"]]
-    salary, newest_cal = None, None
+    salary, newest_cal, salary_error = None, None, False
     try:
         newest_cal = con.execute("SELECT MAX(CalYear) FROM salary_data").fetchone()[0]
         if newest_cal is not None:
@@ -638,10 +647,10 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         pass  # city pack has no salary table — nothing to say about salaries
     except Exception as e:
         # Anything else (renamed column, type error) would silently strip the
-        # salary guidance the prompt refers to; make it visible. Clear
-        # newest_cal too so callers don't report the single-year diagnosis for
-        # what is actually a failure.
-        newest_cal = None
+        # salary guidance the prompt refers to. Record it as its OWN state:
+        # collapsing it into newest_cal=None would report "no salary table"
+        # for a table that exists and was read a moment ago.
+        newest_cal, salary_error = None, True
         log.warning("year_context: could not derive salary year facts: %s", e)
 
     return {
@@ -655,9 +664,12 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         "facts": facts,
         "expenditures": yf,
         "salary": salary,
-        # Distinguishes "no salary table" (None) from "a salary table with too
-        # few years to cite a complete one" (a year, with salary None).
+        # Three distinct no-guidance states: no salary table (newest_cal_year
+        # None, salary_error False), a table with too few years to cite a
+        # complete one (newest_cal_year set), and a failed derivation
+        # (salary_error True).
         "newest_cal_year": newest_cal,
+        "salary_error": salary_error,
     }
 
 
