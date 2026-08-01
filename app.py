@@ -12,7 +12,7 @@ import os
 import re
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import openai
 from fastapi import FastAPI, Request
@@ -323,16 +323,61 @@ def startup():
     # size matters); the full verbose version is still available at /api/schema.
     schema_desc = get_compact_schema_description(con)
 
-    # Year facts are derived from the loaded data, never hardcoded: the newest
-    # fiscal year is the in-progress one and the year before it is the most
-    # recent complete one. A data refresh therefore updates the prompts (and,
-    # via the prompt hash, invalidates cached answers) automatically.
-    first_year, in_progress_year = con.execute(
+    # Year facts are derived from the loaded data, never hardcoded — and
+    # "partial" is decided by DATA COVERAGE, not by assuming the newest year
+    # is unfinished: we compare how far payments actually run against that
+    # fiscal year's end date. A refresh that completes the newest year
+    # therefore promotes it to "complete" instead of leaving the prompt
+    # asserting a stale falsehood.
+    first_year, newest_year = con.execute(
         "SELECT MIN(fiscal_year), MAX(fiscal_year) FROM expenditures WHERE fiscal_year IS NOT NULL"
     ).fetchone()
-    last_complete_year = in_progress_year - 1
+    fy_start_month = (CONFIG.city or {}).get("fiscal_year_start_month", 1)
+    fy_end = (
+        date(newest_year, 12, 31) if fy_start_month == 1
+        else date(newest_year, fy_start_month, 1) - timedelta(days=1)
+    )
+    max_covered = con.execute(
+        "SELECT MAX(payment_date) FROM expenditures WHERE fiscal_year = ?", [newest_year]
+    ).fetchone()[0]
+    try:
+        covered_through = str(max_covered)[:10]
+        newest_is_partial = covered_through < fy_end.isoformat()
+    except Exception:
+        covered_through, newest_is_partial = None, True
+
+    in_progress_year = newest_year if newest_is_partial else None
+    last_complete_year = newest_year - 1 if newest_is_partial else newest_year
+
+    if newest_is_partial:
+        year_rules = (
+            f"- CRITICAL: FY{newest_year} data is INCOMPLETE — payments are only loaded "
+            f"through {covered_through}, so its totals are partial and must not be compared "
+            f"like a full year. When presenting FY{newest_year} always say the data is partial. "
+            f"For \"current\" or \"latest\" spending or salaries use {last_complete_year}, the "
+            f"most recent year with complete data, unless the user asks about {newest_year}. "
+            "This applies to fiscal_year in expenditures AND CalYear in salary_data."
+        )
+        year_fact = (
+            f"Data for fiscal/calendar year {newest_year} is incomplete (loaded through "
+            f"{covered_through}), so its totals are partial. {last_complete_year} is the most "
+            f"recent year with complete data — never describe {last_complete_year} or any "
+            "earlier year as partial or in progress."
+        )
+    else:
+        year_rules = (
+            f"- FY{newest_year} data is complete; use it for \"current\" or \"latest\" "
+            "spending and salaries. This applies to fiscal_year in expenditures AND CalYear "
+            "in salary_data."
+        )
+        year_fact = (
+            f"{newest_year} is the most recent year and its data is complete — never "
+            "describe it or any earlier year as partial or in progress."
+        )
+
     years = {
         "first_year": first_year,
+        "newest_year": newest_year,
         "in_progress_year": in_progress_year,
         "last_complete_year": last_complete_year,
     }
@@ -345,8 +390,8 @@ and interpret results. You work with Louisville Metro government open data.
 - The primary table is `expenditures`. Enrichment tables are: `salary_data`, `capital_projects`, `active_contractors`, `staff_demographics`, `hr_requisitions`, `contractor_profiles`.
 - Return ONLY the SQL query, no explanation, no markdown fences, no preamble.
 - If a question is ambiguous, make reasonable assumptions.
-- IMPORTANT: When a question asks for a single value related to a time period (e.g., "how much did agency X spend?" or "what is the biggest payment?") and does NOT specify "all time" or "total", default to the most recent complete fiscal year ({last_complete_year}). Only use all fiscal years if the question explicitly says "all time", "across all years", "historically", or asks for a trend/comparison. If the intent is genuinely unclear, note in a SQL comment which year you assumed.
-- CRITICAL: {in_progress_year} is a PARTIAL year across ALL tables (expenditures AND salary_data). It has significantly fewer transactions and lower totals because the year is still in progress. When presenting {in_progress_year} data in trends or comparisons, always note that it represents partial-year data. When asked about "current" or "latest" spending OR salaries, use {last_complete_year} (the most recent COMPLETE year) unless the user specifically asks about {in_progress_year}. This applies to BOTH fiscal_year in expenditures AND CalYear in salary_data.
+- IMPORTANT: When a question asks for a single value related to a time period (e.g., "how much did agency X spend?" or "what is the biggest payment?") and does NOT specify "all time" or "total", default to the most recent year with complete data ({last_complete_year}). Only use all fiscal years if the question explicitly says "all time", "across all years", "historically", or asks for a trend/comparison. If the intent is genuinely unclear, note in a SQL comment which year you assumed.
+{year_rules}
 - Use appropriate aggregations, GROUP BY, ORDER BY, and LIMIT clauses.
 - When a question asks about quantitative values (spend, cost, salary, amount), always include the relevant numbers in the SELECT. If ranking entities by a numeric value, include that value in the results. Not every query needs dollar amounts — only include them when relevant to the question.
 - ALWAYS filter out NULL values from display columns. Use WHERE column IS NOT NULL or COALESCE(column, 'N/A'). Never return rows with blank or null values in key fields — they confuse users.
@@ -395,7 +440,7 @@ Users ask in everyday terms that rarely appear verbatim in the data. Filter only
 - police / law enforcement: agency_canonical = 'Louisville Metro Police Department'. fire: 'Louisville Fire'. parks: 'Parks & Recreation'. roads/paving/infrastructure: 'Public Works & Assets'.
 - An empty result from a topical filter means the filter was wrong, not that the city spends nothing. Re-query using the department (agency_canonical) or a broader category pattern before drawing any conclusion about spending levels.
 
-- The `expenditures` table spans FY{first_year}-FY{in_progress_year}. Columns available vary by era:
+- The `expenditures` table spans FY{first_year}-FY{newest_year}. Columns available vary by era:
   - 2008-2017: has sub_agency, department, sub_department, stimulus_type, payment_amount, payment_void_date
   - 2018+: has cost_center, project, program, grant_, financing_source, region
   - Common columns: fiscal_year, invoice_date, invoice_number, invoice_amount, payee, payment_date, payment_number, agency, expenditure_type, expenditure_category, spend_category, fund, extended_amount
@@ -405,7 +450,7 @@ Users ask in everyday terms that rarely appear verbatim in the data. Filter only
 """
 
     interpret_system = f"""You are a data analytics assistant interpreting query results from Louisville Metro government data.
-This data covers expenditures from FY{first_year}-FY{in_progress_year}, employee salaries, capital projects, active contractors, staff demographics, and HR requisitions.
+This data covers expenditures from FY{first_year}-FY{newest_year}, employee salaries, capital projects, active contractors, staff demographics, and HR requisitions.
 
 ## Rules
 - Give concise, insightful answers. Lead with the key finding.
@@ -431,10 +476,10 @@ This data covers expenditures from FY{first_year}-FY{in_progress_year}, employee
 - NEVER rescale numbers: repeat values at the magnitude shown in the results (a value like 192,770.57 is about $192.8K, not millions).
 - Only state facts that appear in the results or the question. Do not describe what a figure includes or what years a dataset covers unless the results show it.
 """
-    # data_facts may reference {in_progress_year}/{last_complete_year}; fill
-    # them from the data so the facts stay true across refreshes.
+    # Pack facts (placeholders resolved by the pack itself) plus the
+    # data-derived year fact computed above.
     global CITY_FACTS
-    CITY_FACTS = [f.format(**years) for f in CONFIG.data_facts]
+    CITY_FACTS = CONFIG.data_facts_for(years) + [year_fact]
     if CITY_FACTS:
         interpret_system += "\n## Facts about this city's data (enforce these)\n" + \
             "\n".join(f"- {f}" for f in CITY_FACTS) + "\n"

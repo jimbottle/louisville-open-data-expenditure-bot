@@ -685,7 +685,10 @@ def main():
     if os.environ.get("CITY_CONFIG"):
         try:
             from city_config import load_city_config
-            city_facts = load_city_config().data_facts
+            # data_facts_for() resolves/drops placeholders — the CLI has no
+            # year context, so year-dependent facts are omitted rather than
+            # emitted raw.
+            city_facts = load_city_config().data_facts_for()
         except Exception as e:
             print(f"Warning: could not load CITY_CONFIG: {e}")
     interpret_system = build_interpret_prompt(schema_desc, extra_facts=city_facts)

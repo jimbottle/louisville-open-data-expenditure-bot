@@ -14,13 +14,11 @@ data_facts:
   - Compensation figures are pay components only (regular, overtime, incentive,
     other); the data contains no benefits information, so never describe an
     amount as including benefits.
-  # {in_progress_year} / {last_complete_year} are filled from the loaded data
-  # at prompt-build time, so a data refresh can't leave these asserting a
-  # falsehood.
-  - Fiscal/calendar year {in_progress_year} is the in-progress year, so its
-    totals are partial. {last_complete_year} is the most recent COMPLETE year —
-    never describe {last_complete_year} (or any year before it) as in progress,
-    partial, or incomplete.
+  # Year coverage is NOT stated here: it is derived from the loaded data at
+  # startup (how far payments actually run vs. the fiscal year end) and
+  # appended as a fact, so a refresh can never leave it asserting a stale
+  # year. Facts here may use {placeholders}; CityConfig.data_facts_for()
+  # resolves them and drops any fact left unresolved.
 expenditures:
   table: expenditures
   sources:

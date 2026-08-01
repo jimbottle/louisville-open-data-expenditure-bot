@@ -30,6 +30,26 @@ class CityConfig:
         self.dictionary = raw.get("dictionary", {})
         self.data_facts = raw.get("data_facts", [])
 
+    def data_facts_for(self, values: dict | None = None) -> list:
+        """Data facts with {placeholders} resolved from `values`.
+
+        Substitution happens HERE so no consumer can leak a raw placeholder
+        into a prompt. Uses plain replacement (not str.format) so pack prose
+        containing literal braces can't crash startup, and any fact still
+        holding an unresolved placeholder is dropped rather than shipped —
+        a missing fact is safe, a malformed one is not.
+        """
+        out = []
+        for fact in self.data_facts:
+            text = fact
+            for key, val in (values or {}).items():
+                if val is not None:
+                    text = text.replace("{" + key + "}", str(val))
+            if "{" in text and "}" in text:
+                continue  # unresolved placeholder — omit rather than emit noise
+            out.append(text)
+        return out
+
     @property
     def title(self) -> str:
         return self.city.get("title") or f"{self.city.get('name', 'City')} Open Data"

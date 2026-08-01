@@ -508,7 +508,10 @@ def drop_total_rows(df, label_col: str, value_col: str = None):
             if pd.isna(v):
                 continue
             others = vals[~drop].sum() - v
-            if abs(others) > 0 and abs(abs(v) - abs(others)) <= max(1.0, abs(others) * 0.005):
+            # Same sign required: a total shares the sign of what it sums. In a
+            # mixed-sign chart a positive payee can numerically equal the
+            # magnitude of negative credits without being a total.
+            if v * others > 0 and abs(abs(v) - abs(others)) <= max(1.0, abs(others) * 0.005):
                 drop.loc[idx] = True
 
     return df[~drop]

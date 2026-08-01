@@ -162,15 +162,24 @@ def test_drop_total_rows_handles_negative_result_sets():
 
 def test_drop_total_rows_shape_match_does_not_inflate_baseline():
     # A shape-matched total is dropped first; the value check for a second
-    # candidate must measure against the remaining rows, not the doubled sum.
+    # candidate must measure against the REMAINING rows. With the baseline
+    # bug (grand computed over all rows) SUBTOTAL's `others` would be 150 and
+    # it would survive; measured correctly it is 50 and gets dropped.
     df = _chart_df([
         ("TOTAL - ALL GRANT FUNDS", 100.0),
-        ("TOTAL TOOL SUPPLY INC", 55.0),   # real payee, ~half — must survive
-        ("Alpha", 25.0),
+        ("SUBTOTAL", 50.0),
+        ("Alpha", 30.0),
         ("Beta", 20.0),
     ])
     out = drop_total_rows(df, "label", "value")
-    assert out["label"].tolist() == ["TOTAL TOOL SUPPLY INC", "Alpha", "Beta"]
+    assert out["label"].tolist() == ["Alpha", "Beta"]
+
+
+def test_drop_total_rows_keeps_real_payee_in_mixed_sign_chart():
+    # Credits make `others` negative; a positive payee matching its magnitude
+    # is not a total, so sign agreement must be required.
+    df = _chart_df([("TOTAL TOOL SUPPLY INC", 50.0), ("Alpha", -30.0), ("Beta", -20.0)])
+    assert "TOTAL TOOL SUPPLY INC" in drop_total_rows(df, "label", "value")["label"].tolist()
 
 
 @pytest.mark.parametrize("payee", [
@@ -264,9 +273,12 @@ def test_tech_topic_query_matches_prompt_and_returns_both_views(con):
     assert dept and dept > 1e6, f"department view should be millions, got {dept}"
     assert cat and cat > 1e6, f"category view should be millions, got {cat}"
     # the broadened pattern must beat the old Computer-only one
+    # same artifact filter as the prescribed query, so the comparison isolates
+    # the category pattern rather than mixing in an unrelated filter difference
     narrow = con.execute(
         "SELECT SUM(extended_amount) FROM expenditures WHERE fiscal_year = ? "
-        "AND (spend_category LIKE 'Computer%' OR spend_category = 'Cloud Computing Services')",
+        "AND (spend_category LIKE 'Computer%' OR spend_category = 'Cloud Computing Services') "
+        "AND is_data_artifact = FALSE",
         [year],
     ).fetchone()[0]
     assert cat > narrow * 1.2, "broadened category filter must capture the software categories"
