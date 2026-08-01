@@ -8,11 +8,16 @@ full one. Every branch is pinned here.
 
 import os
 import sys
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from city_config import CityConfig  # noqa: E402
-from data_model import derive_year_facts, fiscal_year_end  # noqa: E402
+from data_model import (  # noqa: E402
+    derive_salary_year_facts,
+    derive_year_facts,
+    fiscal_year_end,
+)
 
 
 # ── fiscal_year_end ──────────────────────────────────────────────────────────
@@ -37,7 +42,7 @@ def test_partial_when_coverage_stops_mid_year():
 
 
 def test_complete_when_coverage_reaches_year_end():
-    yf = derive_year_facts(2026, 7, "2026-06-30")
+    yf = derive_year_facts(2026, 7, "2026-06-30", today=date(2026, 8, 1))
     assert yf["is_partial"] is False
     assert yf["last_complete_year"] == 2026
     assert yf["in_progress_year"] is None
@@ -47,14 +52,49 @@ def test_complete_when_coverage_reaches_year_end():
 def test_complete_when_last_business_day_precedes_year_end():
     # FY2018 ends 2018-06-30, a Saturday; the last payment is 2018-06-29.
     # Requiring the exact last calendar day would misclassify such years.
-    assert derive_year_facts(2018, 7, "2018-06-29")["is_partial"] is False
+    assert derive_year_facts(2018, 7, "2018-06-29", today=date(2018, 9, 1))["is_partial"] is False
     # FY2019: June 30 was a Sunday, last payment 2019-06-28
-    assert derive_year_facts(2019, 7, "2019-06-28")["is_partial"] is False
+    assert derive_year_facts(2019, 7, "2019-06-28", today=date(2019, 9, 1))["is_partial"] is False
 
 
-def test_still_partial_just_outside_the_grace_window():
-    # ~5 weeks short of year end is genuinely incomplete
-    assert derive_year_facts(2026, 7, "2026-05-20")["is_partial"] is True
+def test_expenditure_rule_does_not_claim_anything_about_salaries():
+    # Coverage is measured on payments only, so the rule must scope itself to
+    # spending — a complete fiscal year must not vouch for salary_data.
+    for yf in (derive_year_facts(2026, 7, "2026-03-16", today=date(2026, 8, 1)),
+               derive_year_facts(2026, 7, "2026-06-30", today=date(2026, 8, 1))):
+        assert "CalYear" not in yf["rules"]
+        assert "salar" not in yf["rules"].lower()
+
+
+# ── derive_salary_year_facts ─────────────────────────────────────────────────
+
+def test_salary_year_partial_while_calendar_year_runs():
+    s = derive_salary_year_facts(2026, today=date(2026, 8, 1))
+    assert s["is_partial"] is True
+    assert s["last_complete_year"] == 2025
+    assert "CalYear = 2025" in s["rules"] and "YEAR-TO-DATE" in s["rules"]
+
+
+def test_salary_year_complete_once_calendar_year_ends():
+    s = derive_salary_year_facts(2026, today=date(2027, 1, 15))
+    assert s["is_partial"] is False
+    assert s["last_complete_year"] == 2026
+    assert "complete calendar year" in s["rules"]
+
+
+def test_grace_window_boundary_is_pinned():
+    # Exactly at the 7-day cutoff -> complete; one day earlier -> partial.
+    # (A vaguer fixture would pass for any window from 1 to 40 days.)
+    after = date(2026, 8, 1)
+    assert derive_year_facts(2026, 7, "2026-06-23", today=after)["is_partial"] is False
+    assert derive_year_facts(2026, 7, "2026-06-22", today=after)["is_partial"] is True
+
+
+def test_running_fiscal_year_is_never_promoted_by_the_grace_window():
+    # Late in a RUNNING fiscal year, coverage within the grace window must not
+    # declare the year complete — five days of spending are still to come.
+    during = date(2026, 6, 25)
+    assert derive_year_facts(2026, 7, "2026-06-24", today=during)["is_partial"] is True
 
 
 def test_null_coverage_fails_safe_to_partial():

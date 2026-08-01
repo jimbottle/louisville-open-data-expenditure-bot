@@ -685,28 +685,17 @@ def main():
     if os.environ.get("CITY_CONFIG"):
         try:
             from city_config import load_city_config
-            from data_model import derive_year_facts
+            from data_model import year_context
             cfg = load_city_config()
-            # Derive the same year caveat the web app uses, when the loaded
-            # CSV actually carries the columns it needs — otherwise a CLI
-            # session would present a partial year as if it were complete.
+            # Same derivation the web app uses (one shared helper, so the two
+            # can't drift) — but the CLI loads an arbitrary CSV into `data`,
+            # so only run it when that table looks like expenditure data.
             years, year_fact = {}, None
             cols = {c[0] for c in con.execute("DESCRIBE data").fetchall()}
             if {"fiscal_year", "payment_date"} <= cols:
-                newest = con.execute("SELECT MAX(fiscal_year) FROM data").fetchone()[0]
-                if newest is not None:
-                    covered = con.execute(
-                        "SELECT MAX(payment_date) FROM data WHERE fiscal_year = ?", [newest]
-                    ).fetchone()[0]
-                    yf = derive_year_facts(
-                        newest, (cfg.city or {}).get("fiscal_year_start_month", 1), covered
-                    )
-                    years = {
-                        "newest_year": newest,
-                        "in_progress_year": yf["in_progress_year"],
-                        "last_complete_year": yf["last_complete_year"],
-                    }
-                    year_fact = yf["fact"]
+                con.execute("CREATE OR REPLACE TEMP VIEW expenditures AS SELECT * FROM data")
+                yc = year_context(con, (cfg.city or {}).get("fiscal_year_start_month", 1))
+                years, year_fact = yc["values"], yc["fact"]
             city_facts = cfg.data_facts_for(years) + ([year_fact] if year_fact else [])
         except Exception as e:
             print(f"Warning: could not load CITY_CONFIG: {e}")

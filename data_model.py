@@ -12,6 +12,7 @@ active config for backward compatibility with app.py and the tests.
 
 import os
 import re
+from datetime import date, timedelta
 
 import duckdb
 import pandas as pd
@@ -475,13 +476,12 @@ def infer_chart(df) -> tuple:
 def fiscal_year_end(year: int, fy_start_month: int = 1):
     """Last calendar day of fiscal `year` for a fiscal year starting in
     `fy_start_month` (Louisville: 7 -> FY2026 ends 2026-06-30)."""
-    from datetime import date as _date, timedelta as _timedelta
     if fy_start_month == 1:
-        return _date(year, 12, 31)
-    return _date(year, fy_start_month, 1) - _timedelta(days=1)
+        return date(year, 12, 31)
+    return date(year, fy_start_month, 1) - timedelta(days=1)
 
 
-def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_days=7) -> dict:
+def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_days=7, today=None) -> dict:
     """Decide whether the newest year's DATA is complete, and write the
     prompt rule + city fact that say so.
 
@@ -505,9 +505,13 @@ def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_day
     if covered_through is None:
         is_partial = True
     else:
-        from datetime import timedelta as _timedelta
-        cutoff = fiscal_year_end(newest_year, fy_start_month) - _timedelta(days=grace_days)
-        is_partial = covered_through < cutoff.isoformat()
+        fy_end = fiscal_year_end(newest_year, fy_start_month)
+        cutoff = fy_end - timedelta(days=grace_days)
+        # The grace window only forgives the gap between the last business day
+        # and the last calendar day — it must never promote a fiscal year that
+        # is still running, where spending is genuinely still to come.
+        year_is_over = (today or date.today()) > fy_end
+        is_partial = covered_through < cutoff.isoformat() or not year_is_over
 
     last_complete_year = newest_year - 1 if is_partial else newest_year
 
@@ -516,10 +520,9 @@ def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_day
         rules = (
             f"- CRITICAL: FY{newest_year} data is INCOMPLETE{through}, so its totals are "
             f"partial and must not be compared like a full year. When presenting FY{newest_year} "
-            f"always say the data is partial. For \"current\" or \"latest\" spending or salaries "
-            f"use {last_complete_year}, the most recent year with complete data, unless the user "
-            f"asks about {newest_year}. This applies to fiscal_year in expenditures AND CalYear "
-            "in salary_data."
+            f"always say the data is partial. For \"current\" or \"latest\" SPENDING use "
+            f"fiscal_year = {last_complete_year}, the most recent year with complete expenditure "
+            f"data, unless the user asks about {newest_year}."
         )
         loaded = f" (loaded through {covered_through})" if covered_through else ""
         fact = (
@@ -529,8 +532,8 @@ def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_day
         )
     else:
         rules = (
-            f"- FY{newest_year} data is complete; use it for \"current\" or \"latest\" spending "
-            "and salaries. This applies to fiscal_year in expenditures AND CalYear in salary_data."
+            f"- FY{newest_year} expenditure data is complete; use fiscal_year = {newest_year} "
+            "for \"current\" or \"latest\" SPENDING."
         )
         fact = (
             f"{newest_year} is the most recent year and its data is complete — never describe "
@@ -544,6 +547,66 @@ def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_day
         "in_progress_year": newest_year if is_partial else None,
         "rules": rules,
         "fact": fact,
+    }
+
+
+def derive_salary_year_facts(newest_cal_year, today=None) -> dict:
+    """Salary data is calendar-year and carries no coverage date, so its
+    completeness is judged on its own terms: a calendar year is complete only
+    once it has ended. Deriving this from expenditure coverage would let a
+    complete fiscal year vouch for a still-running salary year."""
+    today = today or date.today()
+    is_partial = newest_cal_year >= today.year
+    last_complete = newest_cal_year - 1 if is_partial else newest_cal_year
+    if is_partial:
+        rules = (
+            f"- CalYear {newest_cal_year} in salary_data is a YEAR-TO-DATE partial year. For "
+            f"\"current\" or \"latest\" SALARIES use CalYear = {last_complete}, the most recent "
+            f"complete calendar year, unless the user asks about {newest_cal_year}."
+        )
+    else:
+        rules = (
+            f"- CalYear {newest_cal_year} in salary_data is a complete calendar year; use it "
+            "for \"current\" or \"latest\" SALARIES."
+        )
+    return {"is_partial": is_partial, "last_complete_year": last_complete, "rules": rules}
+
+
+def year_context(con, fy_start_month=1, today=None) -> dict:
+    """Query year coverage once and build everything the prompts need.
+
+    Shared by the web app and the CLI so the two can't drift apart. Returns
+    the substitution values, the derived rule text, and the year fact.
+    """
+    first_year, newest_year = con.execute(
+        "SELECT MIN(fiscal_year), MAX(fiscal_year) FROM expenditures WHERE fiscal_year IS NOT NULL"
+    ).fetchone()
+    max_covered = con.execute(
+        "SELECT MAX(payment_date) FROM expenditures WHERE fiscal_year = ?", [newest_year]
+    ).fetchone()[0]
+    yf = derive_year_facts(newest_year, fy_start_month, max_covered, today=today)
+
+    rules = [yf["rules"]]
+    salary = None
+    try:
+        newest_cal = con.execute("SELECT MAX(CalYear) FROM salary_data").fetchone()[0]
+        if newest_cal is not None:
+            salary = derive_salary_year_facts(newest_cal, today=today)
+            rules.append(salary["rules"])
+    except Exception:
+        pass  # no salary table in this city pack
+
+    return {
+        "values": {
+            "first_year": first_year,
+            "newest_year": newest_year,
+            "in_progress_year": yf["in_progress_year"],
+            "last_complete_year": yf["last_complete_year"],
+        },
+        "rules": "\n".join(rules),
+        "fact": yf["fact"],
+        "expenditures": yf,
+        "salary": salary,
     }
 
 
