@@ -169,7 +169,8 @@ def _con(fiscal_rows=(("2026-03-16", 2026), ("2025-06-30", 2025)), salary_years=
         con.executemany("INSERT INTO expenditures VALUES (?, ?)", list(fiscal_rows))
     if salary_years is not None:
         con.execute("CREATE TABLE salary_data (CalYear INTEGER)")
-        con.executemany("INSERT INTO salary_data VALUES (?)", [(y,) for y in salary_years])
+        if salary_years:  # () means "table exists but is empty"
+            con.executemany("INSERT INTO salary_data VALUES (?)", [(y,) for y in salary_years])
     return con
 
 
@@ -258,3 +259,21 @@ def test_year_context_error_after_first_query_clears_everything():
     assert yc["newest_cal_year"] is None
     assert "CalYear" not in yc["rules"]   # no half-applied salary rule
     assert len(yc["facts"]) == 1
+
+
+def test_year_context_distinguishes_an_empty_salary_table_from_a_missing_one():
+    # A truncated salary CSV leaves the table present but with no usable
+    # CalYear — MAX() returns None without raising, so this must not be
+    # reported as "no salary table".
+    empty = year_context(_con(salary_years=()), fy_start_month=7, today=date(2026, 8, 1))
+    assert empty["salary_table_present"] is True
+    assert empty["newest_cal_year"] is None
+    assert empty["salary"] is None and empty["salary_error"] is False
+
+    missing = year_context(_con(salary_years=None), fy_start_month=7, today=date(2026, 8, 1))
+    assert missing["salary_table_present"] is False
+    assert missing["newest_cal_year"] is None
+
+    # ...and a healthy pack reports the table as present
+    ok = year_context(_con(), fy_start_month=7, today=date(2026, 8, 1))
+    assert ok["salary_table_present"] is True

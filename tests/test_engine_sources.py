@@ -7,6 +7,7 @@ import os
 import sys
 
 import duckdb
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -172,18 +173,24 @@ def test_build_summaries_warns_when_a_summary_materializes_empty(tmp_path, caplo
     assert "summary_empty" in caplog.text
 
 
-def test_build_summaries_survives_a_table_key_that_does_not_match_its_sql(tmp_path, caplog):
-    # The probe must never abort loading — neither for a name that doesn't
-    # exist nor for one that isn't a bare identifier.
-    for table_key in ("summary_wrong_name", "not a bare identifier"):
-        caplog.clear()
-        cfg = _summary_cfg(tmp_path, [{
-            "table": table_key,
-            "sql": "CREATE TABLE summary_actual AS SELECT * FROM expenditures",
-        }])
-        con = _seeded_con()
-        with caplog.at_level("WARNING"):
-            _build_summaries(con, cfg)  # must not raise
-        assert "cannot check whether summary table" in caplog.text, caplog.text
-        # the SQL still ran, so the real table exists
-        assert con.execute("SELECT COUNT(*) FROM summary_actual").fetchone()[0] == 2
+@pytest.mark.parametrize("table_key,expected_exc", [
+    ("summary_wrong_name", "CatalogException"),      # valid identifier, no such table
+    ("not a bare identifier", "ParserException"),    # can't even be parsed as a name
+])
+def test_build_summaries_survives_a_table_key_that_does_not_match_its_sql(
+    tmp_path, caplog, table_key, expected_exc
+):
+    # The probe must never abort loading, and the warning must carry both
+    # operator-facing details: which key was wrong and why it failed.
+    cfg = _summary_cfg(tmp_path, [{
+        "table": table_key,
+        "sql": "CREATE TABLE summary_actual AS SELECT * FROM expenditures",
+    }])
+    con = _seeded_con()
+    with caplog.at_level("WARNING"):
+        _build_summaries(con, cfg)  # must not raise
+    assert "cannot check whether summary table" in caplog.text, caplog.text
+    assert table_key in caplog.text, f"warning omits the offending key {table_key!r}"
+    assert expected_exc in caplog.text, f"warning omits the exception type for {table_key!r}"
+    # the SQL still ran, so the real table exists
+    assert con.execute("SELECT COUNT(*) FROM summary_actual").fetchone()[0] == 2

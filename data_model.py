@@ -620,7 +620,8 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         # than deriving from None. Callers get no rules and no facts.
         log.warning("year_context: no usable fiscal_year values; skipping year guidance")
         return {"values": {}, "rules": "", "facts": [], "expenditures": None,
-                "salary": None, "newest_cal_year": None, "salary_error": False}
+                "salary": None, "newest_cal_year": None, "salary_error": False,
+                "salary_table_present": False}
 
     max_covered = con.execute(
         "SELECT MAX(payment_date) FROM expenditures WHERE fiscal_year = ?", [newest_year]
@@ -629,11 +630,16 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
 
     rules, facts = [yf["rules"]], [yf["fact"]]
     salary, newest_cal, prior_cal, salary_error = None, None, None, False
+    salary_table_present = False
 
     # Only the QUERIES are guarded, so nothing after a successful read can
     # land in the error state and leave a half-applied rule behind.
     try:
         newest_cal = con.execute("SELECT MAX(CalYear) FROM salary_data").fetchone()[0]
+        # The read succeeded, so the table exists — even if it holds no usable
+        # CalYear (empty/all-NULL), which is a truncated-CSV symptom and NOT
+        # the same thing as a pack without salary data.
+        salary_table_present = True
         if newest_cal is not None:
             # The prior year must actually be loaded — pointing the model at a
             # CalYear the table lacks returns zero rows for every salary question.
@@ -672,12 +678,14 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         "facts": facts,
         "expenditures": yf,
         "salary": salary,
-        # Three distinct no-guidance states: no salary table (newest_cal_year
-        # None, salary_error False), a table with too few years to cite a
-        # complete one (newest_cal_year set), and a failed derivation
-        # (salary_error True).
+        # Four distinct no-guidance states: no salary table at all
+        # (salary_table_present False), a table with no usable CalYear
+        # (present but newest_cal_year None), a table with too few years to
+        # cite a complete one (newest_cal_year set, salary None), and a failed
+        # derivation (salary_error True).
         "newest_cal_year": newest_cal,
         "salary_error": salary_error,
+        "salary_table_present": salary_table_present,
     }
 
 
