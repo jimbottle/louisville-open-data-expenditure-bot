@@ -677,14 +677,17 @@ def main():
         meta_ctx = load_metadata_context(args.metadata)
 
     sql_system = build_system_prompt(schema_desc, meta_ctx)
-    # Carry the city pack's data facts into the CLI's interpret prompt, the
-    # same facts the web app injects (best-effort: the CLI can run against an
-    # arbitrary CSV with no pack present).
-    try:
-        from city_config import load_city_config
-        city_facts = load_city_config().data_facts
-    except Exception:
-        city_facts = None
+    # Carry a city pack's data facts into the interpret prompt ONLY when a pack
+    # was explicitly selected. The CLI's positional arg is an arbitrary CSV, and
+    # load_city_config() would otherwise silently fall back to Louisville's
+    # pack — asserting Louisville's facts about someone else's dataset.
+    city_facts = None
+    if os.environ.get("CITY_CONFIG"):
+        try:
+            from city_config import load_city_config
+            city_facts = load_city_config().data_facts
+        except Exception as e:
+            print(f"Warning: could not load CITY_CONFIG: {e}")
     interpret_system = build_interpret_prompt(schema_desc, extra_facts=city_facts)
 
     client = make_client(args.base_url, args.api_key)

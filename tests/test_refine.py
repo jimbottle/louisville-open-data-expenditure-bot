@@ -15,8 +15,9 @@ def test_refine_prompt_carries_the_load_bearing_rules():
     assert "RESULTS" in p                        # accuracy anchor named
     assert "non-technical" in p.lower()
     assert "agency_canonical" in p               # jargon example
+    assert "mutually exclusive" in p             # the overlapping-views rule
     # lean by design: the rubric itself stays small (well under 1K tokens)
-    assert len(p) < 2000
+    assert len(p) < 2400
 
 
 class _Delta:

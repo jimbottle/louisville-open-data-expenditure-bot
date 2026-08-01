@@ -498,11 +498,17 @@ def drop_total_rows(df, label_col: str, value_col: str = None):
 
     if value_col and value_col in df.columns and len(df) >= 3:
         vals = pd.to_numeric(df[value_col], errors="coerce")
-        grand = vals.sum()
-        for idx in df.index[labels.str.contains(r"\bTOTAL\b", regex=True) & ~drop]:
+        # Measure against rows still in play — a shape-matched total already
+        # dropped must not inflate the baseline. Compare magnitudes so an
+        # all-negative result set (credits/offsets) is covered too. Any label
+        # CONTAINING "total" is a candidate (SUBTOTAL, TOTALS, TOTAL_SPEND);
+        # the value test is what protects real payees named TOTAL ....
+        for idx in df.index[labels.str.contains("TOTAL") & ~drop]:
             v = vals.get(idx)
-            others = grand - v
-            if pd.notna(v) and others > 0 and abs(v - others) <= max(1.0, abs(others) * 0.005):
+            if pd.isna(v):
+                continue
+            others = vals[~drop].sum() - v
+            if abs(others) > 0 and abs(abs(v) - abs(others)) <= max(1.0, abs(others) * 0.005):
                 drop.loc[idx] = True
 
     return df[~drop]

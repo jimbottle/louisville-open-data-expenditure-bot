@@ -323,6 +323,20 @@ def startup():
     # size matters); the full verbose version is still available at /api/schema.
     schema_desc = get_compact_schema_description(con)
 
+    # Year facts are derived from the loaded data, never hardcoded: the newest
+    # fiscal year is the in-progress one and the year before it is the most
+    # recent complete one. A data refresh therefore updates the prompts (and,
+    # via the prompt hash, invalidates cached answers) automatically.
+    first_year, in_progress_year = con.execute(
+        "SELECT MIN(fiscal_year), MAX(fiscal_year) FROM expenditures WHERE fiscal_year IS NOT NULL"
+    ).fetchone()
+    last_complete_year = in_progress_year - 1
+    years = {
+        "first_year": first_year,
+        "in_progress_year": in_progress_year,
+        "last_complete_year": last_complete_year,
+    }
+
     sql_system = f"""You are a data analytics assistant. You translate natural language questions into SQL queries
 and interpret results. You work with Louisville Metro government open data.
 
@@ -331,8 +345,8 @@ and interpret results. You work with Louisville Metro government open data.
 - The primary table is `expenditures`. Enrichment tables are: `salary_data`, `capital_projects`, `active_contractors`, `staff_demographics`, `hr_requisitions`, `contractor_profiles`.
 - Return ONLY the SQL query, no explanation, no markdown fences, no preamble.
 - If a question is ambiguous, make reasonable assumptions.
-- IMPORTANT: When a question asks for a single value related to a time period (e.g., "how much did agency X spend?" or "what is the biggest payment?") and does NOT specify "all time" or "total", default to the most recent complete fiscal year (2025). Only use all fiscal years if the question explicitly says "all time", "across all years", "historically", or asks for a trend/comparison. If the intent is genuinely unclear, note in a SQL comment which year you assumed.
-- CRITICAL: 2026 is a PARTIAL year across ALL tables (expenditures AND salary_data). It has significantly fewer transactions and lower totals because the year is still in progress. When presenting 2026 data in trends or comparisons, always note that it represents partial-year data. When asked about "current" or "latest" spending OR salaries, use 2025 (the most recent COMPLETE year) unless the user specifically asks about 2026. This applies to BOTH fiscal_year in expenditures AND CalYear in salary_data.
+- IMPORTANT: When a question asks for a single value related to a time period (e.g., "how much did agency X spend?" or "what is the biggest payment?") and does NOT specify "all time" or "total", default to the most recent complete fiscal year ({last_complete_year}). Only use all fiscal years if the question explicitly says "all time", "across all years", "historically", or asks for a trend/comparison. If the intent is genuinely unclear, note in a SQL comment which year you assumed.
+- CRITICAL: {in_progress_year} is a PARTIAL year across ALL tables (expenditures AND salary_data). It has significantly fewer transactions and lower totals because the year is still in progress. When presenting {in_progress_year} data in trends or comparisons, always note that it represents partial-year data. When asked about "current" or "latest" spending OR salaries, use {last_complete_year} (the most recent COMPLETE year) unless the user specifically asks about {in_progress_year}. This applies to BOTH fiscal_year in expenditures AND CalYear in salary_data.
 - Use appropriate aggregations, GROUP BY, ORDER BY, and LIMIT clauses.
 - When a question asks about quantitative values (spend, cost, salary, amount), always include the relevant numbers in the SELECT. If ranking entities by a numeric value, include that value in the results. Not every query needs dollar amounts — only include them when relevant to the question.
 - ALWAYS filter out NULL values from display columns. Use WHERE column IS NOT NULL or COALESCE(column, 'N/A'). Never return rows with blank or null values in key fields — they confuse users.
@@ -376,12 +390,12 @@ and interpret results. You work with Louisville Metro government open data.
 - spend_category: "Grant Utility Assistance" / "Utility Assistance Non-Reportable" = utility bill assistance for residents. "Professional Services" = contracted professional work. "External Agency Contractual Services" = payments to outside organizations. "Grant Community Assistance" / "Grant Emergency Relief" = direct aid programs.
 
 ## Topic Vocabulary (the words users say vs. the values in the data)
-Users ask in everyday terms that do NOT appear in the data. Never filter on a topical word you have not seen in the schema's enumerated values — match the real values below, and prefer agency_canonical when the topic is a department's remit.
-- technology / IT / computers / software / cybersecurity: the department is agency_canonical = 'Metro Technology Services'; the category values are Computer-prefixed, not "technology" (spend_category LIKE 'Computer%' — Computer Software, Computer Hardware, Computer Equipment — plus 'Cloud Computing Services'). These are two OVERLAPPING views, so ANDing them collapses to a small intersection that understates the answer ~5x. Use EXACTLY this query shape (substituting the year asked about; default the most recent complete year, 2025): SELECT 'Metro Technology Services department' AS spend_view, ROUND(SUM(extended_amount), 2) AS total_spend FROM expenditures WHERE fiscal_year = 2025 AND agency_canonical = 'Metro Technology Services' AND is_data_artifact = FALSE UNION ALL SELECT 'Computer and cloud purchases (all departments)', ROUND(SUM(extended_amount), 2) FROM expenditures WHERE fiscal_year = 2025 AND (spend_category LIKE 'Computer%' OR spend_category = 'Cloud Computing Services') AND is_data_artifact = FALSE. The two returned figures OVERLAP (a computer purchase by that department appears in both), so present them as two separate views and NEVER add them into a combined total. The words "technology" and "cybersecurity" appear in NO spend_category value; filtering on them returns zero rows.
+Users ask in everyday terms that rarely appear verbatim in the data. Filter only on values named in this prompt, or on a broad pattern (ILIKE '%word%') likely to match several real values — a narrow guess at an exact value you have not seen usually matches nothing. Prefer agency_canonical when the topic is a department's remit.
+- technology / IT / computers / software / cybersecurity: the department is agency_canonical = 'Metro Technology Services'; the categories are named for the thing bought, not the topic (Computer Software, Computer Hardware & Equipment, Computer Software License Owned, Software Maintenance, Enterprise Software Licenses (MELA), Cloud Computing Services). NOT every software category is Computer-prefixed, so match both patterns. Department and category are two OVERLAPPING views: ANDing them collapses to a small intersection and understates the answer ~5x. Use EXACTLY this query shape, substituting the year asked about, and DROPPING both fiscal_year predicates when the question covers all time / all years / a trend: SELECT 'Metro Technology Services department' AS spend_view, ROUND(SUM(extended_amount), 2) AS total_spend FROM expenditures WHERE fiscal_year = {last_complete_year} AND agency_canonical = 'Metro Technology Services' AND is_data_artifact = FALSE UNION ALL SELECT 'Computer, software and cloud purchases (all departments)', ROUND(SUM(extended_amount), 2) FROM expenditures WHERE fiscal_year = {last_complete_year} AND (spend_category LIKE 'Computer%' OR spend_category ILIKE '%Software%' OR spend_category = 'Cloud Computing Services') AND is_data_artifact = FALSE. The two returned figures OVERLAP (a software purchase by that department appears in both), so present them as two separate views and NEVER add them into a combined total. The words "technology" and "cybersecurity" appear in NO spend_category value; filtering on them returns zero rows.
 - police / law enforcement: agency_canonical = 'Louisville Metro Police Department'. fire: 'Louisville Fire'. parks: 'Parks & Recreation'. roads/paving/infrastructure: 'Public Works & Assets'.
-- If a topical filter returns no rows, do not report "no spending" — the filter was wrong, not the data. Re-query using the department (agency_canonical) or broader category patterns.
+- An empty result from a topical filter means the filter was wrong, not that the city spends nothing. Re-query using the department (agency_canonical) or a broader category pattern before drawing any conclusion about spending levels.
 
-- The `expenditures` table spans FY2008-FY2026. Columns available vary by era:
+- The `expenditures` table spans FY{first_year}-FY{in_progress_year}. Columns available vary by era:
   - 2008-2017: has sub_agency, department, sub_department, stimulus_type, payment_amount, payment_void_date
   - 2018+: has cost_center, project, program, grant_, financing_source, region
   - Common columns: fiscal_year, invoice_date, invoice_number, invoice_amount, payee, payment_date, payment_number, agency, expenditure_type, expenditure_category, spend_category, fund, extended_amount
@@ -390,12 +404,13 @@ Users ask in everyday terms that do NOT appear in the data. Never filter on a to
 {schema_desc}
 """
 
-    interpret_system = """You are a data analytics assistant interpreting query results from Louisville Metro government data.
-This data covers expenditures from FY2008-FY2026, employee salaries, capital projects, active contractors, staff demographics, and HR requisitions.
+    interpret_system = f"""You are a data analytics assistant interpreting query results from Louisville Metro government data.
+This data covers expenditures from FY{first_year}-FY{in_progress_year}, employee salaries, capital projects, active contractors, staff demographics, and HR requisitions.
 
 ## Rules
 - Give concise, insightful answers. Lead with the key finding.
 - When the question asks about quantitative values or when entities are ranked by a numeric metric, include those numbers in the response. Not every answer needs dollar amounts — only include them when they're relevant to what was asked.
+- Never add together rows that are different VIEWS of the same spending (e.g. a department total and a category total, where one purchase can appear in both). Report such figures separately; summing them double-counts. Only add rows that are mutually exclusive slices.
 - If results are empty, explain what that likely means.
 - If the data shows something notable or unexpected, call it out.
 - Keep responses under 200 words unless the user asked for detail.
@@ -416,16 +431,20 @@ This data covers expenditures from FY2008-FY2026, employee salaries, capital pro
 - NEVER rescale numbers: repeat values at the magnitude shown in the results (a value like 192,770.57 is about $192.8K, not millions).
 - Only state facts that appear in the results or the question. Do not describe what a figure includes or what years a dataset covers unless the results show it.
 """
-    if CONFIG.data_facts:
+    # data_facts may reference {in_progress_year}/{last_complete_year}; fill
+    # them from the data so the facts stay true across refreshes.
+    global CITY_FACTS
+    CITY_FACTS = [f.format(**years) for f in CONFIG.data_facts]
+    if CITY_FACTS:
         interpret_system += "\n## Facts about this city's data (enforce these)\n" + \
-            "\n".join(f"- {f}" for f in CONFIG.data_facts) + "\n"
+            "\n".join(f"- {f}" for f in CITY_FACTS) + "\n"
 
     # Cache entries are keyed with a version derived from the prompts, so any
     # prompt change automatically invalidates stale cached answers (re-warm
     # the starter questions after deploys that change prompts).
     global CACHE_VERSION
     CACHE_VERSION = hashlib.sha1(
-        (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CONFIG.data_facts)).encode()
+        (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CITY_FACTS)).encode()
     ).hexdigest()[:8]
     stale = [k for k in response_cache if not k.startswith(CACHE_VERSION + ":")]
     if stale:
@@ -534,6 +553,9 @@ CACHE_FILE = os.path.join(os.environ.get("STATS_DIR", os.environ.get("DATA_DIR",
 # the version, orphaning (and pruning) every previously cached answer, so a
 # fix can never be shadowed by a stale cache entry.
 CACHE_VERSION = "unversioned"
+
+# City data facts with year placeholders resolved (set at startup).
+CITY_FACTS: list[str] = []
 
 
 def _cache_key(question: str) -> str:
@@ -851,7 +873,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
             yield from refine_events_with_fallback(
                 refine_interpretation_stream(
                     client, MODEL, question, sql, result_str, draft, on_retry=on_retry, fallback_client=paid_client,
-                    extra_facts=CONFIG.data_facts,
+                    extra_facts=CITY_FACTS,
                 ),
                 draft,
                 send,

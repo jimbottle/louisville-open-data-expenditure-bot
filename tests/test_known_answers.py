@@ -147,6 +147,32 @@ def test_drop_total_rows_removes_total_labels(label):
     assert out["label"].tolist() == ["Alpha", "Beta"]
 
 
+@pytest.mark.parametrize("label", ["TOTALS", "SUBTOTAL", "TOTAL_SPEND"])
+def test_drop_total_rows_catches_non_word_total_labels_by_value(label):
+    # \bTOTAL\b wouldn't match these; the value test carries them.
+    df = _chart_df([(label, 100.0), ("Alpha", 60.0), ("Beta", 40.0)])
+    assert drop_total_rows(df, "label", "value")["label"].tolist() == ["Alpha", "Beta"]
+
+
+def test_drop_total_rows_handles_negative_result_sets():
+    # Credit/offset charts are all-negative; magnitude comparison must still work.
+    df = _chart_df([("Total credits", -100.0), ("Alpha", -60.0), ("Beta", -40.0)])
+    assert drop_total_rows(df, "label", "value")["label"].tolist() == ["Alpha", "Beta"]
+
+
+def test_drop_total_rows_shape_match_does_not_inflate_baseline():
+    # A shape-matched total is dropped first; the value check for a second
+    # candidate must measure against the remaining rows, not the doubled sum.
+    df = _chart_df([
+        ("TOTAL - ALL GRANT FUNDS", 100.0),
+        ("TOTAL TOOL SUPPLY INC", 55.0),   # real payee, ~half — must survive
+        ("Alpha", 25.0),
+        ("Beta", 20.0),
+    ])
+    out = drop_total_rows(df, "label", "value")
+    assert out["label"].tolist() == ["TOTAL TOOL SUPPLY INC", "Alpha", "Beta"]
+
+
 @pytest.mark.parametrize("payee", [
     "TOTAL TOOL SUPPLY INC",
     "TOTAL ACCESS GROUP INC",
@@ -203,6 +229,71 @@ def test_grant_rollup_prompt_query_stays_valid(con):
     assert abs(totals["total_amount"].iloc[0] - funds["total_amount"].sum()) < 1.0
     assert len(funds) >= 50
     assert totals["total_amount"].iloc[0] > 1e9  # ~$1.17B as of 2026-07
+
+
+# ── Technology topic vocabulary ──────────────────────────────────────────────
+
+TECH_DEPT_SQL = (
+    "SELECT 'Metro Technology Services department' AS spend_view, "
+    "ROUND(SUM(extended_amount), 2) AS total_spend FROM expenditures "
+    "WHERE fiscal_year = {yr} AND agency_canonical = 'Metro Technology Services' "
+    "AND is_data_artifact = FALSE"
+)
+TECH_CATEGORY_SQL = (
+    "SELECT 'Computer, software and cloud purchases (all departments)', "
+    "ROUND(SUM(extended_amount), 2) FROM expenditures "
+    "WHERE fiscal_year = {yr} AND (spend_category LIKE 'Computer%' "
+    "OR spend_category ILIKE '%Software%' OR spend_category = 'Cloud Computing Services') "
+    "AND is_data_artifact = FALSE"
+)
+
+
+def test_tech_topic_query_matches_prompt_and_returns_both_views(con):
+    """The tech bullet prescribes a copy-exact UNION; pin it like the grant
+    query. Both legs must appear verbatim in app.py, both must return money,
+    and the category leg must include the non-Computer-prefixed software
+    categories that were once missing (a ~43% undercount)."""
+    app_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")).read()
+    for frag in (TECH_DEPT_SQL, TECH_CATEGORY_SQL):
+        assert frag.replace("{yr}", "{last_complete_year}") in app_src, (
+            "the prompt's copy-exact tech query no longer matches this test"
+        )
+    year = con.execute("SELECT MAX(fiscal_year) - 1 FROM expenditures").fetchone()[0]
+    dept = con.execute(TECH_DEPT_SQL.format(yr=year)).fetchone()[1]
+    cat = con.execute(TECH_CATEGORY_SQL.format(yr=year)).fetchone()[1]
+    assert dept and dept > 1e6, f"department view should be millions, got {dept}"
+    assert cat and cat > 1e6, f"category view should be millions, got {cat}"
+    # the broadened pattern must beat the old Computer-only one
+    narrow = con.execute(
+        "SELECT SUM(extended_amount) FROM expenditures WHERE fiscal_year = ? "
+        "AND (spend_category LIKE 'Computer%' OR spend_category = 'Cloud Computing Services')",
+        [year],
+    ).fetchone()[0]
+    assert cat > narrow * 1.2, "broadened category filter must capture the software categories"
+    # the two views overlap, so their intersection is smaller than either
+    both = con.execute(
+        "SELECT SUM(extended_amount) FROM expenditures WHERE fiscal_year = ? "
+        "AND agency_canonical = 'Metro Technology Services' "
+        "AND (spend_category LIKE 'Computer%' OR spend_category ILIKE '%Software%' "
+        "OR spend_category = 'Cloud Computing Services')",
+        [year],
+    ).fetchone()[0]
+    assert both < dept and both < cat
+
+
+def test_prompt_topic_values_exist_in_the_data(con):
+    """Agency/category literals named in the Topic Vocabulary must be real."""
+    for agency in ["Metro Technology Services", "Louisville Metro Police Department",
+                   "Louisville Fire", "Parks & Recreation", "Public Works & Assets"]:
+        n = con.execute(
+            "SELECT COUNT(*) FROM expenditures WHERE agency_canonical = ?", [agency]
+        ).fetchone()[0]
+        assert n > 0, f"prompt names agency {agency!r} which has no rows"
+    for cat in ["Computer Software", "Cloud Computing Services", "Software Maintenance"]:
+        n = con.execute(
+            "SELECT COUNT(*) FROM expenditures WHERE spend_category = ?", [cat]
+        ).fetchone()[0]
+        assert n > 0, f"prompt names spend_category {cat!r} which has no rows"
 
 
 # ── Expenditure types ─────────────────────────────────────────────────────────
