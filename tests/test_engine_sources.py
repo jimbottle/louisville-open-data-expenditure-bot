@@ -190,7 +190,12 @@ def test_build_summaries_survives_a_table_key_that_does_not_match_its_sql(
     with caplog.at_level("WARNING"):
         _build_summaries(con, cfg)  # must not raise
     assert "cannot check whether summary table" in caplog.text, caplog.text
-    assert table_key in caplog.text, f"warning omits the offending key {table_key!r}"
+    # Assert the message's OWN rendering of the key: the interpolated
+    # exception text happens to contain the bare name too, so a substring
+    # check would still pass if the %r were deleted from the format string.
+    assert f"summary table {table_key!r}" in caplog.text, (
+        f"warning omits its own rendering of the offending key {table_key!r}"
+    )
     assert expected_exc in caplog.text, f"warning omits the exception type for {table_key!r}"
     # the SQL still ran, so the real table exists
     assert con.execute("SELECT COUNT(*) FROM summary_actual").fetchone()[0] == 2

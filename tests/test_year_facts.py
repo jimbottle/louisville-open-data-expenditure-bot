@@ -10,6 +10,8 @@ import os
 import sys
 from datetime import date
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from city_config import CityConfig  # noqa: E402
@@ -277,3 +279,39 @@ def test_year_context_distinguishes_an_empty_salary_table_from_a_missing_one():
     # ...and a healthy pack reports the table as present
     ok = year_context(_con(), fy_start_month=7, today=date(2026, 8, 1))
     assert ok["salary_table_present"] is True
+
+
+# ── app._salary_status (the operator-facing line) ────────────────────────────
+# Five strings an operator reads to diagnose a pack; the flags->message
+# mapping had been reshaped three commits running with no test.
+
+@pytest.mark.parametrize("yc,expected", [
+    ({"salary_state": "error"}, "derivation failed — see warning above"),
+    ({"salary_state": "no_table"}, "no salary table"),
+    ({"salary_state": "no_years"}, "salary_data has no usable CalYear values"),
+    ({"salary_state": "single_year", "newest_cal_year": 2026},
+     "CalYear 2026 only; no complete year to cite"),
+    ({"salary_state": "ok", "salary": {"last_complete_year": 2025}},
+     "CalYear partial, latest complete 2025"),
+    ({"salary_state": "unknown"}, "not evaluated"),
+])
+def test_salary_status_message_per_state(yc, expected):
+    import app
+    assert app._salary_status(yc) == expected
+
+
+def test_salary_status_covers_every_state_year_context_can_emit():
+    # Guard against a new state being added without a message for it.
+    import app
+    states = {
+        year_context(_con(), fy_start_month=7, today=date(2026, 8, 1))["salary_state"],
+        year_context(_con(salary_years=None), fy_start_month=7)["salary_state"],
+        year_context(_con(salary_years=()), fy_start_month=7)["salary_state"],
+        year_context(_con(salary_years=(2026,)), fy_start_month=7)["salary_state"],
+        year_context(_con(fiscal_rows=()), fy_start_month=7)["salary_state"],
+    }
+    assert states == {"ok", "no_table", "no_years", "single_year", "unknown"}
+    for st in states:
+        assert app._salary_status({"salary_state": st, "newest_cal_year": 2026,
+                                   "salary": {"last_complete_year": 2025}}) != "not evaluated" \
+            or st == "unknown"

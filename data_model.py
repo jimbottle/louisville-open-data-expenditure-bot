@@ -621,7 +621,9 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         log.warning("year_context: no usable fiscal_year values; skipping year guidance")
         return {"values": {}, "rules": "", "facts": [], "expenditures": None,
                 "salary": None, "newest_cal_year": None, "salary_error": False,
-                "salary_table_present": False}
+                # salary_data was never queried on this path — "unknown", not
+                # a claim that the pack has no salary table.
+                "salary_table_present": None, "salary_state": "unknown"}
 
     max_covered = con.execute(
         "SELECT MAX(payment_date) FROM expenditures WHERE fiscal_year = ?", [newest_year]
@@ -678,11 +680,18 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         "facts": facts,
         "expenditures": yf,
         "salary": salary,
-        # Four distinct no-guidance states: no salary table at all
-        # (salary_table_present False), a table with no usable CalYear
-        # (present but newest_cal_year None), a table with too few years to
-        # cite a complete one (newest_cal_year set, salary None), and a failed
-        # derivation (salary_error True).
+        # salary_state is the single authoritative value — exactly one of
+        # "ok" | "error" | "no_table" | "no_years" | "single_year" — so
+        # consumers never have to combine flags (which were not mutually
+        # exclusive) to work out what happened. The keys below remain for
+        # detail, not for classification.
+        "salary_state": (
+            "error" if salary_error
+            else "no_table" if not salary_table_present
+            else "no_years" if newest_cal is None
+            else "single_year" if salary is None
+            else "ok"
+        ),
         "newest_cal_year": newest_cal,
         "salary_error": salary_error,
         "salary_table_present": salary_table_present,

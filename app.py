@@ -315,6 +315,27 @@ SERVICE_ERROR_MSG = (
 
 # ── Startup ──────────────────────────────────────────────────────────────────
 
+def _salary_status(yc: dict) -> str:
+    """One operator-facing line describing what salary guidance was derived.
+
+    Driven by year_context's single `salary_state` value so the five cases
+    stay exclusive (they were previously a nested ternary over flags that
+    could both be true).
+    """
+    state = yc.get("salary_state")
+    if state == "error":
+        return "derivation failed — see warning above"
+    if state == "no_table":
+        return "no salary table"
+    if state == "no_years":
+        return "salary_data has no usable CalYear values"
+    if state == "single_year":
+        return f"CalYear {yc['newest_cal_year']} only; no complete year to cite"
+    if state == "ok":
+        return f"CalYear partial, latest complete {yc['salary']['last_complete_year']}"
+    return "not evaluated"
+
+
 @app.on_event("startup")
 def startup():
     global con, schema_desc, sql_system, interpret_system, client, paid_client
@@ -355,12 +376,7 @@ def startup():
         "PARTIAL" if yc["expenditures"]["is_partial"] else "complete",
         yc["expenditures"]["covered_through"],
         last_complete_year,
-        "derivation failed — see warning above" if yc["salary_error"]
-        else ("no salary table" if not yc["salary_table_present"]
-              else ("salary_data has no usable CalYear values" if yc["newest_cal_year"] is None
-                    else (f"CalYear {yc['newest_cal_year']} only; no complete year to cite"
-                          if yc["salary"] is None
-                          else f"CalYear partial, latest complete {yc['salary']['last_complete_year']}"))),
+        _salary_status(yc),
     )
 
     sql_system = f"""You are a data analytics assistant. You translate natural language questions into SQL queries
