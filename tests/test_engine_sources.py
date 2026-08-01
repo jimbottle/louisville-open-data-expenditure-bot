@@ -11,7 +11,12 @@ import duckdb
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from city_config import CityConfig  # noqa: E402
-from data_model import _load_expenditures, _source_files  # noqa: E402
+from data_model import (  # noqa: E402
+    _load_expenditures,
+    _source_files,
+    get_compact_schema_description,
+    get_full_schema_description,
+)
 
 
 def _touch(d, name, content="a,b\n1,2\n"):
@@ -19,6 +24,35 @@ def _touch(d, name, content="a,b\n1,2\n"):
     with open(path, "w") as f:
         f.write(content)
     return path
+
+
+# ── Schema description determinism ───────────────────────────────────────────
+# The schema text goes into every LLM prompt AND into app.py's prompt-hash
+# cache version. Unordered DISTINCT scans once made it vary per process, so
+# every restart invalidated the whole response cache (louisville-open-data-xmf).
+
+def _schema_fixture_con():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE expenditures (fund VARCHAR, amount DOUBLE)")
+    # deliberately inserted out of alphabetical order
+    con.executemany("INSERT INTO expenditures VALUES (?, ?)",
+                    [("Zebra Fund", 1.0), ("Alpha Fund", 2.0), ("Middle Fund", 3.0)])
+    return con
+
+
+def test_compact_schema_enums_are_sorted_and_stable():
+    con = _schema_fixture_con()
+    out = get_compact_schema_description(con)
+    assert out == get_compact_schema_description(con)
+    enums = out[out.index("{") + 1:out.index("}")].split(", ")
+    assert enums == sorted(enums), f"enum values must be ordered, got {enums}"
+
+
+def test_full_schema_samples_are_sorted_and_stable():
+    con = _schema_fixture_con()
+    out = get_full_schema_description(con)
+    assert out == get_full_schema_description(con)
+    assert out.index("'Alpha Fund'") < out.index("'Middle Fund'") < out.index("'Zebra Fund'")
 
 
 # ── _source_files ────────────────────────────────────────────────────────────

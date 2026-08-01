@@ -673,7 +673,15 @@ def main():
         meta_ctx = load_metadata_context(args.metadata)
 
     sql_system = build_system_prompt(schema_desc, meta_ctx)
-    interpret_system = build_interpret_prompt(schema_desc)
+    # Carry the city pack's data facts into the CLI's interpret prompt, the
+    # same facts the web app injects (best-effort: the CLI can run against an
+    # arbitrary CSV with no pack present).
+    try:
+        from city_config import load_city_config
+        city_facts = load_city_config().data_facts
+    except Exception:
+        city_facts = None
+    interpret_system = build_interpret_prompt(schema_desc, extra_facts=city_facts)
 
     client = make_client(args.base_url, args.api_key)
     model = args.model

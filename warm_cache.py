@@ -26,15 +26,23 @@ STARTER_QUESTIONS = [
 
 
 def fetch_entries(host: str) -> dict:
-    """Cache entries keyed by question text.
+    """Current-version cache entries, keyed by question text.
 
-    Server keys are "<prompt-version>:<question>" so that a prompt change
-    invalidates old answers; strip the version so status checks keep working
-    across versions.
+    Server keys are "<prompt-version>:<question>" so a prompt change
+    invalidates old answers. Entries from other versions are EXCLUDED — the
+    app will never serve them, so treating them as cached would report a warm
+    cache while the live one is cold. Falls back to prefix-stripping only for
+    servers too old to report cache_version.
     """
     resp = requests.get(f"{host}/api/cache", timeout=10)
     resp.raise_for_status()
-    return {k.split(":", 1)[-1]: v for k, v in resp.json().get("entries", {}).items()}
+    payload = resp.json()
+    entries = payload.get("entries", {})
+    version = payload.get("cache_version")
+    if not version:
+        return {k.split(":", 1)[-1]: v for k, v in entries.items()}
+    prefix = f"{version}:"
+    return {k[len(prefix):]: v for k, v in entries.items() if k.startswith(prefix)}
 
 
 def main():

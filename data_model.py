@@ -11,6 +11,7 @@ active config for backward compatibility with app.py and the tests.
 """
 
 import os
+import re
 
 import duckdb
 import pandas as pd
@@ -290,7 +291,8 @@ def get_full_schema_description(con: duckdb.DuckDBPyConnection) -> str:
             if "VARCHAR" in col_type.upper():
                 try:
                     distincts = con.execute(
-                        f"SELECT DISTINCT {col_name} FROM {table} WHERE {col_name} IS NOT NULL LIMIT 5"
+                        f"SELECT DISTINCT {col_name} FROM {table} "
+                        f"WHERE {col_name} IS NOT NULL ORDER BY 1 LIMIT 5"
                     ).fetchall()
                     vals = [str(r[0]) for r in distincts]
                     if vals:
@@ -360,10 +362,14 @@ def get_compact_schema_description(con: duckdb.DuckDBPyConnection) -> str:
                     # by the canonical-column rules. Cap the list so a ~12-value
                     # column doesn't bloat the prompt.
                     if 0 < n_distinct <= 12:
+                        # ORDER BY is load-bearing: without it DuckDB returns
+                        # distinct values in parallel-scan order, so the schema
+                        # text (and every prompt built from it, plus the
+                        # prompt-hash cache version) would differ per process.
                         vals = [
                             str(r[0]) for r in con.execute(
                                 f"SELECT DISTINCT {col_name} FROM {table} "
-                                f"WHERE {col_name} IS NOT NULL LIMIT 12"
+                                f"WHERE {col_name} IS NOT NULL ORDER BY 1 LIMIT 12"
                             ).fetchall()
                         ]
                         if vals:
@@ -464,6 +470,42 @@ def infer_chart(df) -> tuple:
             chart_type = "pie" if n <= 5 else "bar"
 
     return chart_type, label_col, value_col
+
+
+_TOTAL_LABEL_SHAPES = re.compile(
+    r"^(GRAND\s+TOTAL|TOTAL)(\s*[-–:]\s|\s+(ALL|SPENDING|AMOUNT|YEARS)\b|$)"
+)
+
+
+def drop_total_rows(df, label_col: str, value_col: str = None):
+    """Remove grand-total rows (e.g. a GROUP BY ROLLUP row) from chart data.
+
+    A total bar equals the sum of every other bar, so charting it doubles the
+    axis and flattens the real values. Two complementary rules, both needed:
+
+    - unambiguous total label shapes ("TOTAL", "TOTAL - ALL GRANT FUNDS",
+      "GRAND TOTAL", "TOTAL ALL YEARS") are always dropped;
+    - any label merely *containing* "total" is dropped only when its value
+      also equals the sum of the remaining rows — so real payees such as
+      TOTAL TOOL SUPPLY INC and TOTAL ACCESS GROUP INC keep their bars.
+
+    Pure function (no DB), unit-tested alongside infer_chart.
+    """
+    if label_col not in df.columns or df.empty:
+        return df
+    labels = df[label_col].astype(str).str.strip().str.upper()
+    drop = labels.str.match(_TOTAL_LABEL_SHAPES)
+
+    if value_col and value_col in df.columns and len(df) >= 3:
+        vals = pd.to_numeric(df[value_col], errors="coerce")
+        grand = vals.sum()
+        for idx in df.index[labels.str.contains(r"\bTOTAL\b", regex=True) & ~drop]:
+            v = vals.get(idx)
+            others = grand - v
+            if pd.notna(v) and others > 0 and abs(v - others) <= max(1.0, abs(others) * 0.005):
+                drop.loc[idx] = True
+
+    return df[~drop]
 
 
 def humanize_text(text: str, table: str = "expenditures") -> str:

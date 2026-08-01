@@ -63,6 +63,7 @@ from analytics_agent import (
 from data_model import (
     CONFIG,
     DATA_DICTIONARY,
+    drop_total_rows,
     get_compact_schema_description,
     get_data_dictionary_text,
     get_full_schema_description,
@@ -495,7 +496,9 @@ async def get_cache_status():
         has_interp = any('"type": "interpretation"' in e for e in events)
         has_error = any('"type": "error"' in e for e in events)
         status[key] = {"events": len(events), "has_interpretation": has_interp, "has_error": has_error}
-    return {"cached_questions": len(status), "entries": status}
+    # cache_version lets tooling tell a current entry from a stale one — keys
+    # are "<version>:<question>" and only current-version entries are served.
+    return {"cached_questions": len(status), "cache_version": CACHE_VERSION, "entries": status}
 
 
 @app.delete("/api/cache")
@@ -722,11 +725,10 @@ async def ask(request: Request):
                     # Sort by the time/label column so the line reads chronologically
                     # instead of zig-zagging in rank order.
                     chart_df = result_df.sort_values(label_col) if chart_type == "line" else result_df
-                    # Grand-total rows (the ROLLUP label shape 'TOTAL - ...') would
-                    # double the axis scale and dwarf the real bars — never chart
-                    # them. Match the 'TOTAL - ' shape specifically: real vendors
-                    # are named 'TOTAL TOOL SUPPLY INC' etc. and must keep their bars.
-                    chart_df = chart_df[~chart_df[label_col].astype(str).str.strip().str.upper().str.match(r"TOTAL\s*-\s")]
+                    # Grand-total rows would double the axis scale and dwarf the
+                    # real bars (see drop_total_rows: label shapes + a value check
+                    # that spares real payees like TOTAL TOOL SUPPLY INC).
+                    chart_df = drop_total_rows(chart_df, label_col, value_col)
                     if len(chart_df) < 2:
                         raise ValueError("too few chartable rows after dropping total rows")
                     labels = chart_df[label_col].astype(str).tolist()[:30]

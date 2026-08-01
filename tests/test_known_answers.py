@@ -14,7 +14,12 @@ import os
 
 import pandas as pd
 import pytest
-from data_model import get_compact_schema_description, infer_chart, load_all_data
+from data_model import (
+    drop_total_rows,
+    get_compact_schema_description,
+    infer_chart,
+    load_all_data,
+)
 
 
 @pytest.fixture(scope="module")
@@ -118,6 +123,56 @@ def test_top_salaries_magnitudes_and_scope(con):
     ).fetchone()
     assert row is not None and row[0] is not None, "Police Chief missing from summary_top_salaries"
     assert row[0] <= 3
+
+
+# ── Chart total-row filtering ────────────────────────────────────────────────
+# A grand-total bar equals every other bar combined, doubling the axis. Real
+# payees are named "TOTAL ..." though, so both directions are pinned here.
+
+def _chart_df(pairs):
+    return pd.DataFrame({"label": [p[0] for p in pairs], "value": [p[1] for p in pairs]})
+
+
+@pytest.mark.parametrize("label", [
+    "TOTAL - ALL GRANT FUNDS",   # the ROLLUP label the grant prompt mandates
+    "Total - Everything",        # lowercase / different suffix
+    "TOTAL",                     # bare total
+    "GRAND TOTAL",
+    "TOTAL ALL YEARS",
+])
+def test_drop_total_rows_removes_total_labels(label):
+    df = _chart_df([(label, 100.0), ("Alpha", 60.0), ("Beta", 40.0)])
+    out = drop_total_rows(df, "label", "value")
+    assert label not in out["label"].tolist()
+    assert out["label"].tolist() == ["Alpha", "Beta"]
+
+
+@pytest.mark.parametrize("payee", [
+    "TOTAL TOOL SUPPLY INC",
+    "TOTAL ACCESS GROUP INC",
+    "TOTAL RENOVATIONS",
+    "TOTAL TRUCK PARTS INC",
+])
+def test_drop_total_rows_keeps_real_vendors_named_total(payee):
+    df = _chart_df([(payee, 90.0), ("Alpha", 60.0), ("Beta", 40.0)])
+    out = drop_total_rows(df, "label", "value")
+    assert payee in out["label"].tolist()
+    assert len(out) == 3
+
+
+def test_drop_total_rows_catches_novel_total_label_by_value():
+    # An unanticipated label shape is still caught when its value equals the
+    # sum of the others (the property that makes a total bar harmful).
+    df = _chart_df([("Overall total spending", 100.0), ("Alpha", 60.0), ("Beta", 40.0)])
+    out = drop_total_rows(df, "label", "value")
+    assert out["label"].tolist() == ["Alpha", "Beta"]
+
+
+def test_drop_total_rows_is_a_noop_without_totals():
+    df = _chart_df([("Alpha", 60.0), ("Beta", 40.0), ("Gamma", 10.0)])
+    assert len(drop_total_rows(df, "label", "value")) == 3
+    # missing/blank columns must not raise
+    assert len(drop_total_rows(df, "nope", "value")) == 3
 
 
 # ── Grants ────────────────────────────────────────────────────────────────────
