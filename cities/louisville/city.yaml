@@ -442,13 +442,14 @@ dictionary:
         benefits). Dollar amounts — a value like 192770.57 is ~$193K. Partial for
         the in-progress year.
   summary_top_salaries:
-    description: Average and maximum total pay by job title and department for the
-      most recent COMPLETE calendar year. Values are in dollars (a value like
-      192770.57 is ~$193K, not millions) and are the sum of pay components
-      (regular, overtime, incentive, other) — benefits are NOT included. High
-      averages for field titles (e.g. EMS paramedics) are usually overtime-driven.
-    record_scope: Each row is one (job title, department) group in the latest complete
-      calendar year.
+    description: Average and maximum total pay by job title and department for a
+      single complete calendar year — see the calendar_year column for which one.
+      Values are in dollars (a value like 192770.57 is ~$193K, not millions) and
+      are the sum of pay components (regular, overtime, incentive, other) —
+      benefits are NOT included. High averages for field titles (e.g. EMS
+      paramedics) are usually overtime-driven.
+    record_scope: Each row is one (job title, department) group within the single
+      calendar year named in the calendar_year column.
     columns:
       job_title: Job title/position.
       department: Department name (the same title can appear in several departments).

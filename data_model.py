@@ -239,6 +239,16 @@ def _build_summaries(con, cfg: CityConfig) -> None:
         if all(_table_exists(con, t) for t in requires):
             con.execute(spec["sql"])
             built.append(spec["table"])
+            # An advertised-but-empty summary is worse than a missing one: the
+            # prompt still recommends it, so every question routed there
+            # returns nothing with no explanation.
+            n = con.execute(f"SELECT COUNT(*) FROM {spec['table']}").fetchone()[0]
+            if n == 0:
+                log.warning(
+                    "%s materialized EMPTY — the prompt still recommends it; "
+                    "check this city pack's source data for the years it filters on",
+                    spec["table"],
+                )
         else:
             print(f"{spec['table']}: skipped (requires {requires})")
     print(f"Summary tables created: {', '.join(built)}")
@@ -628,7 +638,10 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         pass  # city pack has no salary table — nothing to say about salaries
     except Exception as e:
         # Anything else (renamed column, type error) would silently strip the
-        # salary guidance the prompt refers to; make it visible.
+        # salary guidance the prompt refers to; make it visible. Clear
+        # newest_cal too so callers don't report the single-year diagnosis for
+        # what is actually a failure.
+        newest_cal = None
         log.warning("year_context: could not derive salary year facts: %s", e)
 
     return {

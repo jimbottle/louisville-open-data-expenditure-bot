@@ -123,9 +123,15 @@ def test_top_salaries_magnitudes_and_scope(con):
         SELECT calendar_year, avg_total_comp, max_total_comp, employee_count
         FROM summary_top_salaries ORDER BY avg_total_comp DESC LIMIT 10
     """).fetchall()
-    max_year = con.execute("SELECT MAX(CalYear) FROM salary_data").fetchone()[0]
+    # Derive the expected year the same way the pack SQL and year_context do
+    # (highest CalYear actually LOADED below the newest) — a computed MAX-1
+    # would re-pin the assumption those two deliberately dropped.
+    expected_year = con.execute(
+        "SELECT MAX(CalYear) FROM salary_data "
+        "WHERE CalYear < (SELECT MAX(CalYear) FROM salary_data)"
+    ).fetchone()[0]
     for year, avg_comp, max_comp, n in rows:
-        assert year == max_year - 1, "must use the latest COMPLETE year, not the partial one"
+        assert year == expected_year, "must use the latest COMPLETE year, not the partial one"
         assert 100_000 < avg_comp < 500_000, f"top-10 avg comp {avg_comp} outside plausible $K range"
         assert avg_comp <= max_comp
         assert n >= 1

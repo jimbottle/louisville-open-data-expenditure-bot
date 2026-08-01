@@ -190,6 +190,8 @@ def test_year_context_builds_values_rules_and_facts():
 def test_year_context_without_salary_table_is_quiet():
     yc = year_context(_con(salary_years=None), fy_start_month=7, today=date(2026, 8, 1))
     assert yc["salary"] is None
+    # no table at all is a distinct state from "table with too few years"
+    assert yc["newest_cal_year"] is None
     assert "CalYear" not in yc["rules"]
     assert len(yc["facts"]) == 1  # expenditure fact only
 
@@ -197,6 +199,8 @@ def test_year_context_without_salary_table_is_quiet():
 def test_year_context_omits_salary_guidance_for_a_single_calyear():
     yc = year_context(_con(salary_years=(2026,)), fy_start_month=7, today=date(2026, 8, 1))
     assert yc["salary"] is None
+    # ...but the table exists, which the log line must distinguish
+    assert yc["newest_cal_year"] == 2026
     assert "CalYear" not in yc["rules"]
     assert len(yc["facts"]) == 1  # expenditure fact only
 
