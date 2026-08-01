@@ -7,6 +7,28 @@ city:
   title: Louisville Open Data
   fiscal_year_start_month: 7
 
+# Everything the frontend shows, so a second city's deployment never says
+# "Louisville". Served by GET /api/config and applied on page load.
+branding:
+  bot_name: Lou
+  tab_title: Lou · Louisville Metro open data
+  subtitle: The publicly shared data from Louisville Metro
+  starter_groups:
+    - label: Spending
+      chips:
+        - ["How has spending changed over time?", "How has total annual spending changed from 2008 to 2026?"]
+        - ["Which agencies spend the most?", "Which agencies have spent the most money across all fiscal years?"]
+        - ["LMPD spending by year", "Give me a year-over-year breakdown of LMPD spending"]
+    - label: People & pay
+      chips:
+        - ["What do top officials earn?", "How much does the mayor make? What about the police chief?"]
+        - ["Highest paid positions", "What are the highest paid positions in Louisville Metro government?"]
+    - label: Contracts & projects
+      chips:
+        - ["Who runs the top contractors?", "Who are the registered agents for the top 10 contractors by total spend?"]
+        - ["Largest capital projects", "What are the largest capital projects and how much was allocated to each?"]
+        - ["Grant funding breakdown", "How much grant funding has Louisville received and from which sources?"]
+
 # Facts the answer-writing prompts must enforce (injected into the interpret
 # and refine system prompts — per-city, so a city whose data DOES include
 # benefits simply states different facts here).

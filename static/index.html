@@ -847,22 +847,7 @@ let lastQuestion = '';          // backs the Retry affordance
 
 // Single source of truth for example prompts: [label, question]. Rendered into
 // both the starter screen (grouped) and the Examples tray (flat), so they can't drift.
-const STARTER_GROUPS = [
-  { label: 'Spending', chips: [
-    ['How has spending changed over time?', 'How has total annual spending changed from 2008 to 2026?'],
-    ['Which agencies spend the most?', 'Which agencies have spent the most money across all fiscal years?'],
-    ['LMPD spending by year', 'Give me a year-over-year breakdown of LMPD spending'],
-  ] },
-  { label: 'People & pay', chips: [
-    ['What do top officials earn?', 'How much does the mayor make? What about the police chief?'],
-    ['Highest paid positions', 'What are the highest paid positions in Louisville Metro government?'],
-  ] },
-  { label: 'Contracts & projects', chips: [
-    ['Who runs the top contractors?', 'Who are the registered agents for the top 10 contractors by total spend?'],
-    ['Largest capital projects', 'What are the largest capital projects and how much was allocated to each?'],
-    ['Grant funding breakdown', 'How much grant funding has Louisville received and from which sources?'],
-  ] },
-];
+let STARTER_GROUPS = [];  // filled from /api/config (city pack branding)
 
 function chipButton(label, question) {
   const b = document.createElement('button');
@@ -1482,8 +1467,25 @@ async function streamAnswer(question, opts = {}) {
   questionEl.focus();
 }
 
-// Populate the starter chips and Examples tray from the shared source.
-renderChips();
+// Branding + starter chips come from the active city pack, so nothing in
+// this page hardcodes a city's identity.
+async function applyBranding() {
+  try {
+    const cfg = await (await fetch('/api/config')).json();
+    if (cfg.tab_title) document.title = cfg.tab_title;
+    const h1 = document.querySelector('header h1');
+    if (h1 && cfg.bot_name) h1.textContent = cfg.bot_name;
+    const sub = document.querySelector('.subtitle');
+    if (sub && cfg.subtitle) sub.textContent = cfg.subtitle;
+    if (Array.isArray(cfg.starter_groups) && cfg.starter_groups.length) {
+      STARTER_GROUPS = cfg.starter_groups.map(g => ({ label: g.label, chips: g.chips }));
+    }
+  } catch (e) {
+    console.warn('Could not load city branding:', e);
+  }
+  renderChips();
+}
+applyBranding();
 </script>
 </body>
 </html>

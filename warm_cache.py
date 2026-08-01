@@ -16,6 +16,7 @@ STARTER_QUESTIONS = [
     "How has total annual spending changed from 2008 to 2026?",
     "Give me a year-over-year breakdown of LMPD spending",
     "How much does the mayor make? What about the police chief?",
+    "What are the highest paid positions in Louisville Metro government?",
     "Who are the registered agents for the top 10 contractors by total spend?",
     "Which vendors receive payments from the most different agencies?",
     "Are there any patterns that suggest potential contract splitting?",

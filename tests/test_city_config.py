@@ -84,3 +84,30 @@ def test_city_config_env_override(monkeypatch):
     )
     cfg = load_city_config()
     assert cfg.city["name"] == "Cincinnati"
+
+
+def test_branding_is_exposed_and_complete():
+    """The frontend gets its identity from the pack, so a second city's
+    deployment never says Louisville."""
+    cfg = load_city_config(LOUISVILLE)
+    b = cfg.branding
+    assert b.get("bot_name") and b.get("tab_title") and b.get("subtitle")
+    groups = b.get("starter_groups") or []
+    assert len(groups) >= 3
+    for g in groups:
+        assert g.get("label")
+        assert g.get("chips")
+        for chip in g["chips"]:
+            assert len(chip) == 2, "each chip is [button label, question]"
+            assert all(isinstance(x, str) and x.strip() for x in chip)
+
+
+def test_branding_starter_questions_match_the_warm_cache_list():
+    """warm_cache pre-answers the starter questions; if the chips drift from
+    that list the UI offers questions that were never warmed."""
+    import warm_cache
+    cfg = load_city_config(LOUISVILLE)
+    chip_qs = {c[1] for g in cfg.branding["starter_groups"] for c in g["chips"]}
+    assert chip_qs <= set(warm_cache.STARTER_QUESTIONS), (
+        f"chips not in warm list: {chip_qs - set(warm_cache.STARTER_QUESTIONS)}"
+    )

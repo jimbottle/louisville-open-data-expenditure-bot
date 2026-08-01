@@ -537,6 +537,20 @@ async def health():
     }
 
 
+@app.get("/api/config")
+async def get_config():
+    """Frontend branding from the active city pack, so the UI carries no
+    hardcoded city identity. Falls back to the city name when a pack omits a
+    field."""
+    b = dict(CONFIG.branding or {})
+    city = (CONFIG.city or {}).get("name", "")
+    b.setdefault("bot_name", "Lou")
+    b.setdefault("tab_title", CONFIG.title)
+    b.setdefault("subtitle", f"The publicly shared data from {city}".strip())
+    b.setdefault("starter_groups", [])
+    return b
+
+
 @app.get("/api/schema")
 async def get_schema():
     # The prompt uses the compact schema; expose both here for debugging.

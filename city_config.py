@@ -39,6 +39,7 @@ class CityConfig:
         self.summaries = raw.get("summaries", [])
         self.dictionary = raw.get("dictionary", {})
         self.data_facts = raw.get("data_facts", [])
+        self.branding = raw.get("branding", {})
 
     def data_facts_for(self, values: dict | None = None) -> list:
         """Data facts with {placeholders} resolved from `values`.
