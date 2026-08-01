@@ -685,10 +685,29 @@ def main():
     if os.environ.get("CITY_CONFIG"):
         try:
             from city_config import load_city_config
-            # data_facts_for() resolves/drops placeholders — the CLI has no
-            # year context, so year-dependent facts are omitted rather than
-            # emitted raw.
-            city_facts = load_city_config().data_facts_for()
+            from data_model import derive_year_facts
+            cfg = load_city_config()
+            # Derive the same year caveat the web app uses, when the loaded
+            # CSV actually carries the columns it needs — otherwise a CLI
+            # session would present a partial year as if it were complete.
+            years, year_fact = {}, None
+            cols = {c[0] for c in con.execute("DESCRIBE data").fetchall()}
+            if {"fiscal_year", "payment_date"} <= cols:
+                newest = con.execute("SELECT MAX(fiscal_year) FROM data").fetchone()[0]
+                if newest is not None:
+                    covered = con.execute(
+                        "SELECT MAX(payment_date) FROM data WHERE fiscal_year = ?", [newest]
+                    ).fetchone()[0]
+                    yf = derive_year_facts(
+                        newest, (cfg.city or {}).get("fiscal_year_start_month", 1), covered
+                    )
+                    years = {
+                        "newest_year": newest,
+                        "in_progress_year": yf["in_progress_year"],
+                        "last_complete_year": yf["last_complete_year"],
+                    }
+                    year_fact = yf["fact"]
+            city_facts = cfg.data_facts_for(years) + ([year_fact] if year_fact else [])
         except Exception as e:
             print(f"Warning: could not load CITY_CONFIG: {e}")
     interpret_system = build_interpret_prompt(schema_desc, extra_facts=city_facts)

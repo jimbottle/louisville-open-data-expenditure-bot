@@ -472,6 +472,81 @@ def infer_chart(df) -> tuple:
     return chart_type, label_col, value_col
 
 
+def fiscal_year_end(year: int, fy_start_month: int = 1):
+    """Last calendar day of fiscal `year` for a fiscal year starting in
+    `fy_start_month` (Louisville: 7 -> FY2026 ends 2026-06-30)."""
+    from datetime import date as _date, timedelta as _timedelta
+    if fy_start_month == 1:
+        return _date(year, 12, 31)
+    return _date(year, fy_start_month, 1) - _timedelta(days=1)
+
+
+def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_days=7) -> dict:
+    """Decide whether the newest year's DATA is complete, and write the
+    prompt rule + city fact that say so.
+
+    Partial-ness is a statement about coverage, not the calendar: we compare
+    how far payments actually run against the fiscal year's end, allowing
+    `grace_days` because the last business day often precedes the last
+    calendar day (FY2018 ends 2018-06-29 — June 30 was a Saturday).
+
+    Unknown coverage (no date at all) is treated as PARTIAL: understating
+    confidence is safe, asserting a partial year is complete is not.
+
+    Pure function so both branches are testable (the web app and the CLI
+    share it).
+    """
+    covered_through = None
+    if max_covered is not None:
+        text = str(max_covered)[:10]
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            covered_through = text
+
+    if covered_through is None:
+        is_partial = True
+    else:
+        from datetime import timedelta as _timedelta
+        cutoff = fiscal_year_end(newest_year, fy_start_month) - _timedelta(days=grace_days)
+        is_partial = covered_through < cutoff.isoformat()
+
+    last_complete_year = newest_year - 1 if is_partial else newest_year
+
+    if is_partial:
+        through = f" — payments are only loaded through {covered_through}" if covered_through else ""
+        rules = (
+            f"- CRITICAL: FY{newest_year} data is INCOMPLETE{through}, so its totals are "
+            f"partial and must not be compared like a full year. When presenting FY{newest_year} "
+            f"always say the data is partial. For \"current\" or \"latest\" spending or salaries "
+            f"use {last_complete_year}, the most recent year with complete data, unless the user "
+            f"asks about {newest_year}. This applies to fiscal_year in expenditures AND CalYear "
+            "in salary_data."
+        )
+        loaded = f" (loaded through {covered_through})" if covered_through else ""
+        fact = (
+            f"Data for fiscal/calendar year {newest_year} is incomplete{loaded}, so its totals "
+            f"are partial. {last_complete_year} is the most recent year with complete data — "
+            f"never describe {last_complete_year} or any earlier year as partial or in progress."
+        )
+    else:
+        rules = (
+            f"- FY{newest_year} data is complete; use it for \"current\" or \"latest\" spending "
+            "and salaries. This applies to fiscal_year in expenditures AND CalYear in salary_data."
+        )
+        fact = (
+            f"{newest_year} is the most recent year and its data is complete — never describe "
+            "it or any earlier year as partial or in progress."
+        )
+
+    return {
+        "is_partial": is_partial,
+        "covered_through": covered_through,
+        "last_complete_year": last_complete_year,
+        "in_progress_year": newest_year if is_partial else None,
+        "rules": rules,
+        "fact": fact,
+    }
+
+
 _TOTAL_LABEL_SHAPES = re.compile(
     r"^(GRAND\s+TOTAL|TOTAL)(\s*[-–:]\s|\s+(ALL|SPENDING|AMOUNT|YEARS)\b|$)"
 )

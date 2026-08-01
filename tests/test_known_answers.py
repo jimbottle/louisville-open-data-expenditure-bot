@@ -287,7 +287,7 @@ def test_tech_topic_query_matches_prompt_and_returns_both_views(con):
         "SELECT SUM(extended_amount) FROM expenditures WHERE fiscal_year = ? "
         "AND agency_canonical = 'Metro Technology Services' "
         "AND (spend_category LIKE 'Computer%' OR spend_category ILIKE '%Software%' "
-        "OR spend_category = 'Cloud Computing Services')",
+        "OR spend_category = 'Cloud Computing Services') AND is_data_artifact = FALSE",
         [year],
     ).fetchone()[0]
     assert both < dept and both < cat

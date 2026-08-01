@@ -8,9 +8,19 @@ defaults to the Louisville pack.
 """
 
 import csv
+import logging
 import os
+import re
 
 import yaml
+
+log = logging.getLogger("city_config")
+
+# Placeholder names a city pack's data_facts may use. They are filled from the
+# loaded data at prompt-build time; a fact still containing one of these after
+# substitution is dropped rather than shipped with a raw placeholder. Braces
+# holding anything else are treated as ordinary prose.
+KNOWN_PLACEHOLDERS = ("first_year", "newest_year", "in_progress_year", "last_complete_year")
 
 DEFAULT_CONFIG = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "cities", "louisville", "city.yaml"
@@ -36,8 +46,10 @@ class CityConfig:
         Substitution happens HERE so no consumer can leak a raw placeholder
         into a prompt. Uses plain replacement (not str.format) so pack prose
         containing literal braces can't crash startup, and any fact still
-        holding an unresolved placeholder is dropped rather than shipped —
-        a missing fact is safe, a malformed one is not.
+        holding an unresolved {placeholder} is dropped (with a warning)
+        rather than shipped — a missing fact is safe, a malformed one is not.
+        Ordinary prose braces are left alone; only identifier-shaped
+        placeholders count as unresolved.
         """
         out = []
         for fact in self.data_facts:
@@ -45,8 +57,16 @@ class CityConfig:
             for key, val in (values or {}).items():
                 if val is not None:
                     text = text.replace("{" + key + "}", str(val))
-            if "{" in text and "}" in text:
-                continue  # unresolved placeholder — omit rather than emit noise
+            # Only the documented placeholder names can leave a fact
+            # unusable; any other braces are ordinary prose and pass through.
+            leftover = next(
+                (p for p in KNOWN_PLACEHOLDERS if "{" + p + "}" in text), None
+            )
+            if leftover:
+                log.warning(
+                    "Dropping city data_fact with unresolved {%s}: %.60s", leftover, text
+                )
+                continue
             out.append(text)
         return out
 

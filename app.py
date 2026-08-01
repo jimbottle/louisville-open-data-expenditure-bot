@@ -63,6 +63,7 @@ from analytics_agent import (
 from data_model import (
     CONFIG,
     DATA_DICTIONARY,
+    derive_year_facts,
     drop_total_rows,
     get_compact_schema_description,
     get_data_dictionary_text,
@@ -332,53 +333,26 @@ def startup():
     first_year, newest_year = con.execute(
         "SELECT MIN(fiscal_year), MAX(fiscal_year) FROM expenditures WHERE fiscal_year IS NOT NULL"
     ).fetchone()
-    fy_start_month = (CONFIG.city or {}).get("fiscal_year_start_month", 1)
-    fy_end = (
-        date(newest_year, 12, 31) if fy_start_month == 1
-        else date(newest_year, fy_start_month, 1) - timedelta(days=1)
-    )
     max_covered = con.execute(
         "SELECT MAX(payment_date) FROM expenditures WHERE fiscal_year = ?", [newest_year]
     ).fetchone()[0]
-    try:
-        covered_through = str(max_covered)[:10]
-        newest_is_partial = covered_through < fy_end.isoformat()
-    except Exception:
-        covered_through, newest_is_partial = None, True
-
-    in_progress_year = newest_year if newest_is_partial else None
-    last_complete_year = newest_year - 1 if newest_is_partial else newest_year
-
-    if newest_is_partial:
-        year_rules = (
-            f"- CRITICAL: FY{newest_year} data is INCOMPLETE — payments are only loaded "
-            f"through {covered_through}, so its totals are partial and must not be compared "
-            f"like a full year. When presenting FY{newest_year} always say the data is partial. "
-            f"For \"current\" or \"latest\" spending or salaries use {last_complete_year}, the "
-            f"most recent year with complete data, unless the user asks about {newest_year}. "
-            "This applies to fiscal_year in expenditures AND CalYear in salary_data."
-        )
-        year_fact = (
-            f"Data for fiscal/calendar year {newest_year} is incomplete (loaded through "
-            f"{covered_through}), so its totals are partial. {last_complete_year} is the most "
-            f"recent year with complete data — never describe {last_complete_year} or any "
-            "earlier year as partial or in progress."
-        )
-    else:
-        year_rules = (
-            f"- FY{newest_year} data is complete; use it for \"current\" or \"latest\" "
-            "spending and salaries. This applies to fiscal_year in expenditures AND CalYear "
-            "in salary_data."
-        )
-        year_fact = (
-            f"{newest_year} is the most recent year and its data is complete — never "
-            "describe it or any earlier year as partial or in progress."
-        )
+    yf = derive_year_facts(
+        newest_year,
+        (CONFIG.city or {}).get("fiscal_year_start_month", 1),
+        max_covered,
+    )
+    year_rules, year_fact = yf["rules"], yf["fact"]
+    last_complete_year = yf["last_complete_year"]
+    log.info(
+        "Year coverage: FY%s %s (through %s); latest complete = %s",
+        newest_year, "PARTIAL" if yf["is_partial"] else "complete",
+        yf["covered_through"], last_complete_year,
+    )
 
     years = {
         "first_year": first_year,
         "newest_year": newest_year,
-        "in_progress_year": in_progress_year,
+        "in_progress_year": yf["in_progress_year"],
         "last_complete_year": last_complete_year,
     }
 
