@@ -466,6 +466,10 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       over a handful of values you can verify digit by digit. If the results
       have no total row, do not state an overall total — describe the top
       items instead (a wrong grand total is worse than none).
+    - Never add together rows that are different VIEWS of the same spending
+      (e.g. a department total and a category total, where one purchase can
+      appear in both). Report such figures separately; summing them
+      double-counts. Only add rows that are mutually exclusive slices.
     - Short numbered lines for lists; keep the whole answer under 180 words
       unless the draft genuinely needs more.
     - Plain text only — no markdown headers or tables.
