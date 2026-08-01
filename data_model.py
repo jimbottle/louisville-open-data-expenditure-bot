@@ -18,9 +18,9 @@ from datetime import date, timedelta
 import duckdb
 import pandas as pd
 
-log = logging.getLogger("data_model")
-
 from city_config import CityConfig, load_city_config
+
+log = logging.getLogger("data_model")
 
 # ── Active config (module-level, selected via CITY_CONFIG env var) ───────────
 
@@ -555,29 +555,31 @@ def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_day
     }
 
 
-def derive_salary_year_facts(newest_cal_year) -> dict:
-    """Salary completeness, judged from the LOADED DATA rather than the
-    calendar.
+def derive_salary_year_facts(newest_cal_year, prior_cal_year=None):
+    """Salary completeness, judged from the LOADED DATA.
 
     salary_data carries year-to-date totals with no coverage date, so the
     newest CalYear present is by definition a YTD snapshot — the calendar
-    rolling over does not make a stale snapshot complete. Treating the newest
-    year as partial is also exactly what the summary table does
-    (`WHERE CalYear = (SELECT MAX(CalYear) - 1 ...)`), so the prompt rule and
-    summary_top_salaries can never point at different years.
+    rolling over does not make a stale snapshot complete.
+
+    `prior_cal_year` must be the highest CalYear actually present BELOW the
+    newest one. Without it there is no complete year to point at, so this
+    returns None and the caller emits no salary guidance — better silent than
+    directing the model at a year the table doesn't contain.
     """
-    last_complete = newest_cal_year - 1
+    if prior_cal_year is None:
+        return None
     return {
         "is_partial": True,
-        "last_complete_year": last_complete,
+        "last_complete_year": prior_cal_year,
         "rules": (
             f"- CalYear {newest_cal_year} in salary_data is a YEAR-TO-DATE partial year. For "
-            f"\"current\" or \"latest\" SALARIES use CalYear = {last_complete}, the most recent "
-            f"complete calendar year, unless the user asks about {newest_cal_year}."
+            f"\"current\" or \"latest\" SALARIES use CalYear = {prior_cal_year}, the most recent "
+            f"complete calendar year in the data, unless the user asks about {newest_cal_year}."
         ),
         "fact": (
             f"Salary figures for CalYear {newest_cal_year} are year-to-date and partial; "
-            f"{last_complete} is the most recent complete year of salary data."
+            f"{prior_cal_year} is the most recent complete year of salary data."
         ),
     }
 
@@ -595,7 +597,7 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         # No usable fiscal years (empty table / all NULL): say nothing rather
         # than deriving from None. Callers get no rules and no facts.
         log.warning("year_context: no usable fiscal_year values; skipping year guidance")
-        return {"values": {}, "rules": "", "fact": None, "facts": [],
+        return {"values": {}, "rules": "", "facts": [],
                 "expenditures": None, "salary": None}
 
     max_covered = con.execute(
@@ -608,9 +610,20 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
     try:
         newest_cal = con.execute("SELECT MAX(CalYear) FROM salary_data").fetchone()[0]
         if newest_cal is not None:
-            salary = derive_salary_year_facts(newest_cal)
-            rules.append(salary["rules"])
-            facts.append(salary["fact"])
+            # The prior year must actually be loaded — pointing the model at a
+            # CalYear the table lacks returns zero rows for every salary question.
+            prior_cal = con.execute(
+                "SELECT MAX(CalYear) FROM salary_data WHERE CalYear < ?", [newest_cal]
+            ).fetchone()[0]
+            salary = derive_salary_year_facts(newest_cal, prior_cal)
+            if salary:
+                rules.append(salary["rules"])
+                facts.append(salary["fact"])
+            else:
+                log.warning(
+                    "salary_data holds only CalYear %s; no complete year to cite, "
+                    "so no salary year guidance is emitted", newest_cal,
+                )
     except duckdb.CatalogException:
         pass  # city pack has no salary table — nothing to say about salaries
     except Exception as e:
@@ -626,7 +639,6 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
             "last_complete_year": yf["last_complete_year"],
         },
         "rules": "\n".join(rules),
-        "fact": yf["fact"],
         "facts": facts,
         "expenditures": yf,
         "salary": salary,

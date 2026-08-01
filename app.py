@@ -331,18 +331,26 @@ def startup():
     # therefore promotes it to "complete" instead of leaving the prompt
     # asserting a stale falsehood.
     yc = year_context(con, (CONFIG.city or {}).get("fiscal_year_start_month", 1))
-    year_rules, year_fact = yc["rules"], yc["fact"]
+    if not yc["values"]:
+        # The prompts are built around fiscal years; without any there is
+        # nothing to serve, so fail loudly here rather than as a KeyError.
+        raise RuntimeError(
+            f"No usable fiscal_year values in the expenditures table loaded from {DATA_DIR!r} — "
+            "check the data files and the city pack's expenditure sources."
+        )
+    year_rules = yc["rules"]
     years = yc["values"]
     first_year = years["first_year"]
     newest_year = years["newest_year"]
     last_complete_year = years["last_complete_year"]
     log.info(
-        "Year coverage: FY%s %s (through %s); latest complete FY = %s; salary %s",
+        "Year coverage: FY%s %s (through %s); latest complete FY = %s; salary: %s",
         newest_year,
         "PARTIAL" if yc["expenditures"]["is_partial"] else "complete",
         yc["expenditures"]["covered_through"],
         last_complete_year,
-        "partial" if (yc["salary"] or {}).get("is_partial") else "complete",
+        "no data" if yc["salary"] is None
+        else f"CalYear partial, latest complete {yc['salary']['last_complete_year']}",
     )
 
     sql_system = f"""You are a data analytics assistant. You translate natural language questions into SQL queries

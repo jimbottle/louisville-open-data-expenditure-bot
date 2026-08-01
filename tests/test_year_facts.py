@@ -75,18 +75,25 @@ def test_expenditure_rule_and_fact_claim_nothing_about_salaries():
 
 def test_salary_newest_year_is_always_treated_as_partial():
     # The newest CalYear is a YTD snapshot; the calendar rolling over does not
-    # make a stale snapshot complete. This must agree with summary_top_salaries
-    # (built WHERE CalYear = MAX(CalYear) - 1) so the prompt and the table can
-    # never point at different years.
-    s = derive_salary_year_facts(2026)
+    # make a stale snapshot complete. The complete year cited must be one that
+    # is actually loaded (passed in), never an assumed MAX-1.
+    s = derive_salary_year_facts(2026, prior_cal_year=2025)
     assert s["is_partial"] is True
     assert s["last_complete_year"] == 2025
     assert "CalYear = 2025" in s["rules"] and "YEAR-TO-DATE" in s["rules"]
     assert "year-to-date" in s["fact"].lower()
 
 
-def test_salary_facts_track_whatever_year_is_loaded():
-    assert derive_salary_year_facts(2030)["last_complete_year"] == 2029
+def test_salary_cites_the_loaded_prior_year_not_a_computed_one():
+    # A gap in the data (no 2029) must cite 2028, not 2029.
+    s = derive_salary_year_facts(2030, prior_cal_year=2028)
+    assert s["last_complete_year"] == 2028
+    assert "CalYear = 2028" in s["rules"]
+
+
+def test_salary_facts_omitted_when_no_prior_year_is_loaded():
+    # Pointing at a year the table lacks would zero-row every salary question.
+    assert derive_salary_year_facts(2026, prior_cal_year=None) is None
 
 
 def test_grace_window_boundary_is_pinned():
@@ -182,6 +189,13 @@ def test_year_context_builds_values_rules_and_facts():
 
 def test_year_context_without_salary_table_is_quiet():
     yc = year_context(_con(salary_years=None), fy_start_month=7, today=date(2026, 8, 1))
+    assert yc["salary"] is None
+    assert "CalYear" not in yc["rules"]
+    assert len(yc["facts"]) == 1  # expenditure fact only
+
+
+def test_year_context_omits_salary_guidance_for_a_single_calyear():
+    yc = year_context(_con(salary_years=(2026,)), fy_start_month=7, today=date(2026, 8, 1))
     assert yc["salary"] is None
     assert "CalYear" not in yc["rules"]
     assert len(yc["facts"]) == 1  # expenditure fact only
