@@ -339,6 +339,12 @@ def startup():
             "check the data files and the city pack's expenditure sources."
         )
     year_rules = yc["rules"]
+    # Only point at the CalYear rule when one was actually derived, so the
+    # prompt never references guidance that isn't in it.
+    salary_year_clause = (
+        f", filtered to CalYear = {yc['salary']['last_complete_year']} (see the CalYear rule above)"
+        if yc["salary"] else ""
+    )
     years = yc["values"]
     first_year = years["first_year"]
     newest_year = years["newest_year"]
@@ -349,8 +355,10 @@ def startup():
         "PARTIAL" if yc["expenditures"]["is_partial"] else "complete",
         yc["expenditures"]["covered_through"],
         last_complete_year,
-        "no data" if yc["salary"] is None
-        else f"CalYear partial, latest complete {yc['salary']['last_complete_year']}",
+        "no salary table" if yc["newest_cal_year"] is None
+        else (f"CalYear {yc['newest_cal_year']} only; no complete year to cite"
+              if yc["salary"] is None
+              else f"CalYear partial, latest complete {yc['salary']['last_complete_year']}"),
     )
 
     sql_system = f"""You are a data analytics assistant. You translate natural language questions into SQL queries
@@ -387,7 +395,7 @@ and interpret results. You work with Louisville Metro government open data.
 - `summary_agency_spend` — total spend by agency (canonical names), transaction count, year range. Use for "which agencies spend the most".
 - `summary_annual_spend` — total spend by fiscal year. Use for "how has spending changed over time".
 - `summary_largest_payments` — all payments ranked by invoice_amount with payee, agency, date. Use for "largest single payments".
-- `summary_top_salaries` — (job_title, department) groups for the MOST RECENT COMPLETE calendar year only, ranked by avg total pay, with calendar_year and DISTINCT-employee counts. The same job title can appear in several departments — select department alongside job_title. Use for "highest paid positions". NOTE: For salary queries about specific people or titles, query the `salary_data` table directly, filtered to the most recent COMPLETE calendar year (see the CalYear rule above). The salary_data table has Employee_Name, jobTitle, Department, CalYear, YTD_Total, Annual_Rate, Regular_Rate, Overtime_Rate, Incentive_Allowance, Other columns.
+- `summary_top_salaries` — (job_title, department) groups for a single calendar year (see its calendar_year column), ranked by avg total pay, with DISTINCT-employee counts. The same job title can appear in several departments — select department alongside job_title. Use for "highest paid positions". NOTE: For salary queries about specific people or titles, query the `salary_data` table directly{salary_year_clause}. The salary_data table has Employee_Name, jobTitle, Department, CalYear, YTD_Total, Annual_Rate, Regular_Rate, Overtime_Rate, Incentive_Allowance, Other columns.
 - IMPORTANT for salary queries: When asked about a specific role like "Mayor" or "Police Chief", show INDIVIDUAL employee records (Employee_Name, jobTitle, YTD_Total) rather than grouping by jobTitle. Multiple people may share a title (e.g., 6 Deputy Mayors). SUM by jobTitle would be misleading — show each person's individual compensation.
 - Follow-up questions about a previous answer ("is that true?", "are you sure?", "what does that include?", "can you verify that?") ARE answerable — never treat them as off-topic. Write SQL that verifies or decomposes the earlier claim using the conversation history. Example: to check what a compensation total includes, SELECT Employee_Name, Annual_Rate, Regular_Rate, Overtime_Rate, Incentive_Allowance, Other, YTD_Total FROM salary_data for the relevant people/year — the components show exactly what the total is made of (pay only; the data contains no benefits figures).
 - `summary_expenditure_type` — spending by type (Operating/Capital) per fiscal year. Use for "spending by type".

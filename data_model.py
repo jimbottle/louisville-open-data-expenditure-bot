@@ -555,7 +555,7 @@ def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_day
     }
 
 
-def derive_salary_year_facts(newest_cal_year, prior_cal_year=None):
+def derive_salary_year_facts(newest_cal_year, prior_cal_year) -> dict | None:
     """Salary completeness, judged from the LOADED DATA.
 
     salary_data carries year-to-date totals with no coverage date, so the
@@ -597,8 +597,8 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         # No usable fiscal years (empty table / all NULL): say nothing rather
         # than deriving from None. Callers get no rules and no facts.
         log.warning("year_context: no usable fiscal_year values; skipping year guidance")
-        return {"values": {}, "rules": "", "facts": [],
-                "expenditures": None, "salary": None}
+        return {"values": {}, "rules": "", "facts": [], "expenditures": None,
+                "salary": None, "newest_cal_year": None}
 
     max_covered = con.execute(
         "SELECT MAX(payment_date) FROM expenditures WHERE fiscal_year = ?", [newest_year]
@@ -606,7 +606,7 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
     yf = derive_year_facts(newest_year, fy_start_month, max_covered, today=today)
 
     rules, facts = [yf["rules"]], [yf["fact"]]
-    salary = None
+    salary, newest_cal = None, None
     try:
         newest_cal = con.execute("SELECT MAX(CalYear) FROM salary_data").fetchone()[0]
         if newest_cal is not None:
@@ -642,6 +642,9 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         "facts": facts,
         "expenditures": yf,
         "salary": salary,
+        # Distinguishes "no salary table" (None) from "a salary table with too
+        # few years to cite a complete one" (a year, with salary None).
+        "newest_cal_year": newest_cal,
     }
 
 

@@ -122,18 +122,19 @@ summaries:
   sql: |-
     CREATE TABLE summary_top_salaries AS
     -- Latest COMPLETE calendar year only; distinct people, not person-year
-    -- rows. MAX(CalYear)-1 ASSUMES the newest loaded year is always the
-    -- in-progress one (true for this dataset's refresh cadence, where the
-    -- portal publishes the current year as it accrues). If a refresh ever
-    -- loads only finalized years, this would skip the true latest complete
-    -- year — revisit alongside the salary_data dictionary prose.
+    -- rows. The newest CalYear is a year-to-date snapshot, so this uses the
+    -- highest year actually LOADED below it — the same derivation as
+    -- data_model.year_context, so this table and the prompt's CalYear rule
+    -- can never point at different years (a computed MAX-1 would name a
+    -- missing year if the loaded years ever have a gap).
     SELECT jobTitle AS job_title, Department AS department,
            CalYear AS calendar_year,
            ROUND(AVG(YTD_Total), 2) AS avg_total_comp,
            ROUND(MAX(YTD_Total), 2) AS max_total_comp,
            COUNT(DISTINCT Employee_Name) AS employee_count
     FROM salary_data
-    WHERE CalYear = (SELECT MAX(CalYear) - 1 FROM salary_data)
+    WHERE CalYear = (SELECT MAX(CalYear) FROM salary_data
+                     WHERE CalYear < (SELECT MAX(CalYear) FROM salary_data))
     GROUP BY jobTitle, Department, CalYear
     ORDER BY avg_total_comp DESC
 - table: summary_expenditure_type

@@ -99,6 +99,21 @@ def test_top_salary_is_police_chief(con):
     assert r[0] == "Police Chief"
 
 
+def test_summary_top_salaries_year_matches_the_prompt_rule(con):
+    """The pack SQL and the prompt's CalYear rule must derive the same year.
+    They once used different derivations (MAX-1 vs. highest loaded prior
+    year), which agree only when CalYears are contiguous — a gap would leave
+    the model querying a year the materialized table never covered."""
+    from data_model import year_context
+    yc = year_context(con, fy_start_month=7)
+    assert yc["salary"] is not None, "Louisville data should yield salary guidance"
+    table_year = con.execute(
+        "SELECT DISTINCT calendar_year FROM summary_top_salaries"
+    ).fetchall()
+    assert len(table_year) == 1
+    assert table_year[0][0] == yc["salary"]["last_complete_year"]
+
+
 def test_top_salaries_magnitudes_and_scope(con):
     """Regression for the 'highest paid positions' answer (louisville-open-data-kxm):
     the summary must cover ONLY the latest complete year, count distinct people,
