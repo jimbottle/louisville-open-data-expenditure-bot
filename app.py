@@ -442,7 +442,7 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
     # Pack facts (placeholders resolved by the pack itself) plus the
     # data-derived year fact computed above.
     global CITY_FACTS
-    CITY_FACTS = CONFIG.data_facts_for(years) + [year_fact]
+    CITY_FACTS = CONFIG.data_facts_for(years) + yc["facts"]
     if CITY_FACTS:
         interpret_system += "\n## Facts about this city's data (enforce these)\n" + \
             "\n".join(f"- {f}" for f in CITY_FACTS) + "\n"

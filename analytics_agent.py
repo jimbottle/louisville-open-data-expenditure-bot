@@ -690,13 +690,13 @@ def main():
             # Same derivation the web app uses (one shared helper, so the two
             # can't drift) — but the CLI loads an arbitrary CSV into `data`,
             # so only run it when that table looks like expenditure data.
-            years, year_fact = {}, None
+            years, year_facts = {}, []
             cols = {c[0] for c in con.execute("DESCRIBE data").fetchall()}
             if {"fiscal_year", "payment_date"} <= cols:
                 con.execute("CREATE OR REPLACE TEMP VIEW expenditures AS SELECT * FROM data")
                 yc = year_context(con, (cfg.city or {}).get("fiscal_year_start_month", 1))
-                years, year_fact = yc["values"], yc["fact"]
-            city_facts = cfg.data_facts_for(years) + ([year_fact] if year_fact else [])
+                years, year_facts = yc["values"], yc["facts"]
+            city_facts = cfg.data_facts_for(years) + year_facts
         except Exception as e:
             print(f"Warning: could not load CITY_CONFIG: {e}")
     interpret_system = build_interpret_prompt(schema_desc, extra_facts=city_facts)

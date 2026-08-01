@@ -10,12 +10,15 @@ Module-level DATA_DICTIONARY / ALL_LABELS / EXPENDITURE_LABELS mirror the
 active config for backward compatibility with app.py and the tests.
 """
 
+import logging
 import os
 import re
 from datetime import date, timedelta
 
 import duckdb
 import pandas as pd
+
+log = logging.getLogger("data_model")
 
 from city_config import CityConfig, load_city_config
 
@@ -526,9 +529,10 @@ def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_day
         )
         loaded = f" (loaded through {covered_through})" if covered_through else ""
         fact = (
-            f"Data for fiscal/calendar year {newest_year} is incomplete{loaded}, so its totals "
-            f"are partial. {last_complete_year} is the most recent year with complete data — "
-            f"never describe {last_complete_year} or any earlier year as partial or in progress."
+            f"Expenditure data for fiscal year {newest_year} is incomplete{loaded}, so its "
+            f"spending totals are partial. FY{last_complete_year} is the most recent fiscal "
+            f"year with complete expenditure data — never describe FY{last_complete_year} or "
+            "any earlier fiscal year's spending as partial or in progress."
         )
     else:
         rules = (
@@ -536,8 +540,9 @@ def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_day
             "for \"current\" or \"latest\" SPENDING."
         )
         fact = (
-            f"{newest_year} is the most recent year and its data is complete — never describe "
-            "it or any earlier year as partial or in progress."
+            f"FY{newest_year} is the most recent fiscal year and its expenditure data is "
+            "complete — never describe its spending, or any earlier fiscal year's, as partial "
+            "or in progress."
         )
 
     return {
@@ -550,26 +555,31 @@ def derive_year_facts(newest_year, fy_start_month=1, max_covered=None, grace_day
     }
 
 
-def derive_salary_year_facts(newest_cal_year, today=None) -> dict:
-    """Salary data is calendar-year and carries no coverage date, so its
-    completeness is judged on its own terms: a calendar year is complete only
-    once it has ended. Deriving this from expenditure coverage would let a
-    complete fiscal year vouch for a still-running salary year."""
-    today = today or date.today()
-    is_partial = newest_cal_year >= today.year
-    last_complete = newest_cal_year - 1 if is_partial else newest_cal_year
-    if is_partial:
-        rules = (
+def derive_salary_year_facts(newest_cal_year) -> dict:
+    """Salary completeness, judged from the LOADED DATA rather than the
+    calendar.
+
+    salary_data carries year-to-date totals with no coverage date, so the
+    newest CalYear present is by definition a YTD snapshot — the calendar
+    rolling over does not make a stale snapshot complete. Treating the newest
+    year as partial is also exactly what the summary table does
+    (`WHERE CalYear = (SELECT MAX(CalYear) - 1 ...)`), so the prompt rule and
+    summary_top_salaries can never point at different years.
+    """
+    last_complete = newest_cal_year - 1
+    return {
+        "is_partial": True,
+        "last_complete_year": last_complete,
+        "rules": (
             f"- CalYear {newest_cal_year} in salary_data is a YEAR-TO-DATE partial year. For "
             f"\"current\" or \"latest\" SALARIES use CalYear = {last_complete}, the most recent "
             f"complete calendar year, unless the user asks about {newest_cal_year}."
-        )
-    else:
-        rules = (
-            f"- CalYear {newest_cal_year} in salary_data is a complete calendar year; use it "
-            "for \"current\" or \"latest\" SALARIES."
-        )
-    return {"is_partial": is_partial, "last_complete_year": last_complete, "rules": rules}
+        ),
+        "fact": (
+            f"Salary figures for CalYear {newest_cal_year} are year-to-date and partial; "
+            f"{last_complete} is the most recent complete year of salary data."
+        ),
+    }
 
 
 def year_context(con, fy_start_month=1, today=None) -> dict:
@@ -581,20 +591,32 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
     first_year, newest_year = con.execute(
         "SELECT MIN(fiscal_year), MAX(fiscal_year) FROM expenditures WHERE fiscal_year IS NOT NULL"
     ).fetchone()
+    if newest_year is None:
+        # No usable fiscal years (empty table / all NULL): say nothing rather
+        # than deriving from None. Callers get no rules and no facts.
+        log.warning("year_context: no usable fiscal_year values; skipping year guidance")
+        return {"values": {}, "rules": "", "fact": None, "facts": [],
+                "expenditures": None, "salary": None}
+
     max_covered = con.execute(
         "SELECT MAX(payment_date) FROM expenditures WHERE fiscal_year = ?", [newest_year]
     ).fetchone()[0]
     yf = derive_year_facts(newest_year, fy_start_month, max_covered, today=today)
 
-    rules = [yf["rules"]]
+    rules, facts = [yf["rules"]], [yf["fact"]]
     salary = None
     try:
         newest_cal = con.execute("SELECT MAX(CalYear) FROM salary_data").fetchone()[0]
         if newest_cal is not None:
-            salary = derive_salary_year_facts(newest_cal, today=today)
+            salary = derive_salary_year_facts(newest_cal)
             rules.append(salary["rules"])
-    except Exception:
-        pass  # no salary table in this city pack
+            facts.append(salary["fact"])
+    except duckdb.CatalogException:
+        pass  # city pack has no salary table — nothing to say about salaries
+    except Exception as e:
+        # Anything else (renamed column, type error) would silently strip the
+        # salary guidance the prompt refers to; make it visible.
+        log.warning("year_context: could not derive salary year facts: %s", e)
 
     return {
         "values": {
@@ -605,6 +627,7 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         },
         "rules": "\n".join(rules),
         "fact": yf["fact"],
+        "facts": facts,
         "expenditures": yf,
         "salary": salary,
     }

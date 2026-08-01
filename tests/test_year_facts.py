@@ -17,6 +17,7 @@ from data_model import (  # noqa: E402
     derive_salary_year_facts,
     derive_year_facts,
     fiscal_year_end,
+    year_context,
 )
 
 
@@ -38,7 +39,8 @@ def test_partial_when_coverage_stops_mid_year():
     assert yf["last_complete_year"] == 2025
     assert yf["in_progress_year"] == 2026
     assert "INCOMPLETE" in yf["rules"] and "2026-03-16" in yf["rules"]
-    assert "partial" in yf["fact"] and "2025 is the most recent year with complete data" in yf["fact"]
+    assert "partial" in yf["fact"]
+    assert "FY2025 is the most recent fiscal year with complete expenditure data" in yf["fact"]
 
 
 def test_complete_when_coverage_reaches_year_end():
@@ -57,29 +59,34 @@ def test_complete_when_last_business_day_precedes_year_end():
     assert derive_year_facts(2019, 7, "2019-06-28", today=date(2019, 9, 1))["is_partial"] is False
 
 
-def test_expenditure_rule_does_not_claim_anything_about_salaries():
-    # Coverage is measured on payments only, so the rule must scope itself to
-    # spending — a complete fiscal year must not vouch for salary_data.
+def test_expenditure_rule_and_fact_claim_nothing_about_salaries():
+    # Coverage is measured on payments only, so BOTH the rule (SQL prompt) and
+    # the fact (interpret prompt) must scope themselves to spending — a
+    # complete fiscal year must never vouch for salary_data.
     for yf in (derive_year_facts(2026, 7, "2026-03-16", today=date(2026, 8, 1)),
                derive_year_facts(2026, 7, "2026-06-30", today=date(2026, 8, 1))):
-        assert "CalYear" not in yf["rules"]
-        assert "salar" not in yf["rules"].lower()
+        for text in (yf["rules"], yf["fact"]):
+            assert "CalYear" not in text
+            assert "salar" not in text.lower()
+            assert "calendar" not in text.lower()
 
 
 # ── derive_salary_year_facts ─────────────────────────────────────────────────
 
-def test_salary_year_partial_while_calendar_year_runs():
-    s = derive_salary_year_facts(2026, today=date(2026, 8, 1))
+def test_salary_newest_year_is_always_treated_as_partial():
+    # The newest CalYear is a YTD snapshot; the calendar rolling over does not
+    # make a stale snapshot complete. This must agree with summary_top_salaries
+    # (built WHERE CalYear = MAX(CalYear) - 1) so the prompt and the table can
+    # never point at different years.
+    s = derive_salary_year_facts(2026)
     assert s["is_partial"] is True
     assert s["last_complete_year"] == 2025
     assert "CalYear = 2025" in s["rules"] and "YEAR-TO-DATE" in s["rules"]
+    assert "year-to-date" in s["fact"].lower()
 
 
-def test_salary_year_complete_once_calendar_year_ends():
-    s = derive_salary_year_facts(2026, today=date(2027, 1, 15))
-    assert s["is_partial"] is False
-    assert s["last_complete_year"] == 2026
-    assert "complete calendar year" in s["rules"]
+def test_salary_facts_track_whatever_year_is_loaded():
+    assert derive_salary_year_facts(2030)["last_complete_year"] == 2029
 
 
 def test_grace_window_boundary_is_pinned():
@@ -143,3 +150,44 @@ def test_data_facts_keeps_ordinary_prose_braces():
 
 def test_data_facts_empty_config():
     assert _cfg([]).data_facts_for({"x": 1}) == []
+
+
+# ── year_context (the shared derivation both entry points call) ──────────────
+
+def _con(fiscal_rows=(("2026-03-16", 2026), ("2025-06-30", 2025)), salary_years=(2026, 2025)):
+    import duckdb
+    con = duckdb.connect()
+    con.execute("CREATE TABLE expenditures (payment_date VARCHAR, fiscal_year INTEGER)")
+    if fiscal_rows:
+        con.executemany("INSERT INTO expenditures VALUES (?, ?)", list(fiscal_rows))
+    if salary_years is not None:
+        con.execute("CREATE TABLE salary_data (CalYear INTEGER)")
+        con.executemany("INSERT INTO salary_data VALUES (?)", [(y,) for y in salary_years])
+    return con
+
+
+def test_year_context_builds_values_rules_and_facts():
+    yc = year_context(_con(), fy_start_month=7, today=date(2026, 8, 1))
+    assert yc["values"] == {
+        "first_year": 2025, "newest_year": 2026,
+        "in_progress_year": 2026, "last_complete_year": 2025,
+    }
+    # both a spending rule and a salary rule, derived independently
+    assert "FY2026 data is INCOMPLETE" in yc["rules"]
+    assert "CalYear 2026 in salary_data" in yc["rules"]
+    # both facts reach the interpret prompt
+    assert len(yc["facts"]) == 2
+    assert any("year-to-date" in f.lower() for f in yc["facts"])
+
+
+def test_year_context_without_salary_table_is_quiet():
+    yc = year_context(_con(salary_years=None), fy_start_month=7, today=date(2026, 8, 1))
+    assert yc["salary"] is None
+    assert "CalYear" not in yc["rules"]
+    assert len(yc["facts"]) == 1  # expenditure fact only
+
+
+def test_year_context_handles_no_usable_fiscal_years():
+    # Empty table must not TypeError on newest_year - 1; callers get nothing.
+    yc = year_context(_con(fiscal_rows=()), fy_start_month=7)
+    assert yc["values"] == {} and yc["rules"] == "" and yc["facts"] == []
