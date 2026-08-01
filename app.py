@@ -375,6 +375,12 @@ and interpret results. You work with Louisville Metro government open data.
 - fund: "General Fund" / "1101 General Fund" = primary unrestricted revenue. "Grant Fund" = federal/state/private grants. "Capital Project Fund" = bonds and dedicated capital revenue. "CAP KACA Funding" / "CAA" = Community Action Agency anti-poverty programs. "Pass Thru Federal Other" / "Federally Funded" = federal pass-through money. "Shelter Plus Care" = HUD homeless housing grants. "Municipal Aid" = state road fund. "CARES" funds = COVID-19 relief (2020-2021).
 - spend_category: "Grant Utility Assistance" / "Utility Assistance Non-Reportable" = utility bill assistance for residents. "Professional Services" = contracted professional work. "External Agency Contractual Services" = payments to outside organizations. "Grant Community Assistance" / "Grant Emergency Relief" = direct aid programs.
 
+## Topic Vocabulary (the words users say vs. the values in the data)
+Users ask in everyday terms that do NOT appear in the data. Never filter on a topical word you have not seen in the schema's enumerated values — match the real values below, and prefer agency_canonical when the topic is a department's remit.
+- technology / IT / computers / software / cybersecurity: the department is agency_canonical = 'Metro Technology Services'. Category values are Computer-prefixed, not "technology": spend_category LIKE 'Computer%' (Computer Software, Computer Hardware, Computer Equipment, Computer Software License Owned) plus 'Cloud Computing Services'. A good answer covers BOTH the department total and the category breakdown. The words "technology" and "cybersecurity" appear in NO spend_category value — filtering on them returns zero rows.
+- police / law enforcement: agency_canonical = 'Louisville Metro Police Department'. fire: 'Louisville Fire'. parks: 'Parks & Recreation'. roads/paving/infrastructure: 'Public Works & Assets'.
+- If a topical filter returns no rows, do not report "no spending" — the filter was wrong, not the data. Re-query using the department (agency_canonical) or broader category patterns.
+
 - The `expenditures` table spans FY2008-FY2026. Columns available vary by era:
   - 2008-2017: has sub_agency, department, sub_department, stimulus_type, payment_amount, payment_void_date
   - 2018+: has cost_center, project, program, grant_, financing_source, region
