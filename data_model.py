@@ -244,12 +244,15 @@ def _build_summaries(con, cfg: CityConfig) -> None:
             # returns nothing with no explanation.
             try:
                 n = con.execute(f"SELECT COUNT(*) FROM {spec['table']}").fetchone()[0]
-            except duckdb.CatalogException:
-                # A diagnostics probe must never abort data loading: the pack's
-                # `table:` key doesn't name what its SQL actually created.
+            except duckdb.Error as e:
+                # A diagnostics probe must never abort data loading. duckdb.Error
+                # is the PEP-249 base: a `table:` key that names nothing raises
+                # CatalogException, one that isn't a bare identifier (spaces,
+                # hyphens, a reserved word) raises Parser/BinderException.
                 log.warning(
-                    "summary spec names table %r but its SQL created something else; "
-                    "cannot check whether it is empty", spec["table"],
+                    "cannot check whether summary table %r is empty (%s: %s) — check that "
+                    "the spec's `table:` key matches the table its SQL creates and is a "
+                    "plain identifier", spec["table"], type(e).__name__, e,
                 )
             else:
                 if n == 0:
@@ -625,7 +628,10 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
     yf = derive_year_facts(newest_year, fy_start_month, max_covered, today=today)
 
     rules, facts = [yf["rules"]], [yf["fact"]]
-    salary, newest_cal, salary_error = None, None, False
+    salary, newest_cal, prior_cal, salary_error = None, None, None, False
+
+    # Only the QUERIES are guarded, so nothing after a successful read can
+    # land in the error state and leave a half-applied rule behind.
     try:
         newest_cal = con.execute("SELECT MAX(CalYear) FROM salary_data").fetchone()[0]
         if newest_cal is not None:
@@ -634,24 +640,26 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
             prior_cal = con.execute(
                 "SELECT MAX(CalYear) FROM salary_data WHERE CalYear < ?", [newest_cal]
             ).fetchone()[0]
-            salary = derive_salary_year_facts(newest_cal, prior_cal)
-            if salary:
-                rules.append(salary["rules"])
-                facts.append(salary["fact"])
-            else:
-                log.warning(
-                    "salary_data holds only CalYear %s; no complete year to cite, "
-                    "so no salary year guidance is emitted", newest_cal,
-                )
     except duckdb.CatalogException:
         pass  # city pack has no salary table — nothing to say about salaries
     except Exception as e:
         # Anything else (renamed column, type error) would silently strip the
         # salary guidance the prompt refers to. Record it as its OWN state:
-        # collapsing it into newest_cal=None would report "no salary table"
-        # for a table that exists and was read a moment ago.
-        newest_cal, salary_error = None, True
+        # collapsing it into newest_cal=None alone would report "no salary
+        # table" for a table that exists and was read a moment ago.
+        newest_cal, prior_cal, salary_error = None, None, True
         log.warning("year_context: could not derive salary year facts: %s", e)
+
+    if newest_cal is not None:
+        salary = derive_salary_year_facts(newest_cal, prior_cal)
+        if salary:
+            rules.append(salary["rules"])
+            facts.append(salary["fact"])
+        else:
+            log.warning(
+                "salary_data holds only CalYear %s; no complete year to cite, "
+                "so no salary year guidance is emitted", newest_cal,
+            )
 
     return {
         "values": {

@@ -234,3 +234,27 @@ def test_year_context_healthy_paths_are_not_flagged_as_errors():
     assert year_context(_con(), fy_start_month=7, today=date(2026, 8, 1))["salary_error"] is False
     assert year_context(_con(salary_years=None), fy_start_month=7)["salary_error"] is False
     assert year_context(_con(salary_years=(2026,)), fy_start_month=7)["salary_error"] is False
+
+
+def test_year_context_error_after_first_query_clears_everything():
+    # A failure in the SECOND query (newest year read fine, prior-year query
+    # blows up) must still land cleanly in the error state — no populated
+    # salary rule, no lingering newest_cal presented as the single-year case.
+    import duckdb
+
+    class _FailsOnPriorYear:
+        """Delegates to a real connection but fails the prior-year query."""
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *args, **kwargs):
+            if "CalYear <" in sql:
+                raise duckdb.BinderException("simulated failure after first read")
+            return self._inner.execute(sql, *args, **kwargs)
+
+    yc = year_context(_FailsOnPriorYear(_con()), fy_start_month=7, today=date(2026, 8, 1))
+    assert yc["salary_error"] is True
+    assert yc["salary"] is None
+    assert yc["newest_cal_year"] is None
+    assert "CalYear" not in yc["rules"]   # no half-applied salary rule
+    assert len(yc["facts"]) == 1

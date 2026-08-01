@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from city_config import CityConfig  # noqa: E402
 from data_model import (  # noqa: E402
+    _build_summaries,
     _load_expenditures,
     _source_files,
     get_compact_schema_description,
@@ -142,3 +143,47 @@ def test_pandas_mapped_yearless_source(tmp_path):
     con = duckdb.connect()
     _load_expenditures(con, cfg, d)
     assert con.execute("SELECT a, b FROM expenditures").fetchone() == (5, 6)
+
+
+# ── _build_summaries diagnostics ─────────────────────────────────────────────
+# Both warnings are operator-facing signals for a misconfigured city pack;
+# neither was covered, so a refactor could re-raise from the probe or drop the
+# empty warning with the suite still green.
+
+def _summary_cfg(tmp_path, summaries):
+    return CityConfig({"summaries": summaries}, str(tmp_path))
+
+
+def _seeded_con():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE expenditures (fiscal_year INTEGER, amount DOUBLE)")
+    con.execute("INSERT INTO expenditures VALUES (2025, 10.0), (2026, 5.0)")
+    return con
+
+
+def test_build_summaries_warns_when_a_summary_materializes_empty(tmp_path, caplog):
+    cfg = _summary_cfg(tmp_path, [{
+        "table": "summary_empty",
+        "sql": "CREATE TABLE summary_empty AS SELECT * FROM expenditures WHERE fiscal_year = 1900",
+    }])
+    with caplog.at_level("WARNING"):
+        _build_summaries(_seeded_con(), cfg)
+    assert "materialized EMPTY" in caplog.text, caplog.text
+    assert "summary_empty" in caplog.text
+
+
+def test_build_summaries_survives_a_table_key_that_does_not_match_its_sql(tmp_path, caplog):
+    # The probe must never abort loading — neither for a name that doesn't
+    # exist nor for one that isn't a bare identifier.
+    for table_key in ("summary_wrong_name", "not a bare identifier"):
+        caplog.clear()
+        cfg = _summary_cfg(tmp_path, [{
+            "table": table_key,
+            "sql": "CREATE TABLE summary_actual AS SELECT * FROM expenditures",
+        }])
+        con = _seeded_con()
+        with caplog.at_level("WARNING"):
+            _build_summaries(con, cfg)  # must not raise
+        assert "cannot check whether summary table" in caplog.text, caplog.text
+        # the SQL still ran, so the real table exists
+        assert con.execute("SELECT COUNT(*) FROM summary_actual").fetchone()[0] == 2
