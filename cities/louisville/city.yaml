@@ -14,8 +14,9 @@ data_facts:
   - Compensation figures are pay components only (regular, overtime, incentive,
     other); the data contains no benefits information, so never describe an
     amount as including benefits.
-  - The newest fiscal/calendar year in the data is in progress — its totals
-    are partial, not a full year.
+  - Fiscal/calendar year 2026 is the in-progress year, so its totals are
+    partial. 2025 is the most recent COMPLETE year — never describe 2025 (or
+    any year before it) as in progress, partial, or incomplete.
 expenditures:
   table: expenditures
   sources:
