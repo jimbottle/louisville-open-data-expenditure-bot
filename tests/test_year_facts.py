@@ -176,6 +176,20 @@ def _con(fiscal_rows=(("2026-03-16", 2026), ("2025-06-30", 2025)), salary_years=
     return con
 
 
+class _FailsOnPriorYear:
+    """Delegates to a real connection but fails the prior-year query, so the
+    "error" salary_state can be produced on demand."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def execute(self, sql, *args, **kwargs):
+        import duckdb
+        if "CalYear <" in sql:
+            raise duckdb.BinderException("simulated failure after first read")
+        return self._inner.execute(sql, *args, **kwargs)
+
+
 def test_year_context_builds_values_rules_and_facts():
     yc = year_context(_con(), fy_start_month=7, today=date(2026, 8, 1))
     assert yc["values"] == {
@@ -243,18 +257,6 @@ def test_year_context_error_after_first_query_clears_everything():
     # A failure in the SECOND query (newest year read fine, prior-year query
     # blows up) must still land cleanly in the error state — no populated
     # salary rule, no lingering newest_cal presented as the single-year case.
-    import duckdb
-
-    class _FailsOnPriorYear:
-        """Delegates to a real connection but fails the prior-year query."""
-        def __init__(self, inner):
-            self._inner = inner
-
-        def execute(self, sql, *args, **kwargs):
-            if "CalYear <" in sql:
-                raise duckdb.BinderException("simulated failure after first read")
-            return self._inner.execute(sql, *args, **kwargs)
-
     yc = year_context(_FailsOnPriorYear(_con()), fy_start_month=7, today=date(2026, 8, 1))
     assert yc["salary_error"] is True
     assert yc["salary"] is None
@@ -285,7 +287,7 @@ def test_year_context_distinguishes_an_empty_salary_table_from_a_missing_one():
 # Five strings an operator reads to diagnose a pack; the flags->message
 # mapping had been reshaped three commits running with no test.
 
-@pytest.mark.parametrize("yc,expected", [
+SALARY_STATUS_CASES = [
     ({"salary_state": "error"}, "derivation failed — see warning above"),
     ({"salary_state": "no_table"}, "no salary table"),
     ({"salary_state": "no_years"}, "salary_data has no usable CalYear values"),
@@ -294,14 +296,20 @@ def test_year_context_distinguishes_an_empty_salary_table_from_a_missing_one():
     ({"salary_state": "ok", "salary": {"last_complete_year": 2025}},
      "CalYear partial, latest complete 2025"),
     ({"salary_state": "unknown"}, "not evaluated"),
-])
+]
+
+
+@pytest.mark.parametrize("yc,expected", SALARY_STATUS_CASES)
 def test_salary_status_message_per_state(yc, expected):
     import app
     assert app._salary_status(yc) == expected
 
 
 def test_salary_status_covers_every_state_year_context_can_emit():
-    # Guard against a new state being added without a message for it.
+    """Every state year_context can emit must have a message — including
+    "error", which is only reachable via the exception path. Without it a
+    rename in data_model would leave the suite green while a failed
+    derivation logged the wrong line."""
     import app
     states = {
         year_context(_con(), fy_start_month=7, today=date(2026, 8, 1))["salary_state"],
@@ -309,9 +317,13 @@ def test_salary_status_covers_every_state_year_context_can_emit():
         year_context(_con(salary_years=()), fy_start_month=7)["salary_state"],
         year_context(_con(salary_years=(2026,)), fy_start_month=7)["salary_state"],
         year_context(_con(fiscal_rows=()), fy_start_month=7)["salary_state"],
+        year_context(_FailsOnPriorYear(_con()), fy_start_month=7)["salary_state"],
     }
-    assert states == {"ok", "no_table", "no_years", "single_year", "unknown"}
+    assert states == {"ok", "error", "no_table", "no_years", "single_year", "unknown"}
+    # ...and the parametrized message table above covers exactly those states,
+    # checked directly rather than as a side effect of the set comparison.
+    assert {c[0]["salary_state"] for c in SALARY_STATUS_CASES} == states
     for st in states:
-        assert app._salary_status({"salary_state": st, "newest_cal_year": 2026,
-                                   "salary": {"last_complete_year": 2025}}) != "not evaluated" \
-            or st == "unknown"
+        msg = app._salary_status({"salary_state": st, "newest_cal_year": 2026,
+                                  "salary": {"last_complete_year": 2025}})
+        assert "unrecognized" not in msg, f"no message defined for state {st!r}"

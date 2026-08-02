@@ -111,3 +111,30 @@ def test_branding_starter_questions_match_the_warm_cache_list():
     assert chip_qs <= set(warm_cache.STARTER_QUESTIONS), (
         f"chips not in warm list: {chip_qs - set(warm_cache.STARTER_QUESTIONS)}"
     )
+
+
+def test_frontend_city_literals_live_only_in_the_fallback_defaults():
+    """A second city's deployment must not show Louisville text. Every
+    Louisville mention left in the page has to sit inside the clearly-marked
+    DEFAULT_STARTER_GROUPS fallback (which /api/config overrides)."""
+    html = open(os.path.join(REPO, "static", "index.html")).read()
+    start = html.index("const DEFAULT_STARTER_GROUPS")
+    end = html.index("let STARTER_GROUPS = DEFAULT_STARTER_GROUPS;")
+    outside = html[:start] + html[end:]
+    stray = [ln.strip() for ln in outside.splitlines()
+             if "Louisville" in ln or "LMPD" in ln]
+    # The <title>/<h1>/subtitle/hero markup keeps its Louisville text as the
+    # pre-fetch first paint; those specific nodes are overwritten by
+    # applyBranding(). Everything else must already be branding-driven.
+    overridden = ("<title>", "<h1>", 'class="subtitle"', "<h2>", "<p>Natural language",
+                  'id="question"', "about-tooltip", "Data sourced from", "published by",
+                  "Terms of Use", "Open Data Ordinance", "not affiliated")
+    unexpected = [ln for ln in stray if not any(tok in ln for tok in overridden)]
+    assert not unexpected, f"city literals outside branding control: {unexpected}"
+
+
+def test_branding_covers_every_overridable_frontend_string():
+    cfg = load_city_config(LOUISVILLE)
+    for key in ("bot_name", "tab_title", "subtitle", "hero_heading", "hero_blurb",
+                "input_placeholder", "input_aria_label", "starter_groups"):
+        assert cfg.branding.get(key), f"branding missing {key}"

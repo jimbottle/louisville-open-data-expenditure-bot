@@ -13,6 +13,13 @@ branding:
   bot_name: Lou
   tab_title: Lou · Louisville Metro open data
   subtitle: The publicly shared data from Louisville Metro
+  hero_heading: Ask me about Louisville Metro Government expenditure. I might have some answers.
+  hero_blurb: >-
+    Natural language queries run against Louisville Metro expenditure, salary,
+    capital projects, contractor, and staffing data, covering fiscal years 2008
+    to 2026.
+  input_placeholder: Enter your question about Louisville Metro Government expenditure here...
+  input_aria_label: Ask a question about Louisville Metro data
   starter_groups:
     - label: Spending
       chips:

@@ -681,7 +681,8 @@ def year_context(con, fy_start_month=1, today=None) -> dict:
         "expenditures": yf,
         "salary": salary,
         # salary_state is the single authoritative value — exactly one of
-        # "ok" | "error" | "no_table" | "no_years" | "single_year" — so
+        # "ok" | "error" | "no_table" | "no_years" | "single_year", plus
+        # "unknown" from the no-usable-fiscal-year early return above — so
         # consumers never have to combine flags (which were not mutually
         # exclusive) to work out what happened. The keys below remain for
         # detail, not for classification.

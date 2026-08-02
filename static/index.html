@@ -822,6 +822,7 @@ const messagesEl = document.getElementById('messages');
 const startersEl = document.getElementById('starters');
 const questionEl = document.getElementById('question');
 const submitBtn = document.getElementById('submit-btn');
+let BOT_NAME = 'Lou';  // overridden by the city pack's branding
 const devModeEl = document.getElementById('dev-mode');
 // Keep a body-level class in sync with the toggle: dev blocks are always
 // rendered when their data arrives and shown/hidden purely via CSS, so the
@@ -847,7 +848,25 @@ let lastQuestion = '';          // backs the Retry affordance
 
 // Single source of truth for example prompts: [label, question]. Rendered into
 // both the starter screen (grouped) and the Examples tray (flat), so they can't drift.
-let STARTER_GROUPS = [];  // filled from /api/config (city pack branding)
+// Defaults render immediately and whenever /api/config is unreachable (edge
+// 403, offline, slow start); the pack's branding overrides them on load.
+const DEFAULT_STARTER_GROUPS = [
+  { label: 'Spending', chips: [
+    ['How has spending changed over time?', 'How has total annual spending changed from 2008 to 2026?'],
+    ['Which agencies spend the most?', 'Which agencies have spent the most money across all fiscal years?'],
+    ['LMPD spending by year', 'Give me a year-over-year breakdown of LMPD spending'],
+  ] },
+  { label: 'People & pay', chips: [
+    ['What do top officials earn?', 'How much does the mayor make? What about the police chief?'],
+    ['Highest paid positions', 'What are the highest paid positions in Louisville Metro government?'],
+  ] },
+  { label: 'Contracts & projects', chips: [
+    ['Who runs the top contractors?', 'Who are the registered agents for the top 10 contractors by total spend?'],
+    ['Largest capital projects', 'What are the largest capital projects and how much was allocated to each?'],
+    ['Grant funding breakdown', 'How much grant funding has Louisville received and from which sources?'],
+  ] },
+];
+let STARTER_GROUPS = DEFAULT_STARTER_GROUPS;
 
 function chipButton(label, question) {
   const b = document.createElement('button');
@@ -938,7 +957,7 @@ function toggleAbout(el) {
 }
 
 function resetAskButton() {
-  submitBtn.textContent = 'Ask Lou';
+  submitBtn.textContent = `Ask ${BOT_NAME}`;
   submitBtn.classList.remove('stop');
   submitBtn.disabled = false;
 }
@@ -969,7 +988,7 @@ function buildReportBody(report, interpText, scale, extras = true) {
     return s && s.length > lim ? s.slice(0, lim) + ' …[truncated]' : (s || '');
   };
   const parts = [
-    'A Lou answer may be off.',
+    `A ${BOT_NAME} answer may be off.`,
     '',
     'Page: ' + cut(location.href, 200),
     'Time: ' + new Date().toISOString(),
@@ -990,7 +1009,7 @@ function buildReportBody(report, interpText, scale, extras = true) {
 }
 
 function buildReport(report, interpText) {
-  const subject = 'Lou answer report: ' + report.question.slice(0, 80);
+  const subject = `${BOT_NAME} answer report: ` + report.question.slice(0, 80);
   const mk = (body) =>
     `mailto:${REPORT_EMAIL}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   const BUDGET = 1900;  // conservative: MAPI-based handlers reject ~2000+
@@ -1477,6 +1496,18 @@ async function applyBranding() {
     if (h1 && cfg.bot_name) h1.textContent = cfg.bot_name;
     const sub = document.querySelector('.subtitle');
     if (sub && cfg.subtitle) sub.textContent = cfg.subtitle;
+    if (cfg.bot_name) {
+      BOT_NAME = cfg.bot_name;
+      const btn = document.getElementById('submit-btn');
+      if (btn && !isStreaming) btn.textContent = `Ask ${BOT_NAME}`;
+    }
+    const hero = document.querySelector('#starters h2');
+    if (hero && cfg.hero_heading) hero.textContent = cfg.hero_heading;
+    const blurb = document.querySelector('#starters > p');
+    if (blurb && cfg.hero_blurb) blurb.textContent = cfg.hero_blurb;
+    const input = document.getElementById('question');
+    if (input && cfg.input_placeholder) input.placeholder = cfg.input_placeholder;
+    if (input && cfg.input_aria_label) input.setAttribute('aria-label', cfg.input_aria_label);
     if (Array.isArray(cfg.starter_groups) && cfg.starter_groups.length) {
       STARTER_GROUPS = cfg.starter_groups.map(g => ({ label: g.label, chips: g.chips }));
     }

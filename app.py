@@ -318,7 +318,7 @@ SERVICE_ERROR_MSG = (
 def _salary_status(yc: dict) -> str:
     """One operator-facing line describing what salary guidance was derived.
 
-    Driven by year_context's single `salary_state` value so the five cases
+    Driven by year_context's single `salary_state` value so the six cases
     stay exclusive (they were previously a nested ternary over flags that
     could both be true).
     """
@@ -333,7 +333,11 @@ def _salary_status(yc: dict) -> str:
         return f"CalYear {yc['newest_cal_year']} only; no complete year to cite"
     if state == "ok":
         return f"CalYear partial, latest complete {yc['salary']['last_complete_year']}"
-    return "not evaluated"
+    if state == "unknown":
+        return "not evaluated"
+    # Drift between data_model's enum and this helper must be visible in the
+    # log, not disguised as the legitimate "unknown" case.
+    return f"not evaluated (unrecognized salary_state {state!r})"
 
 
 @app.on_event("startup")
@@ -540,13 +544,15 @@ async def health():
 @app.get("/api/config")
 async def get_config():
     """Frontend branding from the active city pack, so the UI carries no
-    hardcoded city identity. Falls back to the city name when a pack omits a
-    field."""
+    hardcoded city identity. A pack that omits fields gets neutral defaults
+    derived from its own city name — never another city's bot name."""
     b = dict(CONFIG.branding or {})
-    city = (CONFIG.city or {}).get("name", "")
-    b.setdefault("bot_name", "Lou")
+    city = ((CONFIG.city or {}).get("name") or "").strip()
+    b.setdefault("bot_name", city or "Open Data Bot")
     b.setdefault("tab_title", CONFIG.title)
-    b.setdefault("subtitle", f"The publicly shared data from {city}".strip())
+    # Suppress the whole sentence when there is no city name rather than
+    # emitting a dangling "The publicly shared data from".
+    b.setdefault("subtitle", f"The publicly shared data from {city}" if city else "")
     b.setdefault("starter_groups", [])
     return b
 
