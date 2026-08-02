@@ -53,6 +53,19 @@ ACRONYMS = {
 # initial ("A & A SAFETY"), and lowercasing it reads as a typo.
 JOINERS = {"of", "and", "the", "for", "to", "in", "on", "at", "or", "de"}
 
+# Vowel-less abbreviations that read as WORDS in a name, not as initialisms:
+# "ST MATTHEWS HEALTH" is Saint, "SMITH WM JR" is William Junior. The vowel
+# rule in _looks_like_acronym cannot see these — they carry no vowel and would
+# be shouted back as ST/WM/JR. Genuine two-letter acronyms (TV, GE, HP, CDW)
+# are handled by ACRONYMS above, which is consulted first, so excluding these
+# costs nothing. Directionals (NW, SE) are deliberately absent: uppercase is
+# correct for those.
+NAME_PARTICLES = {
+    "ST", "MT", "FT",                     # Saint / Mount / Fort in place names
+    "DR", "MR", "MRS", "MS", "JR", "SR", "WM",   # titles and name suffixes
+    "RD", "BLVD",                         # street types inside payee names
+}
+
 # Store/branch codes: "WALGREENS #4821", "CDW GOVT #". The number identifies a
 # location, not a vendor, so it is dropped before clustering — and its presence
 # is what makes a value a prefix-rule candidate.
@@ -102,10 +115,19 @@ def _looks_like_acronym(token: str) -> bool:
     Judged on the case-folded shape, not on token.isupper(): the caller has
     already established the whole name is single-case, and an all-lowercase
     export is as much a casing accident as a shouted one. Keying on isupper()
-    title-cased "hntb ohio" to "Hntb" while "HNTB OHIO" became "HNTB"."""
+    title-cased "hntb ohio" to "Hntb" while "HNTB OHIO" became "HNTB".
+
+    Y counts as a vowel here, and NAME_PARTICLES are excluded outright. Both
+    exist because "no AEIOU" is a proxy for "cannot be pronounced as a word",
+    and English spells plenty of words without those five: LYNCH, SMYTH, FLYNN,
+    BYRD. The particles are the residue the vowel rule cannot see — ST, JR, MS,
+    WM are abbreviations that read as words in a name ("st matthews health" is
+    Saint, not an initialism), and they appear in real payee labels."""
     bare = token.upper()
+    if bare in NAME_PARTICLES:
+        return False
     return (bare.isalpha() and 2 <= len(bare) <= 5
-            and not any(c in "AEIOU" for c in bare))
+            and not any(c in "AEIOUY" for c in bare))
 
 
 def smart_title(name: str) -> str:
@@ -397,6 +419,32 @@ def spec_for(cfg, dimension: str) -> dict:
     )
 
 
+def _same_file(a: str, b: str) -> bool:
+    """Do these two paths name the same file, however each is spelled?
+
+    Every decision that protects a curated map keys on this, so it cannot be a
+    string compare: map_path is always absolute (city_config abspath's the
+    pack), while --out is whatever the caller typed. A relative
+    `cities/x/payee_map.csv`, a `./` prefix or a symlinked pack directory all
+    name the live map while comparing unequal — and the draft branch replaces
+    rather than merges, so getting this wrong truncates the map without
+    --force."""
+    try:
+        if os.path.exists(a) and os.path.exists(b):
+            return os.path.samefile(a, b)
+    except OSError:
+        pass
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def _row_count(path: str) -> int:
+    """Data rows (excluding the header) in an existing map/draft."""
+    with open(path, newline="") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        return sum(1 for row in reader if row)
+
+
 def write_map(path: str, rows: list) -> None:
     with open(path, "w", newline="") as f:
         # LF, matching the hand-authored maps already in the packs; csv's
@@ -499,7 +547,9 @@ def main(argv=None) -> int:
 
     map_path = os.path.join(cfg.base_dir, spec.get("exact_map", f"{column}_map.csv"))
     out_path = args.out or (map_path if args.force else map_path + ".draft.csv")
-    if os.path.exists(out_path) and out_path == map_path and not args.force:
+    # Both protections for the live map hang off this one answer — see _same_file.
+    at_live_map = _same_file(out_path, map_path)
+    if os.path.exists(out_path) and at_live_map and not args.force:
         raise SystemExit(f"refusing to overwrite {out_path} without --force")
 
     weights, unit = load_weights(args.data_dir, cfg, table, column)
@@ -519,10 +569,15 @@ def main(argv=None) -> int:
     # current data. Merging into a stale draft would preserve every row of it,
     # so a spelling that no longer exists — or a label the tool would now
     # compute differently — would survive into curation unnoticed.
-    if out_path == map_path:
+    replaced = None
+    if at_live_map:
         written, kept, added = merge_with_existing(
             out_path, rows, case_insensitive=bool(spec.get("case_insensitive")))
     else:
+        # The default --out is the file a curator may have been editing before
+        # moving it into place, and this path replaces it wholesale. That is
+        # the intended behaviour, but it must not be the silent one.
+        replaced = _row_count(out_path) if os.path.exists(out_path) else None
         written, kept, added = sorted(rows), 0, len(rows)
     write_map(out_path, written)
     print(f"wrote {len(written):,} rows -> {out_path}", file=sys.stderr)
@@ -530,7 +585,11 @@ def main(argv=None) -> int:
         print(f"({kept:,} existing curated rows preserved, {added:,} new rows "
               "added; the seeder never drops a row it did not write)",
               file=sys.stderr)
-    if out_path != map_path:
+    if replaced is not None:
+        print(f"(replaced an existing draft at {out_path}: {replaced:,} rows -> "
+              f"{len(written):,}; a draft is a fresh regeneration, not a merge — "
+              "any edits made in place are gone)", file=sys.stderr)
+    if not at_live_map:
         print(f"(the pack's live map at {map_path} was NOT touched; "
               "curate the draft, then move it into place)", file=sys.stderr)
 

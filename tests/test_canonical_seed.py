@@ -125,6 +125,53 @@ def test_real_words_are_never_preserved_as_acronyms():
     assert cs.smart_title("VETS SECURING AMERICA") == "Vets Securing America"
 
 
+@pytest.mark.parametrize("raw,expected", [
+    # "no AEIOU" is a proxy for "cannot be pronounced", and English spells
+    # plenty of words without those five letters.
+    ("lynch bros", "Lynch Bros"),
+    ("smyth partners", "Smyth Partners"),
+    ("flynn byrd", "Flynn Byrd"),
+    # ...and the residue the vowel rule cannot see at all: abbreviations that
+    # read as words in a name.
+    ("st matthews health", "St Matthews Health"),
+    ("smith wm jr", "Smith Wm Jr"),
+])
+def test_words_the_vowel_rule_cannot_see_are_not_shouted(raw, expected):
+    """Judging the case-folded shape extended the acronym rule to lowercase
+    exports, which also extended its misfires there. Both cases must agree AND
+    both must be right — 'ST Matthews Health' was wrong before, too."""
+    assert cs.smart_title(raw) == expected
+    assert cs.smart_title(raw.upper()) == expected
+
+
+# ── the live map must be recognised however its path is spelled ──────────────
+
+def test_the_live_map_is_recognised_however_its_path_is_spelled(tmp_path, monkeypatch):
+    """Both protections for a curated map — the refuse-to-overwrite guard and
+    the merge — hang off this one answer. Comparing the strings took a
+    relative --out for a draft, which skips the guard AND replaces instead of
+    merging: a curated map truncated to machine rows without --force."""
+    live = tmp_path / "payee_map.csv"
+    live.write_text("source,canonical\nA,B\n")
+    monkeypatch.chdir(tmp_path)
+    for spelling in ("payee_map.csv", "./payee_map.csv", str(live)):
+        assert cs._same_file(spelling, str(live)), f"{spelling!r} not seen as the live map"
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    link = sub / "linked_map.csv"
+    os.symlink(str(live), str(link))
+    assert cs._same_file(str(link), str(live)), "a symlinked pack dir names the live map"
+    assert not cs._same_file(str(tmp_path / "payee_map.csv.draft.csv"), str(live))
+
+
+def test_the_live_map_is_recognised_before_it_exists(tmp_path):
+    """--force can name a map the pack has not written yet, so the comparison
+    cannot depend on both files existing."""
+    absent = tmp_path / "new_map.csv"
+    assert cs._same_file(str(absent), str(absent))
+    assert not cs._same_file(str(absent), str(tmp_path / "other_map.csv"))
+
+
 # ── clustering and draft rows ────────────────────────────────────────────────
 
 def _clusters(weights):

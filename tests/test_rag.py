@@ -19,6 +19,31 @@ def read_repo_file(*parts) -> str:
     with open(os.path.join(REPO, *parts)) as f:
         return f.read()
 
+
+@pytest.fixture(autouse=True)
+def _reset_fts_latch():
+    """The install-failure latch is module-global. A test that trips it would
+    otherwise disable FTS for the rest of the process, surfacing as unrelated
+    retrieval tests failing somewhere further down the file."""
+    rag._fts_install_failed_at = 0.0
+    yield
+    rag._fts_install_failed_at = 0.0
+
+
+class _NoFtsCon:
+    """A connection on a host where fts is absent and INSTALL cannot reach out."""
+
+    def __init__(self):
+        self.statements = []
+
+    def execute(self, sql):
+        self.statements.append(sql)
+        raise duckdb.Error("fts unavailable")
+
+    def attempted_install(self) -> bool:
+        return any("INSTALL" in s for s in self.statements)
+
+
 DOCS = [
     (1, "R-057-21", "Resolution", "Passed", "2021-06-07", None, None,
      "A RESOLUTION AUTHORIZING THE MAYOR TO ACCEPT FUNDING FROM THE AMERICAN RESCUE PLAN ACT OF 2021", "u1"),
@@ -468,3 +493,68 @@ def test_an_em_dash_joined_pair_cites_both_ends():
              "intro_date": "2021-08-09", "text": "priorities"}]
     assert app._cited_documents(hits, "Resolutions R-083-20—R-083-21 were adopted.")
     assert app._cited_documents(hits, "Resolutions R-083-20–R-083-21 were adopted.") == []
+
+
+# ── the FTS install-failure latch ────────────────────────────────────────────
+
+def test_a_failed_fts_install_is_suppressed_then_retried():
+    """INSTALL reaches out to extensions.duckdb.org, so a blocked-egress host
+    must not pay a connect timeout per question — but the suppression has to
+    expire, or one transient blip during the first query answers every later
+    question uncited until the container is recreated."""
+    import time
+
+    first = _NoFtsCon()
+    with pytest.raises(duckdb.Error):
+        rag._load_fts(first)
+    assert first.attempted_install(), "the fallback never tried to install"
+    assert rag._fts_install_failed_at > 0
+
+    inside = _NoFtsCon()
+    with pytest.raises(duckdb.Error):
+        rag._load_fts(inside)
+    assert not inside.attempted_install(), "retried inside the suppression window"
+
+    # Age the latch past the window rather than moving the process clock.
+    rag._fts_install_failed_at = time.monotonic() - rag._FTS_RETRY_AFTER - 1
+    after = _NoFtsCon()
+    with pytest.raises(duckdb.Error):
+        rag._load_fts(after)
+    assert after.attempted_install(), "suppression never expired"
+
+
+def test_a_successful_install_clears_the_latch():
+    """Otherwise a host that recovers stays latched until the window elapses
+    again on every subsequent failure."""
+    import time
+
+    class _RecoveringCon:
+        def __init__(self):
+            self.n = 0
+
+        def execute(self, sql):
+            self.n += 1
+            if self.n == 1:          # plain LOAD, as on a fresh container
+                raise duckdb.Error("fts not loaded")
+            return None              # INSTALL + LOAD succeeds
+
+    rag._fts_install_failed_at = time.monotonic() - rag._FTS_RETRY_AFTER - 1
+    rag._load_fts(_RecoveringCon())
+    assert rag._fts_install_failed_at == 0.0
+
+
+def test_a_plain_load_never_consults_the_latch():
+    """The common path is an image that already has the extension: it must not
+    be affected by a stale failure timestamp from some earlier connection."""
+    class _WorkingCon:
+        def __init__(self):
+            self.statements = []
+
+        def execute(self, sql):
+            self.statements.append(sql)
+            return None
+
+    rag._fts_install_failed_at = 1.0     # a very recent "failure"
+    con = _WorkingCon()
+    rag._load_fts(con)
+    assert con.statements == ["LOAD fts;"]
