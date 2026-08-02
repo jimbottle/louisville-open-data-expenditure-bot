@@ -172,6 +172,71 @@ def test_the_live_map_is_recognised_before_it_exists(tmp_path):
     assert not cs._same_file(str(absent), str(tmp_path / "other_map.csv"))
 
 
+# ── main(): the two decisions _same_file actually guards ─────────────────────
+
+def _tiny_pack(tmp_path):
+    """A minimal city pack: one canonicalization spec and a curated map."""
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    (pack / "city.yaml").write_text(
+        "canonicalization:\n"
+        "  - source_column: payee\n"
+        "    target_column: payee_canonical\n"
+        "    exact_map: payee_map.csv\n"
+    )
+    (pack / "payee_map.csv").write_text(
+        "source,canonical\nAPCD,Air Pollution Control District\n")
+    return pack
+
+
+@pytest.fixture()
+def seeded_weights(monkeypatch):
+    """Skip the DuckDB read so main() can be exercised as a whole."""
+    monkeypatch.setattr(
+        cs, "load_weights",
+        lambda *a, **k: ({"ACME INC": 5.0, "Acme, Inc.": 3.0}, "dollars"))
+
+
+def test_main_refuses_a_relative_out_that_names_the_live_map(tmp_path, monkeypatch, seeded_weights):
+    """The unit test above pins _same_file; this pins the call site. A string
+    compare took this --out for a draft, which skips this guard AND replaces
+    instead of merging — the curated map truncated without --force."""
+    pack = _tiny_pack(tmp_path)
+    before = (pack / "payee_map.csv").read_text()
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        cs.main(["--city", "pack/city.yaml", "--out", "pack/payee_map.csv"])
+    assert (pack / "payee_map.csv").read_text() == before, "curated map was written"
+
+
+def test_main_merges_when_force_names_the_live_map_relatively(tmp_path, monkeypatch, seeded_weights):
+    """The other half of the same decision: --force at the live map must merge,
+    whatever the path is spelled like, or curation is silently discarded."""
+    pack = _tiny_pack(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert cs.main(["--city", "pack/city.yaml", "--out", "pack/payee_map.csv",
+                    "--force"]) == 0
+    with open(pack / "payee_map.csv", newline="") as f:
+        written = dict(list(csv.reader(f))[1:])
+    assert written["APCD"] == "Air Pollution Control District", "curated row dropped"
+    assert "ACME INC" in written, "the draft rows were not added"
+
+
+def test_main_says_what_it_replaced_when_rewriting_a_draft(tmp_path, monkeypatch,
+                                                           seeded_weights, capsys):
+    """The default --out is the file a curator may have been editing. Replacing
+    it is correct; doing so silently is not."""
+    pack = _tiny_pack(tmp_path)
+    draft = pack / "payee_map.csv.draft.csv"
+    draft.write_text("source,canonical\nOLD ONE,Old One\nOLD TWO,Old Two\n")
+    monkeypatch.chdir(tmp_path)
+    assert cs.main(["--city", "pack/city.yaml"]) == 0
+    err = capsys.readouterr().err
+    assert "replaced an existing draft" in err and "2 rows" in err
+    assert "OLD ONE" not in draft.read_text(), "a draft is a regeneration, not a merge"
+    assert "APCD" in (pack / "payee_map.csv").read_text(), "live map was touched"
+
+
 # ── clustering and draft rows ────────────────────────────────────────────────
 
 def _clusters(weights):

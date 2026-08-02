@@ -545,7 +545,9 @@ def test_a_successful_install_clears_the_latch():
 
 def test_a_plain_load_never_consults_the_latch():
     """The common path is an image that already has the extension: it must not
-    be affected by a stale failure timestamp from some earlier connection."""
+    be affected by a failure recorded against some earlier connection."""
+    import time
+
     class _WorkingCon:
         def __init__(self):
             self.statements = []
@@ -554,7 +556,11 @@ def test_a_plain_load_never_consults_the_latch():
             self.statements.append(sql)
             return None
 
-    rag._fts_install_failed_at = 1.0     # a very recent "failure"
+    # monotonic() is seconds since boot, so a literal like 1.0 would be an
+    # ANCIENT failure on any machine up more than five minutes — the
+    # suppression branch would not fire and this test would pass for the wrong
+    # reason. Stamp it now, genuinely inside the window.
+    rag._fts_install_failed_at = time.monotonic()
     con = _WorkingCon()
     rag._load_fts(con)
     assert con.statements == ["LOAD fts;"]
