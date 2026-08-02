@@ -731,6 +731,12 @@ def humanize_prose(text: str) -> str:
     return humanize_text(text, prose=True)
 
 
+# Every Unicode dash a model reaches for when typesetting an identifier.
+# The model writes "R\u2011083\u201121" (non-breaking hyphens) as readily as
+# "R-083-21", and the file numbers we match against are always ASCII.
+_DASHES = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"})
+
+
 def _cited_documents(doc_hits: list, answer_text: str) -> list:
     """The retrieved documents the answer actually cited.
 
@@ -746,7 +752,10 @@ def _cited_documents(doc_hits: list, answer_text: str) -> list:
     prose ("2021" in a fiscal-year sentence) and attach an unrelated ordinance
     as a source — the exact failure this function exists to prevent. R-57-21
     is also a substring of R-57-215."""
-    text = answer_text or ""
+    # Normalize typographic dashes first: an answer citing "R\u2011083\u201121"
+    # is citing R-083-21, and matching the raw text drops the footer on a
+    # citation the reader can plainly see.
+    text = (answer_text or "").translate(_DASHES)
     cited = []
     for h in doc_hits:
         fn = h.get("file_no")
@@ -754,7 +763,7 @@ def _cited_documents(doc_hits: list, answer_text: str) -> list:
         # look for in prose at all; no citation beats a wrong one.
         if not fn or len(fn) < 3 or fn.isdigit():
             continue
-        if re.search(rf"(?<![\w-]){re.escape(fn)}(?![\w-])", text):
+        if re.search(rf"(?<![\w-]){re.escape(fn.translate(_DASHES))}(?![\w-])", text):
             cited.append(h)
     return cited
 

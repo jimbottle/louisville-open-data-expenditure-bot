@@ -417,3 +417,17 @@ def test_the_interpretation_stream_is_humanized_as_prose_not_as_a_table():
     assert "humanize_text(chunk)" not in body
     assert "humanize_text(draft)" not in body
     assert "transform=humanize_prose" in body
+
+
+def test_typographic_dashes_still_count_as_a_citation():
+    """Models typeset identifiers with non-breaking hyphens: an answer reading
+    "Resolution R‑083‑21" shipped with an empty footer while the citation
+    sat in plain sight."""
+    import app
+    hits = [{"file_no": "R-083-21", "url": "u", "matter_type": "Resolution",
+             "intro_date": "2021-08-09", "text": "priorities"}]
+    for dash in ("‐", "‑", "‒", "–", "—", "−"):
+        answer = f"Resolution R{dash}083{dash}21 established the priorities."
+        assert app._cited_documents(hits, answer), f"missed U+{ord(dash):04X}"
+    # the boundary guard must survive normalization
+    assert app._cited_documents(hits, "See R‑083‑21‑A for more.") == []
