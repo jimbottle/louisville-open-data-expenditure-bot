@@ -123,12 +123,12 @@ def test_frontend_city_literals_live_only_in_the_fallback_defaults():
     outside = html[:start] + html[end:]
     stray = [ln.strip() for ln in outside.splitlines()
              if "Louisville" in ln or "LMPD" in ln]
-    # The <title>/<h1>/subtitle/hero markup keeps its Louisville text as the
-    # pre-fetch first paint; those specific nodes are overwritten by
-    # applyBranding(). Everything else must already be branding-driven.
+    # Only nodes applyBranding() actually rewrites may keep Louisville text as
+    # the pre-fetch first paint. The About block used to be whitelisted here
+    # without being overridden anywhere — six lines of Louisville attribution,
+    # license and disclaimer that a Cincinnati deploy would have rendered.
     overridden = ("<title>", "<h1>", 'class="subtitle"', "<h2>", "<p>Natural language",
-                  'id="question"', "about-tooltip", "Data sourced from", "published by",
-                  "Terms of Use", "Open Data Ordinance", "not affiliated")
+                  'id="question"')
     unexpected = [ln for ln in stray if not any(tok in ln for tok in overridden)]
     assert not unexpected, f"city literals outside branding control: {unexpected}"
 
@@ -138,3 +138,20 @@ def test_branding_covers_every_overridable_frontend_string():
     for key in ("bot_name", "tab_title", "subtitle", "hero_heading", "hero_blurb",
                 "input_placeholder", "input_aria_label", "starter_groups"):
         assert cfg.branding.get(key), f"branding missing {key}"
+
+
+def test_default_starter_groups_match_the_pack():
+    """The chips exist twice — in the pack and as the JS fallback. They must
+    agree, or a failed /api/config would offer questions the pack no longer
+    has (and warm_cache no longer pre-answers)."""
+    import re
+    cfg = load_city_config(LOUISVILLE)
+    html = open(os.path.join(REPO, "static", "index.html")).read()
+    block = html[html.index("const DEFAULT_STARTER_GROUPS"):
+                 html.index("let STARTER_GROUPS = DEFAULT_STARTER_GROUPS;")]
+    # each chip is ['label', 'question'] — take the second string of each pair
+    js_questions = {m[1] for m in re.findall(r"\['([^']*)',\s*'([^']*)'\]", block)}
+    pack_questions = {c[1] for g in cfg.branding["starter_groups"] for c in g["chips"]}
+    missing = pack_questions - js_questions
+    extra = js_questions - pack_questions
+    assert not missing and not extra, f"fallback drift — missing {missing}, extra {extra}"

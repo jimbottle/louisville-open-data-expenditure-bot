@@ -789,16 +789,14 @@
     <div class="chip-groups" id="starter-groups"></div>
     <div class="about-wrapper">
       <span class="about-icon" tabindex="0" role="button" aria-label="About this data" onclick="toggleAbout(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAbout(this);}">i</span>
+      <!-- Filled from the city pack's branding.about_html on load; this
+           placeholder is city-neutral so no deployment flashes another
+           city's attribution or legal terms. -->
       <div class="about-tooltip">
         <strong>About this data</strong><br>
-        Data sourced from <a href="https://data.louisvilleky.gov/datasets/" target="_blank">Louisville Metro Open Data Portal</a>,
-        published by Louisville/Jefferson County Metro Government and LOJIC.<br><br>
-        Use of this data is governed by the
-        <a href="https://louisville-metro-opendata-lojic.hub.arcgis.com/pages/terms-of-use-and-license" target="_blank">Louisville Metro Open Data Terms of Use and License</a>.
-        Open data is provided for public access and reuse under Louisville Metro's Open Data Ordinance,
-        which encourages the use of publicly available datasets to promote transparency, civic engagement,
-        and innovation. Data is provided as-is without warranty.<br><br>
-        This tool is an independent project and is not affiliated with or endorsed by Louisville Metro Government.
+        Sourced from the city's public open data portal. Data is provided
+        as-is without warranty. This tool is an independent project and is not
+        affiliated with or endorsed by the city.
       </div>
     </div>
   </div>
@@ -879,6 +877,10 @@ function chipButton(label, question) {
 function renderChips() {
   const groupsEl = document.getElementById('starter-groups');
   const trayEl = document.getElementById('tray-chips');
+  // Idempotent: called once with the shipped defaults for instant paint, then
+  // again once the pack's branding arrives.
+  groupsEl.replaceChildren();
+  trayEl.replaceChildren();
   for (const group of STARTER_GROUPS) {
     const groupEl = document.createElement('div');
     groupEl.className = 'chip-group';
@@ -1490,33 +1492,42 @@ async function streamAnswer(question, opts = {}) {
 // this page hardcodes a city's identity.
 async function applyBranding() {
   try {
-    const cfg = await (await fetch('/api/config')).json();
-    if (cfg.tab_title) document.title = cfg.tab_title;
-    const h1 = document.querySelector('header h1');
-    if (h1 && cfg.bot_name) h1.textContent = cfg.bot_name;
-    const sub = document.querySelector('.subtitle');
-    if (sub && cfg.subtitle) sub.textContent = cfg.subtitle;
-    if (cfg.bot_name) {
-      BOT_NAME = cfg.bot_name;
-      const btn = document.getElementById('submit-btn');
-      if (btn && !isStreaming) btn.textContent = `Ask ${BOT_NAME}`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);  // a hung edge must not strand the UI
+    let cfg;
+    try {
+      cfg = await (await fetch('/api/config', { signal: ctrl.signal })).json();
+    } finally {
+      clearTimeout(timer);
     }
-    const hero = document.querySelector('#starters h2');
-    if (hero && cfg.hero_heading) hero.textContent = cfg.hero_heading;
-    const blurb = document.querySelector('#starters > p');
-    if (blurb && cfg.hero_blurb) blurb.textContent = cfg.hero_blurb;
+    // The endpoint fills every key, so apply UNCONDITIONALLY: a pack without a
+    // branding section must not silently inherit the page's shipped copy.
+    const set = (el, prop, val) => { if (el && val !== undefined) el[prop] = val; };
+    document.title = cfg.tab_title ?? document.title;
+    BOT_NAME = cfg.bot_name || BOT_NAME;
+    set(document.querySelector('header h1'), 'textContent', cfg.bot_name);
+    set(document.querySelector('.subtitle'), 'textContent', cfg.subtitle);
+    set(document.querySelector('#starters h2'), 'textContent', cfg.hero_heading);
+    set(document.querySelector('#starters > p'), 'textContent', cfg.hero_blurb);
+    const about = document.querySelector('.about-tooltip');
+    if (about && cfg.about_html !== undefined) about.innerHTML = cfg.about_html;
     const input = document.getElementById('question');
-    if (input && cfg.input_placeholder) input.placeholder = cfg.input_placeholder;
-    if (input && cfg.input_aria_label) input.setAttribute('aria-label', cfg.input_aria_label);
-    if (Array.isArray(cfg.starter_groups) && cfg.starter_groups.length) {
+    set(input, 'placeholder', cfg.input_placeholder);
+    if (input && cfg.input_aria_label !== undefined) {
+      input.setAttribute('aria-label', cfg.input_aria_label);
+    }
+    const btn = document.getElementById('submit-btn');
+    if (btn && !isStreaming) btn.textContent = `Ask ${BOT_NAME}`;
+    if (Array.isArray(cfg.starter_groups)) {
       STARTER_GROUPS = cfg.starter_groups.map(g => ({ label: g.label, chips: g.chips }));
     }
   } catch (e) {
-    console.warn('Could not load city branding:', e);
+    console.warn('Could not load city branding; keeping shipped defaults:', e);
   }
   renderChips();
 }
-applyBranding();
+renderChips();      // defaults paint at once — never a chip-less landing screen
+applyBranding();    // ...then the pack's branding replaces them
 </script>
 </body>
 </html>

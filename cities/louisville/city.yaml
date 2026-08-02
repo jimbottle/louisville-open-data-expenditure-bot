@@ -20,6 +20,23 @@ branding:
     to 2026.
   input_placeholder: Enter your question about Louisville Metro Government expenditure here...
   input_aria_label: Ask a question about Louisville Metro data
+  # Rendered as HTML into the About tooltip. Authored in the pack (trusted
+  # content) so a city's own attribution, license and disclaimer travel with
+  # it — never another city's legal text.
+  about_html: >-
+    <strong>About this data</strong><br>
+    Data sourced from <a href="https://data.louisvilleky.gov/datasets/"
+    target="_blank" rel="noopener">Louisville Metro Open Data Portal</a>,
+    published by Louisville/Jefferson County Metro Government and LOJIC.<br><br>
+    Use of this data is governed by the <a
+    href="https://louisville-metro-opendata-lojic.hub.arcgis.com/pages/terms-of-use-and-license"
+    target="_blank" rel="noopener">Louisville Metro Open Data Terms of Use and
+    License</a>. Open data is provided for public access and reuse under
+    Louisville Metro's Open Data Ordinance, which encourages the use of
+    publicly available datasets to promote transparency, civic engagement, and
+    innovation. Data is provided as-is without warranty.<br><br>
+    This tool is an independent project and is not affiliated with or endorsed
+    by Louisville Metro Government.
   starter_groups:
     - label: Spending
       chips:

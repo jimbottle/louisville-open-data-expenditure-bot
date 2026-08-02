@@ -548,11 +548,20 @@ async def get_config():
     derived from its own city name — never another city's bot name."""
     b = dict(CONFIG.branding or {})
     city = ((CONFIG.city or {}).get("name") or "").strip()
+    who = city or "this city"
+    # Every key the frontend reads gets a value, so a pack without a branding
+    # section renders ITS OWN neutral copy rather than inheriting whatever the
+    # page happened to ship with.
     b.setdefault("bot_name", city or "Open Data Bot")
     b.setdefault("tab_title", CONFIG.title)
     # Suppress the whole sentence when there is no city name rather than
     # emitting a dangling "The publicly shared data from".
     b.setdefault("subtitle", f"The publicly shared data from {city}" if city else "")
+    b.setdefault("hero_heading", f"Ask me about {who}'s public spending data.")
+    b.setdefault("hero_blurb", f"Natural language queries run against {who}'s published open data.")
+    b.setdefault("input_placeholder", f"Enter your question about {who}'s data here...")
+    b.setdefault("input_aria_label", f"Ask a question about {who}'s data")
+    b.setdefault("about_html", "")
     b.setdefault("starter_groups", [])
     return b
 
