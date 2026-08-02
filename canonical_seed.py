@@ -48,12 +48,15 @@ ACRONYMS = {
     "HVAC", "IT", "EMS", "EMT", "HR", "PD", "FD", "DBA", "II", "III", "IV",
     "V", "VI", "VII", "VIII", "IX", "X", "AT&T", "LG&E", "UPS", "IBM", "HP",
     "3M", "CDW", "ADT", "GE", "TV", "AV", "PPE", "ID", "GIS", "DNA",
-    # State and region abbreviations appear inside payee names ("WASTE
-    # MANAGEMENT OF KY LLC", "KY RETIREMENT SYSTEM"). They are listed here
-    # rather than left to _looks_like_acronym because that rule now treats Y
-    # as a vowel, which would demote KY to "Ky" — in the one state this repo
-    # actually runs in.
-    "KY", "NKY", "NY", "WY", "WV", "TN", "IN", "OH",
+    # State abbreviations appear inside payee names ("WASTE MANAGEMENT OF KY
+    # LLC", "KY RETIREMENT SYSTEM"). ONLY the ones carrying a Y belong here:
+    # they are the ones _looks_like_acronym stopped recognizing when it began
+    # treating Y as a vowel. Vowel-less abbreviations (TN, WV) the heuristic
+    # still handles, and abbreviations that are also English words must NOT be
+    # listed — this set is consulted before JOINERS, so "IN" would shadow the
+    # preposition and shout it: "Invest IN Neighborhoods", "IN the Line of
+    # Duty" — real curated rows in the Cincinnati pack.
+    "KY", "NKY", "NY", "WY",
 }
 # "a"/"an" are deliberately absent: a lone A mid-name is almost always an
 # initial ("A & A SAFETY"), and lowercasing it reads as a typo.

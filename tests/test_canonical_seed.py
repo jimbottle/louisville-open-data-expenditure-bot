@@ -135,6 +135,17 @@ def test_real_words_are_never_preserved_as_acronyms():
     # read as words in a name.
     ("st matthews health", "St Matthews Health"),
     ("smith wm jr", "Smith Wm Jr"),
+    # The other direction: treating Y as a vowel demoted the state
+    # abbreviation of the one state this repo runs in. Both rows below are
+    # real in cities/louisville/payee_map.csv.
+    ("ky retirement system", "KY Retirement System"),
+    ("waste management of ky llc", "Waste Management of KY LLC"),
+    # ...and the cost of over-correcting that: ACRONYMS is consulted before
+    # JOINERS, so a state abbreviation that is also an English word shouts the
+    # word. "IN THE LINE OF DUTY" and "INVEST IN NEIGHBORHOODS" are curated
+    # rows in the Cincinnati pack.
+    ("partners in health", "Partners in Health"),
+    ("invest in neighborhoods", "Invest in Neighborhoods"),
 ])
 def test_words_the_vowel_rule_cannot_see_are_not_shouted(raw, expected):
     """Judging the case-folded shape extended the acronym rule to lowercase
@@ -204,7 +215,10 @@ def test_main_refuses_a_relative_out_that_names_the_live_map(tmp_path, monkeypat
     pack = _tiny_pack(tmp_path)
     before = (pack / "payee_map.csv").read_text()
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(SystemExit):
+    # Matched, not bare: argparse and load_city_config both raise SystemExit
+    # before the guard is reached, so a renamed flag or a schema change would
+    # otherwise make this pass without ever exercising it.
+    with pytest.raises(SystemExit, match="refusing to overwrite"):
         cs.main(["--city", "pack/city.yaml", "--out", "pack/payee_map.csv"])
     assert (pack / "payee_map.csv").read_text() == before, "curated map was written"
 
@@ -227,6 +241,7 @@ def test_main_says_what_it_replaced_when_rewriting_a_draft(tmp_path, monkeypatch
     """The default --out is the file a curator may have been editing. Replacing
     it is correct; doing so silently is not."""
     pack = _tiny_pack(tmp_path)
+    before = (pack / "payee_map.csv").read_text()
     draft = pack / "payee_map.csv.draft.csv"
     draft.write_text("source,canonical\nOLD ONE,Old One\nOLD TWO,Old Two\n")
     monkeypatch.chdir(tmp_path)
@@ -234,7 +249,9 @@ def test_main_says_what_it_replaced_when_rewriting_a_draft(tmp_path, monkeypatch
     err = capsys.readouterr().err
     assert "replaced an existing draft" in err and "2 rows" in err
     assert "OLD ONE" not in draft.read_text(), "a draft is a regeneration, not a merge"
-    assert "APCD" in (pack / "payee_map.csv").read_text(), "live map was touched"
+    # Byte-identical, not merely "APCD still present" — appending the draft
+    # rows to the live map would satisfy a substring check.
+    assert (pack / "payee_map.csv").read_text() == before, "live map was touched"
 
 
 # ── clustering and draft rows ────────────────────────────────────────────────
