@@ -561,7 +561,15 @@ async def get_config():
     b.setdefault("hero_blurb", f"Natural language queries run against {who}'s published open data.")
     b.setdefault("input_placeholder", f"Enter your question about {who}'s data here...")
     b.setdefault("input_aria_label", f"Ask a question about {who}'s data")
-    b.setdefault("about_html", "")
+    # Default to the same neutral copy the markup ships: an empty value would
+    # wipe the placeholder and leave the About affordance an empty box, losing
+    # the as-is/not-affiliated disclaimer that is the reason it exists.
+    b.setdefault("about_html", (
+        "<strong>About this data</strong><br>"
+        f"Sourced from {who}'s public open data portal. Data is provided as-is "
+        "without warranty. This tool is an independent project and is not "
+        "affiliated with or endorsed by the city."
+    ))
     b.setdefault("starter_groups", [])
     return b
 

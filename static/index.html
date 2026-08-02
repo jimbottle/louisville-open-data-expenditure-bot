@@ -1510,7 +1510,9 @@ async function applyBranding() {
     set(document.querySelector('#starters h2'), 'textContent', cfg.hero_heading);
     set(document.querySelector('#starters > p'), 'textContent', cfg.hero_blurb);
     const about = document.querySelector('.about-tooltip');
-    if (about && cfg.about_html !== undefined) about.innerHTML = cfg.about_html;
+    // Empty is never applied: the shipped placeholder carries the as-is /
+    // not-affiliated disclaimer and must not be blanked away.
+    if (about && cfg.about_html) about.innerHTML = cfg.about_html;
     const input = document.getElementById('question');
     set(input, 'placeholder', cfg.input_placeholder);
     if (input && cfg.input_aria_label !== undefined) {

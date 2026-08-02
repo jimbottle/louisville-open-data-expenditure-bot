@@ -121,14 +121,17 @@ def test_frontend_city_literals_live_only_in_the_fallback_defaults():
     start = html.index("const DEFAULT_STARTER_GROUPS")
     end = html.index("let STARTER_GROUPS = DEFAULT_STARTER_GROUPS;")
     outside = html[:start] + html[end:]
+    # Case-insensitive: lowercase leaks (data.louisvilleky.gov,
+    # louisville.raylytics.io) are exactly the class of literal that just
+    # moved out of the About block.
     stray = [ln.strip() for ln in outside.splitlines()
-             if "Louisville" in ln or "LMPD" in ln]
+             if "louisville" in ln.lower() or "lmpd" in ln.lower()]
     # Only nodes applyBranding() actually rewrites may keep Louisville text as
     # the pre-fetch first paint. The About block used to be whitelisted here
     # without being overridden anywhere — six lines of Louisville attribution,
     # license and disclaimer that a Cincinnati deploy would have rendered.
-    overridden = ("<title>", "<h1>", 'class="subtitle"', "<h2>", "<p>Natural language",
-                  'id="question"')
+    overridden = ("<title>Lou", "<h1>Lou<", 'class="subtitle"', "<h2>Ask me about",
+                  "<p>Natural language", 'id="question"')
     unexpected = [ln for ln in stray if not any(tok in ln for tok in overridden)]
     assert not unexpected, f"city literals outside branding control: {unexpected}"
 
@@ -136,22 +139,78 @@ def test_frontend_city_literals_live_only_in_the_fallback_defaults():
 def test_branding_covers_every_overridable_frontend_string():
     cfg = load_city_config(LOUISVILLE)
     for key in ("bot_name", "tab_title", "subtitle", "hero_heading", "hero_blurb",
-                "input_placeholder", "input_aria_label", "starter_groups"):
+                "input_placeholder", "input_aria_label", "about_html", "starter_groups"):
         assert cfg.branding.get(key), f"branding missing {key}"
 
 
 def test_default_starter_groups_match_the_pack():
-    """The chips exist twice — in the pack and as the JS fallback. They must
-    agree, or a failed /api/config would offer questions the pack no longer
-    has (and warm_cache no longer pre-answers)."""
+    """The chips exist twice — in the pack and as the JS fallback. Labels,
+    questions AND order must agree, or a failed /api/config would render
+    different buttons (and possibly un-warmed questions)."""
     import re
     cfg = load_city_config(LOUISVILLE)
     html = open(os.path.join(REPO, "static", "index.html")).read()
     block = html[html.index("const DEFAULT_STARTER_GROUPS"):
                  html.index("let STARTER_GROUPS = DEFAULT_STARTER_GROUPS;")]
-    # each chip is ['label', 'question'] — take the second string of each pair
-    js_questions = {m[1] for m in re.findall(r"\['([^']*)',\s*'([^']*)'\]", block)}
-    pack_questions = {c[1] for g in cfg.branding["starter_groups"] for c in g["chips"]}
-    missing = pack_questions - js_questions
-    extra = js_questions - pack_questions
-    assert not missing and not extra, f"fallback drift — missing {missing}, extra {extra}"
+    js_pairs = re.findall(r"\['([^']*)',\s*'([^']*)'\]", block)
+    pack_pairs = [tuple(c) for g in cfg.branding["starter_groups"] for c in g["chips"]]
+    # Count first, so a regex that failed to match reads as a regex problem
+    # rather than as chip drift.
+    assert len(js_pairs) == len(pack_pairs), (
+        f"extracted {len(js_pairs)} JS chips vs {len(pack_pairs)} in the pack — "
+        "if the counts differ the pair regex may simply have missed a chip "
+        "(e.g. an apostrophe in the text)"
+    )
+    assert js_pairs == pack_pairs, "fallback chips drift from the pack (label, question or order)"
+
+
+# ── GET /api/config (the contract applyBranding() depends on verbatim) ───────
+
+FRONTEND_KEYS = ("bot_name", "tab_title", "subtitle", "hero_heading", "hero_blurb",
+                 "input_placeholder", "input_aria_label", "about_html", "starter_groups")
+
+
+def _get_config():
+    import asyncio
+    import app
+    return asyncio.run(app.get_config())
+
+
+def test_api_config_returns_every_key_the_frontend_reads():
+    cfg = _get_config()
+    for key in FRONTEND_KEYS:
+        assert key in cfg, f"/api/config omits {key}, which applyBranding() reads"
+    for group in cfg["starter_groups"]:
+        assert isinstance(group.get("chips"), list)
+        for chip in group["chips"]:
+            assert len(chip) == 2, "each chip must stay [label, question]"
+
+
+def test_api_config_defaults_use_the_packs_own_city(monkeypatch):
+    """A pack with no branding section must render ITS OWN neutral copy —
+    never another city's identity or an empty About box."""
+    import app
+    from city_config import CityConfig
+    monkeypatch.setattr(
+        app, "CONFIG", CityConfig({"city": {"name": "Cincinnati"}}, "."),
+    )
+    cfg = _get_config()
+    for key in FRONTEND_KEYS:
+        assert key in cfg
+    assert cfg["bot_name"] == "Cincinnati"
+    assert "Cincinnati" in cfg["hero_heading"] and "Louisville" not in cfg["hero_heading"]
+    assert "Cincinnati" in cfg["input_placeholder"]
+    # the About box must never come back empty — it carries the disclaimer
+    assert "not" in cfg["about_html"] and "affiliated" in cfg["about_html"]
+    assert "Louisville" not in cfg["about_html"]
+    assert cfg["starter_groups"] == []
+
+
+def test_api_config_handles_a_pack_with_no_city_name(monkeypatch):
+    import app
+    from city_config import CityConfig
+    monkeypatch.setattr(app, "CONFIG", CityConfig({}, "."))
+    cfg = _get_config()
+    assert cfg["bot_name"] == "Open Data Bot"
+    assert cfg["subtitle"] == ""          # suppressed, not a dangling sentence
+    assert cfg["about_html"]              # disclaimer still present
