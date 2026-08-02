@@ -39,7 +39,43 @@ dependencies, and a clear integration path.
    interpreter LLM ignore irrelevant context (it sees the chunks and the
    question) and/or (b) the embeddings upgrade.
 
-## Integration design (next step, not in this spike)
+## Integration: SHIPPED 2026-08-02 (louisville-open-data-c1i)
+
+Live at louisville.raylytics.io. What the build changed from the design below,
+and what only showed up under a real deployment:
+
+- **Corpus source moved into the city pack** (`rag:` block: legistar client,
+  matter type ids, since, min_score, k). A second Legistar city is config.
+- **The footer lists only what the answer cited**, not what BM25 returned.
+  Retrieval fires on every question, so an answer about executive salaries
+  came back with a $1,000 neighborhood appropriation attached at score 3.1.
+  Letting the model's decision to name a file number act as the relevance
+  filter solves the calibration problem that finding 3 describes, without
+  needing embeddings.
+- **Three deployment failures the design didn't anticipate**, each of which
+  silently disabled citations while everything looked healthy:
+  1. `rag.py` wasn't in the Dockerfile's COPY list.
+  2. The container had no DuckDB FTS extension — `LOAD` does not install one,
+     so every request logged a warning and answered without citations. Startup
+     now runs a real retrieval probe instead of stat-ing the corpus file.
+  3. The corpus path was relative (`data/…`), which doesn't exist inside the
+     container; the pack now declares a bare filename resolved against
+     DATA_DIR.
+- **The refinement pass deleted every citation.** Its rubric says anything the
+  RESULTS table doesn't support must go, and a file number never appears in a
+  results table. It now receives the same document block, with a bounded
+  carve-out that keeps a cited file number but can't invent one.
+- **The first citation rule was too strict** ("only when a document explains a
+  NUMBER") and never fired: council legislation explains the *program*, not
+  the line items. Loosened to "what the money was for or why", with the hard
+  line that results remain the only source of figures.
+
+Verified end-to-end in production: "What did Louisville spend American Rescue
+Plan money on?" answers from the data and adds "Priority spending areas were
+set by Resolution R-083-21" with a Legistar link; "What are the highest paid
+positions?" retrieves three weak matches, cites none, and renders no footer.
+
+## Integration design (as specified before the build)
 
 - **Routing: always-retrieve, threshold-gated.** Run `retrieve()` on every
   question (~ms, local); include `format_context()` in the *interpretation*
