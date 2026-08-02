@@ -529,6 +529,25 @@ def test_the_arp_mapping_is_pinned_in_the_prompt_itself():
     assert bullet and "is_data_artifact = FALSE" in bullet[0]
 
 
+def test_prompt_topic_mappings_name_values_that_exist(con):
+    """Every agency_canonical the SQL prompt hardcodes must still exist in the
+    data — a renamed agency turns a topical question into a silent zero.
+
+    Distinct from the prompt-pinning tests above, which only prove app.py still
+    contains the string: the prompt can name 'Metro Technology Services'
+    forever while the canonical map renames it, and every source-text assertion
+    stays green while the query returns nothing."""
+    agencies = {r[0] for r in con.execute(
+        "SELECT DISTINCT agency_canonical FROM expenditures WHERE agency_canonical IS NOT NULL"
+    ).fetchall()}
+    src = _app_source()
+    for name in ("Louisville Metro Police Department", "Louisville Fire",
+                 "Parks & Recreation", "Public Works & Assets",
+                 "Metro Technology Services"):
+        assert name in src, f"{name} no longer referenced in the prompt"
+        assert name in agencies, f"prompt names agency '{name}' that is not in the data"
+
+
 # ── humanize_text: labels belong in tables, not in the middle of sentences ────
 
 def test_prose_mode_leaves_ordinary_english_words_alone():

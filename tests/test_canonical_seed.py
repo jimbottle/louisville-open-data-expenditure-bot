@@ -105,6 +105,19 @@ def test_a_token_is_cased_the_same_however_many_words_follow_it():
         assert alone == in_phrase, f"{token}: {alone!r} alone vs {in_phrase!r} in phrase"
 
 
+def test_an_acronym_is_recovered_from_a_lowercase_export_too():
+    """The acronym rule keyed on token.isupper(), but the caller reaches it for
+    all-lowercase names as well — so 'hntb ohio' became 'Hntb Ohio' while the
+    identical 'HNTB OHIO' became 'HNTB Ohio', from nothing but the portal's
+    shift key. (Only vowel-less tokens qualify at all: TLO and APCD carry a
+    vowel and are title-cased in either case, a curator's fix by design.)"""
+    for lower, upper in (("cdm smith inc", "CDM SMITH INC"),
+                         ("hntb ohio", "HNTB OHIO"),
+                         ("lmpd unit", "LMPD UNIT")):
+        assert cs.smart_title(lower) == cs.smart_title(upper)
+    assert cs.smart_title("hntb ohio") == "HNTB Ohio"
+
+
 def test_real_words_are_never_preserved_as_acronyms():
     """The cost of guessing wrong in this direction is invisible: 'AIR
     Pollution Control District' looks like a data error, not a casing one."""
@@ -305,6 +318,32 @@ def test_merge_on_a_missing_file_is_just_the_draft(tmp_path):
     assert merged == [("A", "B")] and kept == 0 and added == 1
 
 
+def test_the_merged_map_is_one_sorted_run(tmp_path):
+    """Two sorted runs concatenated means every re-run appends an unsorted
+    block, and the next curation diff is noise instead of the changed rows."""
+    live = tmp_path / "m.csv"
+    live.write_text("source,canonical\nBRAVO,Bravo\nZULU,Zulu\n")
+    merged, _, _ = cs.merge_with_existing(
+        str(live), [("ALPHA", "Alpha"), ("MIKE", "Mike")])
+    sources = [r[0] for r in merged]
+    assert sources == sorted(sources) == ["ALPHA", "BRAVO", "MIKE", "ZULU"]
+
+
+def test_merging_a_case_insensitive_pack_adds_no_unreachable_branch(tmp_path):
+    """The engine compiles those specs to WHEN UPPER(source) = ..., so a
+    curated ACME INC already answers the draft's Acme Inc. Writing both would
+    re-introduce on merge exactly what draft_rows folds out."""
+    live = tmp_path / "m.csv"
+    live.write_text("source,canonical\nACME INC,Acme Inc\n")
+    merged, kept, added = cs.merge_with_existing(
+        str(live), [("Acme Inc", "Acme Inc"), ("BETA LLC", "Beta Llc")],
+        case_insensitive=True)
+    assert added == 1 and kept == 1
+    keys = [r[0].upper() for r in merged]
+    assert len(keys) == len(set(keys))
+    assert dict(merged)["ACME INC"] == "Acme Inc"
+
+
 # ── the map the engine can actually reach ────────────────────────────────────
 
 def test_case_insensitive_specs_do_not_emit_unreachable_branches():
@@ -327,6 +366,11 @@ def test_the_shipped_cincinnati_map_has_no_unreachable_rows():
         rows = list(_csv.reader(f))[1:]
     keys = [r[0].upper() for r in rows]
     assert len(keys) == len(set(keys)), "case-duplicate sources are dead branches"
+    # A merge that appends its new rows in a second sorted run leaves the file
+    # in interleaved regions, and the next curation diff becomes noise rather
+    # than the handful of rows that actually changed.
+    sources = [r[0] for r in rows]
+    assert sources == sorted(sources), "the shipped map must be one sorted run"
 
 
 def test_the_shipped_cincinnati_map_has_no_single_case_labels():
@@ -343,7 +387,7 @@ def test_the_shipped_cincinnati_map_has_no_single_case_labels():
     assert not shouted_words, f"shouted canonical labels: {shouted_words[:5]}"
 
 
-def test_load_weights_reads_dollars_and_skips_artifact_rows(tmp_path, monkeypatch):
+def test_load_weights_reads_dollars_and_skips_artifact_rows(monkeypatch):
     """The one function that touches DuckDB had no test at all."""
     import duckdb
     from city_config import CityConfig
@@ -357,7 +401,6 @@ def test_load_weights_reads_dollars_and_skips_artifact_rows(tmp_path, monkeypatc
         ("ARTIFACT VENDOR", 999_000_000.0, True),
         ("ARTIFACT VENDOR", 25.0, False),
     ])
-    monkeypatch.setattr(cs, "load_weights", cs.load_weights)
     import data_model
     monkeypatch.setattr(data_model, "load_all_data", lambda *a, **k: con)
 
@@ -369,7 +412,7 @@ def test_load_weights_reads_dollars_and_skips_artifact_rows(tmp_path, monkeypatc
     assert weights["ARTIFACT VENDOR"] == 25.0
 
 
-def test_load_weights_falls_back_to_row_counts(tmp_path, monkeypatch):
+def test_load_weights_falls_back_to_row_counts(monkeypatch):
     import duckdb
     from city_config import CityConfig
 

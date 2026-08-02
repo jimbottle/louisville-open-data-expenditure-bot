@@ -399,14 +399,23 @@ def test_file_numbers_match_on_token_boundaries(hits):
         "Spending rose in 2021 sharply.") == [], "all-digit file numbers are unsafe tokens"
 
 
-def test_the_app_wires_documents_into_both_llm_calls():
-    """Both call sites are one keyword away from silently reverting: the draft
-    loses its context, or the refiner strips every citation again."""
+def test_the_app_wires_documents_into_all_three_llm_calls():
+    """Each call site is one keyword away from silently reverting: the draft
+    loses its context, the zero-row explanation answers uncited, or the refiner
+    strips every citation again. Asserted per site rather than as a total, so
+    the failure names the branch that lost it and a fourth legitimate call site
+    doesn't fail the test for the wrong reason."""
     src = read_repo_file("app.py")
-    assert src.count("documents=documents") == 3, (
-        "expected the draft, the zero-row explanation and the refine pass "
-        "to all receive the retrieved documents"
-    )
+    zero_row = src[src.index("if len(result_df) == 0:"):
+                   src.index('yield send("log", {"content": "Interpreting results..."})')]
+    draft = src[src.index('yield send("log", {"content": "Interpreting results..."})'):
+                src.index("refine_events_with_fallback(")]
+    refine = src[src.index("refine_events_with_fallback("):
+                 src.index('_sources_event(doc_hits, "".join(served_text)')]
+    for name, region in (("zero-row explanation", zero_row),
+                         ("draft interpretation", draft),
+                         ("refine pass", refine)):
+        assert "documents=documents" in region, f"{name} lost the retrieved documents"
 
 
 def test_the_interpretation_stream_is_humanized_as_prose_not_as_a_table():
@@ -426,8 +435,36 @@ def test_typographic_dashes_still_count_as_a_citation():
     import app
     hits = [{"file_no": "R-083-21", "url": "u", "matter_type": "Resolution",
              "intro_date": "2021-08-09", "text": "priorities"}]
-    for dash in ("‐", "‑", "‒", "–", "—", "−"):
+    for dash in ("‐", "‑", "‒", "–", "−"):
         answer = f"Resolution R{dash}083{dash}21 established the priorities."
         assert app._cited_documents(hits, answer), f"missed U+{ord(dash):04X}"
-    # the boundary guard must survive normalization
+    # the boundary guard must survive the dash tolerance
     assert app._cited_documents(hits, "See R‑083‑21‑A for more.") == []
+
+
+def test_a_dash_used_as_prose_punctuation_does_not_block_the_citation():
+    """The other direction, and the more common one: em dashes flanking an
+    ASCII file number are punctuation, not part of the identifier. Folding them
+    into hyphens made them token characters and silently dropped the footer on
+    answers that had matched before."""
+    import app
+    hits = [{"file_no": "R-083-21", "url": "u", "matter_type": "Resolution",
+             "intro_date": "2021-08-09", "text": "priorities"}]
+    for answer in (
+        "Two measures—R-083-21 and O-120-21—were adopted.",
+        "The largest areas—R-083-21—were set that year.",
+        "Council acted twice―R-083-21―in the same session.",
+    ):
+        assert app._cited_documents(hits, answer), f"dropped: {answer!r}"
+
+
+def test_an_em_dash_joined_pair_cites_both_ends():
+    """Two file numbers joined as an aside or a range. Documents the limit of
+    the split: an en dash between them (R-083-20–R-083-21) is indistinguishable
+    from an en dash *inside* an identifier (R–083–21), and identifier wins — so
+    that form stays uncited. Em dash, the far more common prose form, matches."""
+    import app
+    hits = [{"file_no": "R-083-21", "url": "u", "matter_type": "Resolution",
+             "intro_date": "2021-08-09", "text": "priorities"}]
+    assert app._cited_documents(hits, "Resolutions R-083-20—R-083-21 were adopted.")
+    assert app._cited_documents(hits, "Resolutions R-083-20–R-083-21 were adopted.") == []

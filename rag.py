@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 
 import duckdb
@@ -163,7 +164,13 @@ def _build_db(rows: list, db_path: str) -> int:
         raise
 
 
-_FTS_INSTALL_FAILED = False
+# How long a failed INSTALL suppresses the next attempt. Long enough that a
+# blocked-egress container isn't paying a connect timeout per question, short
+# enough that a transient blip during the very first query doesn't disable
+# retrieval until the container is recreated.
+_FTS_RETRY_AFTER = 300.0
+_FTS_INSTALL_LOCK = threading.Lock()
+_fts_install_failed_at = 0.0
 
 
 def _load_fts(con) -> None:
@@ -175,25 +182,37 @@ def _load_fts(con) -> None:
     dev checkout or an older image working instead of silently dropping
     citations.
 
-    A failed INSTALL is remembered, because INSTALL reaches out to
-    extensions.duckdb.org: in a container with blocked or slow egress, retrying
-    per question would make every request pay a full connect timeout before
-    answering uncited. After the first failure the LOAD error propagates
-    immediately, as it did before the fallback existed."""
-    global _FTS_INSTALL_FAILED
+    A failed INSTALL is remembered for _FTS_RETRY_AFTER seconds, because
+    INSTALL reaches out to extensions.duckdb.org: in a container with blocked
+    or slow egress, retrying per question would make every request pay a full
+    connect timeout before answering uncited. Within that window the LOAD error
+    propagates immediately, as it did before the fallback existed.
+
+    The suppression expires rather than lasting the process lifetime, and every
+    suppressed attempt logs: a permanently latched process that says so once is
+    the same silent-citation-loss failure the startup probe exists to catch."""
+    global _fts_install_failed_at
     try:
         con.execute("LOAD fts;")
         return
     except duckdb.Error:
-        if _FTS_INSTALL_FAILED:
+        pass
+    with _FTS_INSTALL_LOCK:
+        since = time.monotonic() - _fts_install_failed_at
+        if _fts_install_failed_at and since < _FTS_RETRY_AFTER:
+            log.warning("DuckDB FTS extension unavailable (install failed %.0fs "
+                        "ago, retrying in %.0fs); answering without documents",
+                        since, _FTS_RETRY_AFTER - since)
+            raise duckdb.Error("fts extension unavailable; install recently failed")
+        try:
+            con.execute("INSTALL fts; LOAD fts;")
+        except duckdb.Error:
+            _fts_install_failed_at = time.monotonic()
+            log.warning("DuckDB FTS extension could not be installed; document "
+                        "retrieval is disabled for the next %.0fs",
+                        _FTS_RETRY_AFTER)
             raise
-    try:
-        con.execute("INSTALL fts; LOAD fts;")
-    except duckdb.Error:
-        _FTS_INSTALL_FAILED = True
-        log.warning("DuckDB FTS extension could not be installed; document "
-                    "retrieval is disabled for this process")
-        raise
+        _fts_install_failed_at = 0.0
 
 
 def retrieve(question: str, k: int = 3, db_path: str = DEFAULT_DB, min_score: float = 3.0) -> list:

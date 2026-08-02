@@ -83,23 +83,29 @@ def normalize(name: str) -> str:
 
 
 def _looks_like_acronym(token: str) -> bool:
-    """Is this ONE already-shouted token an acronym rather than a word?
+    """Is this ONE single-case token an acronym rather than a word?
 
     Applied per token, not per name: a name-leading acronym is the common
-    municipal case (UC HEALTH, CDM SMITH INC, TLO LLC), and judging the whole
+    municipal case (UC HEALTH, CDM SMITH INC, HNTB OHIO), and judging the whole
     string preserved a token alone but mangled the identical token the moment
     a second word followed it.
 
     Only vowel-LESS tokens qualify, which is the one signal that is actually
-    unambiguous: CDM, TLO, HNTB, JWC, KGL, LMPD cannot be words. Anything
-    looser misfires on real names — vowel *density* calls WORKS and SMITH
-    acronyms, and "short and shouted" turns AIR Pollution Control District
-    and VETS Securing America into nonsense. Acronyms that do carry a vowel
-    (APCD, UC, NAFA) come out title-cased and are a curator's fix; that is the
-    error this draft is willing to make, because it is visible and local,
-    unlike a wrongly preserved word."""
-    return (token.isupper() and token.isalpha() and 2 <= len(token) <= 5
-            and not any(c in "AEIOU" for c in token))
+    unambiguous: CDM, HNTB, JWC, KGL, LMPD cannot be words. Anything looser
+    misfires on real names — vowel *density* calls WORKS and SMITH acronyms,
+    and "short and shouted" turns AIR Pollution Control District and VETS
+    Securing America into nonsense. Acronyms that do carry a vowel (APCD, UC,
+    TLO, NAFA) come out title-cased and are a curator's fix; that is the error
+    this draft is willing to make, because it is visible and local, unlike a
+    wrongly preserved word.
+
+    Judged on the case-folded shape, not on token.isupper(): the caller has
+    already established the whole name is single-case, and an all-lowercase
+    export is as much a casing accident as a shouted one. Keying on isupper()
+    title-cased "hntb ohio" to "Hntb" while "HNTB OHIO" became "HNTB"."""
+    bare = token.upper()
+    return (bare.isalpha() and 2 <= len(bare) <= 5
+            and not any(c in "AEIOU" for c in bare))
 
 
 def smart_title(name: str) -> str:
@@ -126,8 +132,8 @@ def smart_title(name: str) -> str:
             out.append(word.title())
         elif i and bare.lower() in JOINERS:
             out.append(word.lower())
-        # A short, already-shouted token is an acronym the ACRONYMS set has
-        # never heard of (APCD, LMPD, UC, TLO) — see _looks_like_acronym.
+        # A short, vowel-less token is an acronym the ACRONYMS set has never
+        # heard of (LMPD, CDM, HNTB) — see _looks_like_acronym.
         elif _looks_like_acronym(bare):
             out.append(word.upper())
         else:
@@ -306,14 +312,25 @@ def draft_rows(clusters: list, min_cluster: int = 2, case_insensitive: bool = Fa
     return rows
 
 
-def merge_with_existing(path: str, rows: list) -> tuple:
+def merge_with_existing(path: str, rows: list, case_insensitive: bool = False) -> tuple:
     """Fold a draft into whatever curation already exists at `path`.
 
     The seeder reproduces only the orthographic merges; roughly 92% of a
     mature map is semantic work it cannot regenerate
     (docs/canonical-seeding.md). Writing a draft straight over a live map
     would therefore delete most of it silently, so existing rows always win
-    and are always carried through. Returns (merged rows, kept, added)."""
+    and are always carried through. Returns (merged rows, kept, added).
+
+    case_insensitive mirrors the pack's spec flag, for the same reason
+    draft_rows takes it: the engine compiles those specs to
+    `WHEN UPPER(source) = ...`, so a curated `ACME INC` already answers the
+    draft's `Acme Inc`. Keying the lookup case-sensitively would write both
+    and leave the second an unreachable branch — re-introducing on merge
+    exactly what the folding in draft_rows removes.
+
+    The result is sorted as one sequence. Concatenating a sorted existing
+    block with a sorted added block leaves the file in two runs, so the next
+    curation diff is noise rather than the handful of rows that changed."""
     existing = {}
     if os.path.exists(path):
         with open(path, newline="") as f:
@@ -322,8 +339,19 @@ def merge_with_existing(path: str, rows: list) -> tuple:
             for row in reader:
                 if len(row) >= 2:
                     existing[row[0]] = row[1]
-    added = [(src, canon) for src, canon in rows if src not in existing]
-    merged = sorted(existing.items()) + sorted(added)
+
+    def fold(src: str) -> str:
+        return src.upper() if case_insensitive else src
+
+    seen = {fold(src) for src in existing}
+    added = []
+    for src, canon in rows:
+        key = fold(src)
+        if key in seen:
+            continue
+        seen.add(key)
+        added.append((src, canon))
+    merged = sorted(list(existing.items()) + added)
     return merged, len(existing), len(added)
 
 
@@ -485,9 +513,17 @@ def main(argv=None) -> int:
     suggested |= {c.key for pair in initialisms for c in pair}
     residual = residual_clusters(clusters, suggested)
 
-    # --force writes at the live map, which is mostly semantic rows the seeder
-    # cannot regenerate — so it MERGES rather than replaces. Curated rows win.
-    written, kept, added = merge_with_existing(out_path, rows)
+    # Writing at the live map means writing over mostly semantic rows the
+    # seeder cannot regenerate — so that path MERGES rather than replaces and
+    # curated rows win. A draft is the opposite: a fresh regeneration of the
+    # current data. Merging into a stale draft would preserve every row of it,
+    # so a spelling that no longer exists — or a label the tool would now
+    # compute differently — would survive into curation unnoticed.
+    if out_path == map_path:
+        written, kept, added = merge_with_existing(
+            out_path, rows, case_insensitive=bool(spec.get("case_insensitive")))
+    else:
+        written, kept, added = sorted(rows), 0, len(rows)
     write_map(out_path, written)
     print(f"wrote {len(written):,} rows -> {out_path}", file=sys.stderr)
     if kept:

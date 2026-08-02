@@ -731,10 +731,22 @@ def humanize_prose(text: str) -> str:
     return humanize_text(text, prose=True)
 
 
-# Every Unicode dash a model reaches for when typesetting an identifier.
-# The model writes "R\u2011083\u201121" (non-breaking hyphens) as readily as
-# "R-083-21", and the file numbers we match against are always ASCII.
-_DASHES = str.maketrans({c: "-" for c in "\u2010\u2011\u2012\u2013\u2014\u2015\u2212"})
+# The dashes seen in production *inside* an identifier: the model writes
+# "R\u2011083\u201121" (non-breaking hyphens) as readily as "R-083-21", and the
+# file numbers we match against are always ASCII.
+#
+# Em dash and horizontal bar are deliberately absent. Those are prose
+# punctuation \u2014 "two measures\u2014R-083-21 and O-120-21\u2014were adopted" \u2014 and
+# an em dash flanked by word characters is far more common in model prose than
+# a fancy dash inside an identifier. Folding them to hyphens would make them
+# token characters and block the citation they surround.
+_INNER_DASHES = "\u2010\u2011\u2012\u2013\u2212"
+# A file number's own separators may arrive as any of those.
+_SEP = f"[-{_INNER_DASHES}]"
+# What may not sit against a citation, so R-57-21 does not match inside
+# R-57-215 and R-083-21 does not match inside R-083-21-A. The ASCII hyphen is
+# last in the class so it needs no escaping.
+_BOUNDARY = f"[\\w{_INNER_DASHES}-]"
 
 
 def _cited_documents(doc_hits: list, answer_text: str) -> list:
@@ -752,18 +764,25 @@ def _cited_documents(doc_hits: list, answer_text: str) -> list:
     prose ("2021" in a fiscal-year sentence) and attach an unrelated ordinance
     as a source — the exact failure this function exists to prevent. R-57-21
     is also a substring of R-57-215."""
-    # Normalize typographic dashes first: an answer citing "R\u2011083\u201121"
-    # is citing R-083-21, and matching the raw text drops the footer on a
-    # citation the reader can plainly see.
-    text = (answer_text or "").translate(_DASHES)
+    # The file number is made dash-tolerant rather than the answer being
+    # rewritten: an answer citing "R\u2011083\u201121" is citing R-083-21, but
+    # normalizing the prose would turn the em dashes in "measures\u2014R-083-21 and"
+    # into token characters and drop a citation that matched before.
+    text = answer_text or ""
     cited = []
     for h in doc_hits:
         fn = h.get("file_no")
         # An all-digit or 1-2 character file number is not a safe token to
-        # look for in prose at all; no citation beats a wrong one.
+        # look for in prose at all; no citation beats a wrong one. Logged
+        # because the alternative \u2014 a pack whose file numbers are all short \u2014
+        # is silently indistinguishable from the model citing nothing.
         if not fn or len(fn) < 3 or fn.isdigit():
+            if fn:
+                log.debug("Retrieved file number %r is too short or all-digit "
+                          "to match safely in prose; it can never be cited", fn)
             continue
-        if re.search(rf"(?<![\w-]){re.escape(fn.translate(_DASHES))}(?![\w-])", text):
+        pattern = _SEP.join(re.escape(part) for part in fn.split("-"))
+        if re.search(rf"(?<!{_BOUNDARY}){pattern}(?!{_BOUNDARY})", text):
             cited.append(h)
     return cited
 
@@ -1010,7 +1029,13 @@ Explain in plain text (no markdown) why this likely returned no results based on
                     empty_served.append(text)
                     yield send("interpretation", {"content": text})
             except Exception:
-                yield send("interpretation", {"content": "I wasn't able to find any data matching that question. Try broadening your search or rephrasing."})
+                # The footer cites against the text actually served, so the
+                # fallback has to join it: matching the partial stream instead
+                # would credit a file number the reader never saw.
+                fallback = ("I wasn't able to find any data matching that question. "
+                            "Try broadening your search or rephrasing.")
+                empty_served.append(fallback)
+                yield send("interpretation", {"content": fallback})
             for evt in _sources_event(doc_hits, "".join(empty_served), send):
                 yield evt
             yield send("done", {})
