@@ -484,3 +484,36 @@ def test_chart_handles_nullable_and_string_dtypes():
 def test_total_expenditure_rows(con):
     r = con.execute("SELECT COUNT(*) FROM expenditures").fetchone()
     assert r[0] > 2_200_000
+
+
+def test_arp_relief_money_is_labelled_the_way_the_prompt_says(con):
+    """The SQL prompt tells the model ARPA money lives under fund = 'ARP'.
+    That is a claim about the data: if a refresh renames the fund, the prompt
+    starts producing confident $0 answers about a real $37M program."""
+    funds = {r[0] for r in con.execute(
+        "SELECT DISTINCT fund FROM expenditures WHERE fund IS NOT NULL"
+    ).fetchall()}
+    assert "ARP" in funds, "fund 'ARP' vanished — the prompt's ARPA mapping is now wrong"
+    total = con.execute(
+        "SELECT SUM(extended_amount) FROM expenditures WHERE fund = 'ARP'"
+    ).fetchone()[0]
+    assert total and total > 1_000_000, f"fund 'ARP' holds only {total}"
+    # the spelling the model reaches for on its own must still match nothing,
+    # or the mapping would be unnecessary and possibly double-counting
+    assert not [f for f in funds if "american rescue" in f.lower()]
+    assert any(f.startswith("CARES") for f in funds), "CARES relief fund missing"
+
+
+def test_prompt_topic_mappings_name_values_that_exist(con):
+    """Every agency_canonical the SQL prompt hardcodes must still exist —
+    a renamed agency turns a topical question into a silent zero."""
+    import app
+    agencies = {r[0] for r in con.execute(
+        "SELECT DISTINCT agency_canonical FROM expenditures WHERE agency_canonical IS NOT NULL"
+    ).fetchall()}
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")).read()
+    for name in ("Louisville Metro Police Department", "Louisville Fire",
+                 "Parks & Recreation", "Public Works & Assets",
+                 "Metro Technology Services"):
+        assert name in src, f"{name} no longer referenced in the prompt"
+        assert name in agencies, f"prompt names agency '{name}' that is not in the data"
