@@ -8,9 +8,11 @@ dependencies, and a clear integration path.
 ## What was built
 
 - **Corpus v0: council legislation via the public Legistar API** (no auth,
-  JSON). 1,406 documents since 2021: ordinances, resolutions, and the three
-  council fund types (Capital Infrastructure, Neighborhood Development,
-  Municipal Aid). One document per matter; the matter title text is the body.
+  JSON). Ordinances, resolutions, and the council fund types. One document per
+  matter; the matter title text is the body. *(Spike figures were 1,406
+  documents since 2021 across five matter types; the shipped pack widened this
+  to `since: 2020-01-01` and six matter type ids, adding Paving Funds — see
+  `cities/louisville/city.yaml`.)*
 - **Retrieval v0: DuckDB FTS (BM25)**, one `.duckdb` file
   (`data/rag_documents.duckdb`). `rag.retrieve(question, k)` returns hits with
   file number, type, status, dates, and a Legistar deep link for citation;
@@ -51,16 +53,22 @@ and what only showed up under a real deployment:
   came back with a $1,000 neighborhood appropriation attached at score 3.1.
   Letting the model's decision to name a file number act as the relevance
   filter solves the calibration problem that finding 3 describes, without
-  needing embeddings.
-- **Three deployment failures the design didn't anticipate**, each of which
-  silently disabled citations while everything looked healthy:
-  1. `rag.py` wasn't in the Dockerfile's COPY list.
-  2. The container had no DuckDB FTS extension — `LOAD` does not install one,
+  needing embeddings. Both the normal and the zero-row answer paths emit the
+  footer, so a citation is never shown unlinked.
+- **Deployment failures the design didn't anticipate.** One was loud: the
+  first image build omitted `rag.py` from the Dockerfile's COPY list, and
+  because `app.py` imports it at module scope the container failed to start
+  outright — caught before the commit landed. The other two disabled citations
+  *silently*, which is the class worth remembering:
+  1. The container had no DuckDB FTS extension — `LOAD` does not install one,
      so every request logged a warning and answered without citations. Startup
-     now runs a real retrieval probe instead of stat-ing the corpus file.
-  3. The corpus path was relative (`data/…`), which doesn't exist inside the
+     now runs a real retrieval probe (and a document count, since a queryable
+     but empty corpus reads as healthy too) instead of stat-ing the file.
+  2. The corpus path was relative (`data/…`), which doesn't exist inside the
      container; the pack now declares a bare filename resolved against
-     DATA_DIR.
+     DATA_DIR. The `rag.py` CLI resolves the same way — it briefly did not,
+     which would have written the corpus to the working directory while the
+     app read it from the data dir.
 - **The refinement pass deleted every citation.** Its rubric says anything the
   RESULTS table doesn't support must go, and a file number never appears in a
   results table. It now receives the same document block, with a bounded

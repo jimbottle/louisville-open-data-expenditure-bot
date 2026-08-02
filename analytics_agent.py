@@ -478,10 +478,13 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       computable from it. Delete anything the results don't support,
       including any sentence describing what a figure includes or what years
       it covers when the results don't state that.
-    - ONE exception to that deletion rule: a RELATED CITY LEGISLATION block may
-      follow the results. A sentence of context drawn from it IS supported —
-      keep it, with its file number spelled exactly as the draft wrote it.
-      Never introduce a citation the draft did not make, and never let a
+    - ONE narrow exception to that deletion rule: a RELATED CITY LEGISLATION
+      block may follow the results. Keep a sentence saying what a document
+      authorized or what it was for, with its file number spelled exactly as
+      the draft wrote it. Never use a document to state what a figure
+      includes, which years it covers, or how it was computed — those claims
+      still come only from the results, and the bullet above still deletes
+      them. Never introduce a citation the draft did not make, and never let a
       document change, explain away, or override a figure.
     - NEVER total or net a long list yourself: arithmetic is only allowed
       over a handful of values you can verify digit by digit. If the results
@@ -502,9 +505,12 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
     """Stream a refined (plain-language, consistency- and accuracy-checked)
     rewrite of a draft interpretation.
 
-    Lean context by design: rubric + question + SQL + results + draft — no
-    schema (the results table is the accuracy anchor). Keeps the pass at
-    ~1-2K tokens instead of the ~7K a schema-bearing prompt would cost.
+    Lean context by design: rubric + question + SQL + results + draft, plus a
+    bounded document block when one was retrieved — but never the schema (the
+    results table is the accuracy anchor). That keeps the pass near ~1-2K
+    tokens instead of the ~7K a schema-bearing prompt would cost; the document
+    block adds at most k hits x 600 chars (see rag.format_context and the
+    pack's rag.k).
     extra_facts: per-city data facts (from the city config pack) the rewrite
     must enforce — city specifics never live in this shared rubric.
     documents: the same retrieved-document block the draft saw. Without it the

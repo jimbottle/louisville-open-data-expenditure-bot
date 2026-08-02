@@ -130,7 +130,11 @@ def test_frontend_city_literals_live_only_in_the_fallback_defaults():
     # the pre-fetch first paint. The About block used to be whitelisted here
     # without being overridden anywhere — six lines of Louisville attribution,
     # license and disclaimer that a Cincinnati deploy would have rendered.
-    overridden = ("<title>Lou", "<h1>Lou<", 'class="subtitle"', "<h2>Ask me about",
+    # Every token here must correspond to a node applyBranding() rewrites AND
+    # actually appear on a line carrying a city literal — "<h1>Lou<" did not
+    # (the h1 is just "Lou"), so it read as covering the header while covering
+    # nothing.
+    overridden = ("<title>Lou", 'class="subtitle"', "<h2>Ask me about",
                   "<p>Natural language", 'id="question"')
     unexpected = [ln for ln in stray if not any(tok in ln for tok in overridden)]
     assert not unexpected, f"city literals outside branding control: {unexpected}"
@@ -171,9 +175,16 @@ FRONTEND_KEYS = ("bot_name", "tab_title", "subtitle", "hero_heading", "hero_blur
 
 
 def _get_config():
-    import asyncio
+    """GET /api/config through the real router.
+
+    Calling the handler directly left the route path, its registration and
+    JSON serialization untested — renaming the decorator's path would break
+    the frontend with the suite green."""
+    from fastapi.testclient import TestClient
     import app
-    return asyncio.run(app.get_config())
+    resp = TestClient(app.app).get("/api/config")
+    assert resp.status_code == 200
+    return resp.json()
 
 
 def test_api_config_returns_every_key_the_frontend_reads():
@@ -184,6 +195,19 @@ def test_api_config_returns_every_key_the_frontend_reads():
         assert isinstance(group.get("chips"), list)
         for chip in group["chips"]:
             assert len(chip) == 2, "each chip must stay [label, question]"
+
+
+def test_a_packs_own_branding_survives_the_defaulting():
+    """The endpoint's whole contract is "pack wins, default fills". Only the
+    fallback branch was covered, so changing any setdefault to a plain
+    assignment would overwrite Louisville's About text, hero and subtitle with
+    the generic copy and the suite would stay green."""
+    pack = load_city_config(LOUISVILLE).branding
+    cfg = _get_config()
+    declared = [k for k in FRONTEND_KEYS if k in pack]
+    assert len(declared) == len(FRONTEND_KEYS), "fixture pack no longer declares every key"
+    for key in declared:
+        assert cfg[key] == pack[key], f"/api/config overrode the pack's {key}"
 
 
 def test_api_config_defaults_use_the_packs_own_city(monkeypatch):
@@ -214,3 +238,6 @@ def test_api_config_handles_a_pack_with_no_city_name(monkeypatch):
     assert cfg["bot_name"] == "Open Data Bot"
     assert cfg["subtitle"] == ""          # suppressed, not a dangling sentence
     assert cfg["about_html"]              # disclaimer still present
+    # one name for one unknown city: the tab must not read "City Open Data"
+    # while the header reads "Open Data Bot"
+    assert cfg["tab_title"] == cfg["bot_name"]

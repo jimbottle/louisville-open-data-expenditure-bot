@@ -11,6 +11,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import rag  # noqa: E402
 
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def read_repo_file(*parts) -> str:
+    """Read a repo file without leaking the handle (ResourceWarning under -W error)."""
+    with open(os.path.join(REPO, *parts)) as f:
+        return f.read()
+
 DOCS = [
     (1, "R-057-21", "Resolution", "Passed", "2021-06-07", None, None,
      "A RESOLUTION AUTHORIZING THE MAYOR TO ACCEPT FUNDING FROM THE AMERICAN RESCUE PLAN ACT OF 2021", "u1"),
@@ -246,8 +254,7 @@ def test_both_interpret_prompts_guard_against_over_citing():
     the served prompt and the CLI-path prompt must say so, or the model will
     attribute figures to whatever legislation the keyword search returned."""
     import analytics_agent
-    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    served = open(os.path.join(repo, "app.py")).read()
+    served = read_repo_file("app.py")
     cli = analytics_agent.build_interpret_prompt("SCHEMA")
     import re
     for text in (served, cli):
@@ -280,34 +287,37 @@ def test_refine_sink_collects_the_draft_when_refinement_produces_nothing():
     assert "".join(sink) == "the draft answer"
 
 
-HITS = [
-    {"file_no": "O-374-22", "url": "u1", "matter_type": "Ordinance",
-     "intro_date": "2022-12-12", "text": "ARP reappropriations"},
-    {"file_no": "NDF102021BLC06", "url": "u2", "matter_type": "Fund",
-     "intro_date": "2021-10-20", "text": "$1,000 district appropriation"},
-]
+@pytest.fixture()
+def hits():
+    """Fresh per test — a module-level list is shared mutable state."""
+    return [
+        {"file_no": "O-374-22", "url": "u1", "matter_type": "Ordinance",
+         "intro_date": "2022-12-12", "text": "ARP reappropriations"},
+        {"file_no": "NDF102021BLC06", "url": "u2", "matter_type": "Fund",
+         "intro_date": "2021-10-20", "text": "$1,000 district appropriation"},
+    ]
 
 
-def test_uncited_retrievals_are_filtered_out_of_the_footer():
+def test_uncited_retrievals_are_filtered_out_of_the_footer(hits):
     """BM25 returns a loosely-matching ordinance for almost any question; only
     what the answer cites belongs under it."""
     import app
     answer = "Spending rose sharply in 2022, largely ARP money (per O-374-22)."
-    assert [h["file_no"] for h in app._cited_documents(HITS, answer)] == ["O-374-22"]
+    assert [h["file_no"] for h in app._cited_documents(hits, answer)] == ["O-374-22"]
 
 
-def test_an_answer_citing_nothing_produces_no_footer():
+def test_an_answer_citing_nothing_produces_no_footer(hits):
     import app
     answer = "The three highest paid positions are Director, Chief, and Manager."
-    assert app._cited_documents(HITS, answer) == []
-    assert app._cited_documents(HITS, "") == []
+    assert app._cited_documents(hits, answer) == []
+    assert app._cited_documents(hits, "") == []
     assert app._cited_documents([], "cites O-374-22") == []
 
 
-def test_every_cited_document_is_carried_through():
+def test_every_cited_document_is_carried_through(hits):
     import app
     answer = "See O-374-22 and NDF102021BLC06 for the appropriations."
-    assert len(app._cited_documents(HITS, answer)) == 2
+    assert len(app._cited_documents(hits, answer)) == 2
 
 
 def test_retrieve_installs_fts_when_the_host_lacks_it(monkeypatch, fixture_db):
@@ -328,54 +338,82 @@ def test_retrieve_installs_fts_when_the_host_lacks_it(monkeypatch, fixture_db):
     assert any("INSTALL fts" in c for c in calls), "did not recover by installing"
 
 
-def test_refine_receives_the_documents_or_it_deletes_every_citation():
-    """The refiner's own rule is that anything the results don't support must
-    go, and a file number never appears in a results table — without the
-    document block it strips the citation the draft just made."""
-    import analytics_agent
-    captured = {}
+# ── the sources SSE frame the frontend reads verbatim ────────────────────────
 
-    class FakeClient:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(**kw):
-                    captured.update(kw)
-                    return iter([])
-
-    list(analytics_agent.refine_interpretation_stream(
-        FakeClient(), "m", "q", "SELECT 1", "RESULTS", "draft citing R-083-21",
-        documents="## Related city legislation\n- [R-083-21] priorities"))
-    user = [m for m in captured["messages"] if m["role"] == "user"][0]["content"]
-    assert "R-083-21] priorities" in user
-    # the document block must precede the draft, so "the draft" is unambiguous
-    assert user.index("Related city legislation") < user.index("DRAFT ANSWER")
+FRONTEND_SOURCE_KEYS = {"file_no", "url", "matter_type", "intro_date", "title"}
 
 
-def test_refine_without_documents_is_unchanged():
-    import analytics_agent
-    captured = {}
+def test_the_sources_frame_carries_exactly_the_keys_the_page_reads(hits):
+    """static/index.html reads these five names off each item; renaming one on
+    either side silently drops content from every source row."""
+    import json
+    import app
 
-    class FakeClient:
-        class chat:
-            class completions:
-                @staticmethod
-                def create(**kw):
-                    captured.update(kw)
-                    return iter([])
+    def send(event_type, data):
+        return f"data: {json.dumps({'type': event_type, **data})}\n\n"
 
-    list(analytics_agent.refine_interpretation_stream(
-        FakeClient(), "m", "q", "SELECT 1", "RESULTS", "the draft"))
-    user = [m for m in captured["messages"] if m["role"] == "user"][0]["content"]
-    assert "legislation" not in user.lower()
-    assert user.endswith("DRAFT ANSWER:\nthe draft")
+    frames = app._sources_event(hits, "as authorized by O-374-22", send)
+    assert len(frames) == 1
+    payload = json.loads(frames[0][len("data: "):])
+    assert payload["type"] == "sources"
+    assert len(payload["items"]) == 1
+    assert set(payload["items"][0]) == FRONTEND_SOURCE_KEYS
+    assert payload["items"][0]["file_no"] == "O-374-22"
+
+    page = read_repo_file("static", "index.html")
+    block = page[page.index("event.type === 'sources'"):page.index("event.type === 'log'")]
+    for key in FRONTEND_SOURCE_KEYS:
+        assert f"s.{key}" in block, f"the page stopped reading {key}"
 
 
-def test_the_refine_rubric_carves_citations_out_of_its_delete_rule():
-    import re
-    from analytics_agent import REFINE_SYSTEM_PROMPT
-    flat = re.sub(r"\s+", " ", REFINE_SYSTEM_PROMPT)
-    assert "Delete anything the results don't support" in flat
-    assert "ONE exception to that deletion rule" in flat
-    # the carve-out must not become a licence to invent citations
-    assert "Never introduce a citation the draft did not make" in flat
+def test_retrieved_but_uncited_documents_produce_a_diagnostic_not_a_footer(hits):
+    import app
+    frames = app._sources_event(hits, "No legislation is named here.", lambda t, d: (t, d))
+    assert [f[0] for f in frames] == ["debug"]
+    assert "none cited" in frames[0][1]["content"]
+    assert app._sources_event([], "anything", lambda t, d: (t, d)) == []
+
+
+def test_the_zero_row_path_emits_the_footer_too():
+    """The empty-result branch returns early; it fed documents to the model
+    but skipped the footer, so a citation there shipped with no link — on the
+    one path with no results table to fall back on either."""
+    src = read_repo_file("app.py")
+    branch = src[src.index("if len(result_df) == 0:"):src.index('yield send("log", {"content": "Interpreting results..."})')]
+    assert "_sources_event(doc_hits" in branch, "zero-row path skips the citation footer"
+    assert branch.index("_sources_event") < branch.index('send("done"')
+
+
+def test_file_numbers_match_on_token_boundaries(hits):
+    """An unanchored substring test attaches unrelated ordinances: a bare
+    numeric file number matches a year in prose, and R-57-21 is a substring
+    of R-57-215."""
+    import app
+    assert app._cited_documents(
+        [{"file_no": "R-57-21", "url": "u", "matter_type": "t",
+          "intro_date": "d", "text": "x"}],
+        "See R-57-215 for details.") == []
+    assert app._cited_documents(
+        [{"file_no": "2021", "url": "u", "matter_type": "t",
+          "intro_date": "d", "text": "x"}],
+        "Spending rose in 2021 sharply.") == [], "all-digit file numbers are unsafe tokens"
+
+
+def test_the_app_wires_documents_into_both_llm_calls():
+    """Both call sites are one keyword away from silently reverting: the draft
+    loses its context, or the refiner strips every citation again."""
+    src = read_repo_file("app.py")
+    assert src.count("documents=documents") == 3, (
+        "expected the draft, the zero-row explanation and the refine pass "
+        "to all receive the retrieved documents"
+    )
+
+
+def test_the_interpretation_stream_is_humanized_as_prose_not_as_a_table():
+    """Reverting any one of these call sites to humanize_text reintroduces
+    'Other Pay notable spends' with the whole suite green."""
+    src = read_repo_file("app.py")
+    body = src[src.index("def event_stream():"):]
+    assert "humanize_text(chunk)" not in body
+    assert "humanize_text(draft)" not in body
+    assert "transform=humanize_prose" in body

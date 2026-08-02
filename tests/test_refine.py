@@ -132,6 +132,83 @@ def test_refine_stream_yields_chunks_and_uses_lean_context(monkeypatch):
     # the four inputs are present...
     for marker in ("QUESTION:", "SQL EXECUTED:", "RESULTS:", "DRAFT ANSWER:"):
         assert marker in user
-    # ...and the schema is NOT (lean-context invariant)
-    assert "## " not in user and "expenditures (" not in user
+    # ...and the schema is NOT (lean-context invariant). Targeted at the
+    # schema itself rather than at any markdown header: format_context emits a
+    # "## " heading, so the old check would have passed only by accident of
+    # this test omitting documents.
+    assert "expenditures (" not in user and "Schema context" not in user
     assert client.captured["stream"] is True
+
+
+# ── retrieved documents reach the refiner ────────────────────────────────────
+
+def _refine(client, **kw):
+    return "".join(aa.refine_interpretation_stream(
+        client, "m", kw.pop("question", "q"), kw.pop("sql", "SELECT 1"),
+        kw.pop("results", "RESULTS"), kw.pop("draft", "the draft"), **kw))
+
+
+def test_documents_reach_the_refiner_or_it_deletes_every_citation():
+    """The refiner's own rule is that anything the results don't support must
+    go, and a file number never appears in a results table — without the
+    document block it strips the citation the draft just made, which is
+    exactly what shipped uncited answers to production."""
+    import rag
+    hit = {"file_no": "R-083-21", "matter_type": "Resolution", "status": "Passed",
+           "intro_date": "2021-08-09", "text": "PRIORITY AREAS FOR ARP FUNDS",
+           "url": "u1"}
+    # built with the real formatter, so a change to the block's shape in
+    # rag.py fails here instead of silently dangling the rubric's reference
+    block = rag.format_context([hit])
+    client = FakeStreamingClient(["Refined."])
+    _refine(client, draft="Priorities were set in R-083-21.", documents=block)
+    user = client.captured["messages"][1]["content"]
+    assert "R-083-21" in user and "PRIORITY AREAS" in user
+    # the block must precede the draft, so "the draft" is unambiguous
+    assert user.index("R-083-21]") < user.index("DRAFT ANSWER")
+
+
+def test_the_rubric_names_the_block_the_formatter_actually_emits():
+    """The carve-out refers to the block by name; if the header and the rubric
+    drift apart the refiner loses the cue that exempts it from deletion."""
+    import re
+    import rag
+    header = rag.format_context([{"file_no": "X", "matter_type": "t",
+                                  "status": "s", "intro_date": "d",
+                                  "text": "b"}]).splitlines()[0]
+    words = re.sub(r"[^a-z ]", " ", header.lower()).split()
+    flat = re.sub(r"\s+", " ", aa.REFINE_SYSTEM_PROMPT).lower()
+    for word in ("related", "city", "legislation"):
+        assert word in words, f"formatter header lost {word!r}"
+        assert word in flat, f"refine rubric no longer names {word!r}"
+
+
+def test_no_documents_leaves_the_refine_prompt_untouched():
+    client = FakeStreamingClient(["Refined."])
+    _refine(client, draft="the draft")
+    user = client.captured["messages"][1]["content"]
+    assert "legislation" not in user.lower()
+    assert user.endswith("DRAFT ANSWER:\nthe draft")
+
+
+def test_the_carve_out_cannot_become_a_licence_to_invent_or_to_restate_scope():
+    import re
+    flat = re.sub(r"\s+", " ", aa.REFINE_SYSTEM_PROMPT)
+    assert "Delete anything the results don't support" in flat
+    assert "Never introduce a citation the draft did not make" in flat
+    # the carve-out must not reopen the coverage/date hallucination the
+    # deletion rule exists to close
+    assert "Never use a document to state what a figure includes" in flat
+
+
+def test_a_citation_survives_the_whole_refine_helper_into_the_sink():
+    """End-to-end over the path that produces the served answer: draft with a
+    file number -> refine stream -> sink, which is what the footer matches."""
+    sink = []
+    list(aa.refine_events_with_fallback(
+        iter(["Council set the priorities in ", "R-083-21."]),
+        "draft", send=_send, sink=sink))
+    import app
+    hits = [{"file_no": "R-083-21", "url": "u", "matter_type": "Resolution",
+             "intro_date": "2021-08-09", "text": "priorities"}]
+    assert app._cited_documents(hits, "".join(sink))

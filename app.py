@@ -361,7 +361,8 @@ def startup():
     RAG_DB = rag.db_path(CONFIG, DATA_DIR)
     if not os.path.exists(RAG_DB):
         log.info("No document corpus at %s — answers will carry no citations "
-                 "(run: python rag.py ingest)", RAG_DB)
+                 "(run: python rag.py ingest --city %s)", RAG_DB,
+                 os.environ.get("CITY_CONFIG", "cities/<city>/city.yaml"))
     else:
         # Probe rather than just stat the file. A present corpus can still be
         # unqueryable — a container without the DuckDB FTS extension answered
@@ -369,9 +370,17 @@ def startup():
         # per-request warning. One real query at startup turns that into a
         # single unmissable line.
         try:
+            n_docs = rag.corpus_size(RAG_DB)
             rag.retrieve("budget", k=1, db_path=RAG_DB, min_score=0.0)
-            log.info("Document corpus ready: %s (min_score=%.1f, k=%d)",
-                     RAG_DB, RAG_SETTINGS["min_score"], RAG_SETTINGS["k"])
+            if n_docs:
+                log.info("Document corpus ready: %s (%d docs, min_score=%.1f, k=%d)",
+                         RAG_DB, n_docs, RAG_SETTINGS["min_score"], RAG_SETTINGS["k"])
+            else:
+                # Queryable but empty reads as healthy otherwise — exactly the
+                # false confidence the probe exists to remove. A truncated
+                # ingest or an empty Legistar filter lands here.
+                log.warning("Document corpus at %s is EMPTY (0 documents) — "
+                            "answers will carry no citations", RAG_DB)
         except Exception as e:
             log.error("Document corpus at %s is UNQUERYABLE (%s: %s) — answers "
                       "will carry no citations", RAG_DB, type(e).__name__, e)
@@ -471,7 +480,7 @@ and interpret results. You work with Louisville Metro government open data.
 Users ask in everyday terms that rarely appear verbatim in the data. Filter only on values named in this prompt, or on a broad pattern (ILIKE '%word%') likely to match several real values — a narrow guess at an exact value you have not seen usually matches nothing. Prefer agency_canonical when the topic is a department's remit.
 - technology / IT / computers / software / cybersecurity: the department is agency_canonical = 'Metro Technology Services'; the categories are named for the thing bought, not the topic (Computer Software, Computer Hardware & Equipment, Computer Software License Owned, Software Maintenance, Enterprise Software Licenses (MELA), Cloud Computing Services). NOT every software category is Computer-prefixed, so match both patterns. Department and category are two OVERLAPPING views: ANDing them collapses to a small intersection and understates the answer ~5x. Use EXACTLY this query shape, substituting the year asked about, and DROPPING both fiscal_year predicates when the question covers all time / all years / a trend: SELECT 'Metro Technology Services department' AS spend_view, ROUND(SUM(extended_amount), 2) AS total_spend FROM expenditures WHERE fiscal_year = {last_complete_year} AND agency_canonical = 'Metro Technology Services' AND is_data_artifact = FALSE UNION ALL SELECT 'Computer, software and cloud purchases (all departments)', ROUND(SUM(extended_amount), 2) FROM expenditures WHERE fiscal_year = {last_complete_year} AND (spend_category LIKE 'Computer%' OR spend_category ILIKE '%Software%' OR spend_category = 'Cloud Computing Services') AND is_data_artifact = FALSE. The two returned figures OVERLAP (a software purchase by that department appears in both), so present them as two separate views and NEVER add them into a combined total. The words "technology" and "cybersecurity" appear in NO spend_category value; filtering on them returns zero rows.
 - police / law enforcement: agency_canonical = 'Louisville Metro Police Department'. fire: 'Louisville Fire'. parks: 'Parks & Recreation'. roads/paving/infrastructure: 'Public Works & Assets'.
-- ARPA / ARP / American Rescue Plan: the fund value is the bare string 'ARP'. COVID relief money more broadly also includes fund = 'CARES Coronavirus Relief Fund (CRF)'. Filtering on fund ILIKE '%American Rescue Plan%' or '%ARPA%' matches nothing and wrongly reports $0 — match fund = 'ARP' (optionally OR fund LIKE 'CARES%' when the question is about pandemic relief generally), across ALL fiscal years unless the question names one.
+- ARPA / ARP / American Rescue Plan: the fund value is the bare string 'ARP'. COVID relief money more broadly also includes fund = 'CARES Coronavirus Relief Fund (CRF)'. Filtering on fund ILIKE '%American Rescue Plan%' or '%ARPA%' matches nothing and wrongly reports $0 — match fund = 'ARP' (optionally OR fund = 'CARES Coronavirus Relief Fund (CRF)' when the question is about pandemic relief generally), always with AND is_data_artifact = FALSE, across ALL fiscal years unless the question names one.
 - An empty result from a topical filter means the filter was wrong, not that the city spends nothing. Re-query using the department (agency_canonical) or a broader category pattern before drawing any conclusion about spending levels.
 
 - The `expenditures` table spans FY{first_year}-FY{newest_year}. Columns available vary by era:
@@ -587,7 +596,11 @@ async def get_config():
     # section renders ITS OWN neutral copy rather than inheriting whatever the
     # page happened to ship with.
     b.setdefault("bot_name", city or "Open Data Bot")
-    b.setdefault("tab_title", CONFIG.title)
+    # Falls back to bot_name, not CityConfig.title: with no city name the
+    # latter yields "City Open Data", so the browser tab said "City Open Data"
+    # while the header said "Open Data Bot" — two names for one unknown city
+    # in a single response.
+    b.setdefault("tab_title", CONFIG.title if city else b["bot_name"])
     # Suppress the whole sentence when there is no city name rather than
     # emitting a dangling "The publicly shared data from".
     b.setdefault("subtitle", f"The publicly shared data from {city}" if city else "")
@@ -725,8 +738,46 @@ def _cited_documents(doc_hits: list, answer_text: str) -> list:
     retrieved set routinely includes a loosely-matching ordinance the model
     rightly ignored — listing those would put a $1,000 neighborhood
     appropriation under an answer about executive salaries. The model's
-    decision to name a file number is the relevance filter."""
-    return [h for h in doc_hits if h.get("file_no") and h["file_no"] in (answer_text or "")]
+    decision to name a file number is the relevance filter.
+
+    Matched on token boundaries, not as a bare substring: Legistar file
+    numbers are not guaranteed to be the distinctive O-374-22 shape, and a
+    short or all-digit one would otherwise match incidental digits in the
+    prose ("2021" in a fiscal-year sentence) and attach an unrelated ordinance
+    as a source — the exact failure this function exists to prevent. R-57-21
+    is also a substring of R-57-215."""
+    text = answer_text or ""
+    cited = []
+    for h in doc_hits:
+        fn = h.get("file_no")
+        # An all-digit or 1-2 character file number is not a safe token to
+        # look for in prose at all; no citation beats a wrong one.
+        if not fn or len(fn) < 3 or fn.isdigit():
+            continue
+        if re.search(rf"(?<![\w-]){re.escape(fn)}(?![\w-])", text):
+            cited.append(h)
+    return cited
+
+
+def _sources_event(doc_hits: list, answer_text: str, send) -> list:
+    """SSE frames for the citation footer under a finished answer.
+
+    Shared by the normal and zero-row paths: the empty-result branch returns
+    early, and while it also feeds documents to the model it used to skip this
+    block entirely — so a citation there shipped with no link, no title and no
+    diagnostic, on the one path where the reader has no results table to fall
+    back on either."""
+    cited = _cited_documents(doc_hits, answer_text)
+    if cited:
+        return [send("sources", {"items": [
+            {"file_no": h["file_no"], "url": h["url"], "matter_type": h["matter_type"],
+             "intro_date": h["intro_date"], "title": h["text"][:200]}
+            for h in cited
+        ]})]
+    if doc_hits:
+        return [send("debug", {"content":
+                     f"{len(doc_hits)} document(s) retrieved, none cited in the answer"})]
+    return []
 
 
 def _sse_message(event_type: str, content: str) -> StreamingResponse:
@@ -940,14 +991,19 @@ The SQL query returned 0 rows:
 {sql}
 
 Explain in plain text (no markdown) why this likely returned no results based on what you know about the data structure. Then suggest 1-2 rephrased questions that would likely return results. Keep it under 100 words."""
+            empty_served = []
             try:
                 for chunk in interpret_results_stream(
                     client, MODEL, interpret_system, empty_prompt, sql, "No rows returned", history=history, fallback_client=paid_client,
                     documents=documents,
                 ):
-                    yield send("interpretation", {"content": humanize_prose(chunk)})
+                    text = humanize_prose(chunk)
+                    empty_served.append(text)
+                    yield send("interpretation", {"content": text})
             except Exception:
                 yield send("interpretation", {"content": "I wasn't able to find any data matching that question. Try broadening your search or rephrasing."})
+            for evt in _sources_event(doc_hits, "".join(empty_served), send):
+                yield evt
             yield send("done", {})
             return
 
@@ -1046,16 +1102,8 @@ Explain in plain text (no markdown) why this likely returned no results based on
 
         # Citations go out after the answer, as a footer under a finished
         # response — and only for documents the answer actually cited.
-        cited = _cited_documents(doc_hits, "".join(served_text))
-        if cited:
-            yield send("sources", {"items": [
-                {"file_no": h["file_no"], "url": h["url"], "matter_type": h["matter_type"],
-                 "intro_date": h["intro_date"], "title": h["text"][:200]}
-                for h in cited
-            ]})
-        elif doc_hits:
-            yield send("debug", {"content":
-                f"{len(doc_hits)} document(s) retrieved, none cited in the answer"})
+        for evt in _sources_event(doc_hits, "".join(served_text), send):
+            yield evt
         track_usage(0, interp_tokens)
         log.info("Request complete — %d chunks streamed", interp_tokens)
 

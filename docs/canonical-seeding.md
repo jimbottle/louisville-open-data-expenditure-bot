@@ -13,8 +13,12 @@ python canonical_seed.py --city cities/cincinnati/city.yaml \
     --dimension payee --data-dir data_cincinnati --report review.md
 ```
 
-The draft lands at `<map>.draft.csv`; the pack's live map is never overwritten
-without `--force`, so re-running on an onboarded city can't destroy curation.
+The draft lands at `<map>.draft.csv`, so the pack's live map is untouched by
+default. `--force` writes at the live map but **merges** rather than replaces:
+existing rows always win and are always carried through. That matters because
+the seeder reproduces only the orthographic merges — a straight overwrite
+would silently delete the ~92% semantic curation measured below, which is
+exactly what it cannot regenerate.
 
 ## What it merges, and what it refuses to
 
@@ -62,7 +66,10 @@ entirely orthographic, which is exactly what the tool is for:
 
 - 11,074 distinct raw payees → **10,419** after the draft map (655 collapsed)
 - 550 clusters merged automatically, covering **$927M** of $8.3B in payments
-- 1,205 map rows, generated in ~4 seconds
+- 962 map rows, generated in ~4 seconds. (The first cut wrote 1,205; 243 of
+  those were unreachable — the payee spec is `case_insensitive`, which the
+  engine compiles to `WHEN UPPER(source) = …`, so rows differing only in case
+  produce byte-identical branches. The seeder now folds them.)
 - agency: 0 rows — Cincinnati's 147 department names were already clean
 
 The draft was audited before install: 350 of the 550 merges differ only in
@@ -74,6 +81,17 @@ by a leading "The" or by periods inside an acronym (`H.C.P.A` / `HCPA`). All
 The generated review is checked in at
 [cincinnati-payee-curation.md](cincinnati-payee-curation.md) as the worked
 example, and its worklist is what a curator or LLM should work down next.
+
+Canonical labels are what the bot prints, so casing is part of the output, not
+cosmetics. A name is left alone only when it carries *both* cases; an
+all-lowercase export is as much an accident as an all-caps one, and treating
+it as intentional made `veritiv` and `vets securing america` the canonical
+names of real vendors. Acronyms are preserved only when they contain no vowel
+at all (`CDM`, `HNTB`, `LMPD`) — the one unambiguous signal. Looser rules
+misfire on real names in the other direction, turning `AIR POLLUTION CONTROL
+DISTRICT` into `AIR Pollution Control District`; an acronym that carries a
+vowel (`APCD`, `UC`) is title-cased and is a curator's fix, which is visible
+and local rather than silent.
 
 One known aggressiveness: `INC` and `LLC` variants of the same name merge
 (`Lykins Contracting, Inc.` / `Lykins Contracting, LLC`). These are legally

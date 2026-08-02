@@ -115,6 +115,47 @@ and the engine ships a **seeding tool** (normalize case/punctuation/suffixes,
 cluster near-duplicates, emit a draft map for human/LLM curation). Curation
 effort is the real onboarding cost the second-city proof (ftq) must measure.
 
+## 5b. `branding:` — everything the frontend says (per-city)
+
+Served by `GET /api/config` and applied on page load, so a second city's
+deployment never says Louisville. Nine keys, all optional; anything omitted
+falls back to neutral copy derived from the pack's own `city.name`.
+
+| Key | Shape | Notes |
+|---|---|---|
+| `bot_name` | string | header name; also the tab title fallback |
+| `tab_title` | string | browser tab |
+| `subtitle` | string | under the header; suppressed entirely when there is no city name |
+| `hero_heading` | string | empty-state headline |
+| `hero_blurb` | string | empty-state paragraph |
+| `input_placeholder` | string | question box |
+| `input_aria_label` | string | screen-reader label for the question box |
+| `about_html` | **trusted HTML** | see below |
+| `starter_groups` | list of `{label, chips}` | each chip is a `[button label, question]` **pair** |
+
+Two contracts worth stating plainly:
+
+- **`about_html` is rendered with `innerHTML`.** It is authored in the pack so
+  a city's own attribution, license and disclaimer travel with it, which means
+  the pack is trusted content and this field must never carry user input or
+  anything fetched at runtime. Whatever a pack puts here executes in the
+  page's origin. If it is omitted, the engine substitutes a neutral as-is /
+  not-affiliated disclaimer naming the pack's own city — it is never empty,
+  because an empty About box would silently drop that disclaimer.
+- **Chips must match the warm-cache list.** `warm_cache.py` pre-answers the
+  starter questions; a chip whose question text drifts from that list offers
+  the user a question that was never warmed (a slow first answer), which
+  `tests/test_city_config.py` guards.
+
+## 5c. `rag:` — document corpus for citations (per-city, optional)
+
+`legistar_client`, `matter_type_ids`, `since`, `db`, `min_score`, `k`. Most
+Legistar cities expose the same public API, so a second city's corpus is a
+client name and a list of matter type ids rather than code. `db` is a **bare
+filename**, resolved against the deployment's `DATA_DIR` — a dev checkout
+reads `./data` while the container mounts `/data`, and the pack must not have
+to know which. See docs/rag-spike.md and docs/canonical-seeding.md.
+
 ## 6. Data-quality flags (engine mechanism, per-city parameters)
 
 - **Offsetting**: flag zero-sum groups. Parameter: `group_key`, which may

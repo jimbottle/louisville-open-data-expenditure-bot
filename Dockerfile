@@ -5,8 +5,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 # Bake the DuckDB FTS extension into the image. Retrieval LOADs it per query,
 # and LOAD does not install: without this the container answers every question
-# with citations silently disabled.
-RUN python -c "import duckdb; duckdb.connect().execute('INSTALL fts')"
+# with citations silently disabled. LOAD here too — an INSTALL that succeeds
+# while LOAD fails (partial download, build/runtime mismatch) is exactly the
+# failure being defended against, and would otherwise ship green.
+RUN python -c "import duckdb; duckdb.connect().execute('INSTALL fts; LOAD fts')"
 COPY analytics_agent.py app.py data_model.py city_config.py rag.py ./
 COPY cities/ cities/
 COPY static/ static/

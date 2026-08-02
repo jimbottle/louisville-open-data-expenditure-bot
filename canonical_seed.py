@@ -82,36 +82,54 @@ def normalize(name: str) -> str:
     return " ".join(tokens)
 
 
-def _looks_like_acronym(name: str) -> bool:
-    if len(name.split()) != 1 or not 2 <= len(name) <= 5 or not name.isalpha():
-        return False
-    return sum(c in "AEIOU" for c in name) / len(name) < 0.5
+def _looks_like_acronym(token: str) -> bool:
+    """Is this ONE already-shouted token an acronym rather than a word?
+
+    Applied per token, not per name: a name-leading acronym is the common
+    municipal case (UC HEALTH, CDM SMITH INC, TLO LLC), and judging the whole
+    string preserved a token alone but mangled the identical token the moment
+    a second word followed it.
+
+    Only vowel-LESS tokens qualify, which is the one signal that is actually
+    unambiguous: CDM, TLO, HNTB, JWC, KGL, LMPD cannot be words. Anything
+    looser misfires on real names — vowel *density* calls WORKS and SMITH
+    acronyms, and "short and shouted" turns AIR Pollution Control District
+    and VETS Securing America into nonsense. Acronyms that do carry a vowel
+    (APCD, UC, NAFA) come out title-cased and are a curator's fix; that is the
+    error this draft is willing to make, because it is visible and local,
+    unlike a wrongly preserved word."""
+    return (token.isupper() and token.isalpha() and 2 <= len(token) <= 5
+            and not any(c in "AEIOU" for c in token))
 
 
 def smart_title(name: str) -> str:
-    """Title-case an ALL-CAPS name, leaving mixed-case names alone.
+    """Title-case a single-case name, leaving genuinely mixed-case names alone.
 
     Portal exports are usually shouted; a canonical label that reads like a
-    name is the point of curation. Anything already carrying lowercase is
-    treated as intentionally cased and returned untouched."""
-    if not name or any(c.islower() for c in name):
+    name is the point of curation. Only a name carrying BOTH cases is treated
+    as intentionally cased — an all-lowercase entry is just as much a casing
+    accident as an all-caps one, and accepting it as-is made "veritiv" and
+    "vets securing america" the canonical names of real vendors."""
+    if not name:
         return name
-    # A short, vowel-poor single token is an acronym the ACRONYMS set has
-    # never heard of (APCD, LMPD). Title-casing it produces "Apcd", which a
-    # curator would only undo. Length alone is not the signal — HUMANA and
-    # KROGER are words and do want title case — so vowel density decides.
-    # It errs toward leaving short shouts alone: a five-letter surname vendor
-    # ("SMITH") stays shouted, which a curator fixes in seconds, while the
-    # opposite error turns every municipal acronym into "Apcd"/"Lmpd".
-    if _looks_like_acronym(name):
+    if any(c.islower() for c in name) and any(c.isupper() for c in name):
         return name
     out = []
     for i, word in enumerate(name.split()):
         bare = word.strip(".,")
-        if bare in ACRONYMS:
-            out.append(word)
-        elif i and word.lower() in JOINERS:
+        if bare.upper() in ACRONYMS:
+            out.append(word.upper())
+        # Legal suffixes read as words, not initialisms: "Humana Inc", never
+        # "Humana INC". Checked before the acronym rule, which would otherwise
+        # claim INC/CO/LTD on length alone.
+        elif bare.upper() in CORPORATE_SUFFIXES:
+            out.append(word.title())
+        elif i and bare.lower() in JOINERS:
             out.append(word.lower())
+        # A short, already-shouted token is an acronym the ACRONYMS set has
+        # never heard of (APCD, LMPD, UC, TLO) — see _looks_like_acronym.
+        elif _looks_like_acronym(bare):
+            out.append(word.upper())
         else:
             out.append(word.title().replace("'S", "'s"))
     return " ".join(out)
@@ -261,20 +279,52 @@ def residual_clusters(clusters: list, already_suggested: set, top: int = 40) -> 
             if c.key not in already_suggested and len(c.members) == 1][:top]
 
 
-def draft_rows(clusters: list, min_cluster: int = 2) -> list:
+def draft_rows(clusters: list, min_cluster: int = 2, case_insensitive: bool = False) -> list:
     """(source, canonical) rows for the draft map.
 
     Every member of a kept cluster gets a row, including the winner: the
     canonical label often differs from the raw spelling only in case, and the
     engine's exact map is a literal lookup, so an omitted identity row would
-    leave that spelling un-canonicalized."""
+    leave that spelling un-canonicalized.
+
+    case_insensitive mirrors the pack's spec flag. The engine compiles those
+    specs to `WHEN UPPER(source) = ...`, so two members differing only in case
+    produce byte-identical branches — 243 of Cincinnati's first 1,205 rows were
+    unreachable duplicates. Folding here keeps the map to branches the engine
+    can actually reach."""
     rows = []
     for c in clusters:
         if len(c.members) < min_cluster or c.is_trivial():
             continue
+        seen = set()
         for raw in sorted(c.members):
+            key = raw.upper() if case_insensitive else raw
+            if key in seen:
+                continue
+            seen.add(key)
             rows.append((raw, c.canonical))
     return rows
+
+
+def merge_with_existing(path: str, rows: list) -> tuple:
+    """Fold a draft into whatever curation already exists at `path`.
+
+    The seeder reproduces only the orthographic merges; roughly 92% of a
+    mature map is semantic work it cannot regenerate
+    (docs/canonical-seeding.md). Writing a draft straight over a live map
+    would therefore delete most of it silently, so existing rows always win
+    and are always carried through. Returns (merged rows, kept, added)."""
+    existing = {}
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            reader = csv.reader(f)
+            next(reader, None)
+            for row in reader:
+                if len(row) >= 2:
+                    existing[row[0]] = row[1]
+    added = [(src, canon) for src, canon in rows if src not in existing]
+    merged = sorted(existing.items()) + sorted(added)
+    return merged, len(existing), len(added)
 
 
 def load_weights(data_dir: str, cfg, table: str, column: str, amount: str = None) -> tuple:
@@ -294,9 +344,15 @@ def load_weights(data_dir: str, cfg, table: str, column: str, amount: str = None
         weight_expr, unit = f"SUM(TRY_CAST({amount} AS DOUBLE))", "dollars"
     else:
         weight_expr, unit = "COUNT(*)", "rows"
+    # Artifact rows are already flagged by the loader and excluded from every
+    # pack summary. Dollar weighting exists to aim curation at real totals, so
+    # a single $100M+ artifact group must not hoist a payee up the worklist or
+    # flip which spelling wins its cluster.
+    where = f"{column} IS NOT NULL"
+    if "is_data_artifact" in cols:
+        where += " AND is_data_artifact = FALSE"
     rows = con.execute(
-        f"SELECT {column}, {weight_expr} FROM {table} "
-        f"WHERE {column} IS NOT NULL GROUP BY 1"
+        f"SELECT {column}, {weight_expr} FROM {table} WHERE {where} GROUP BY 1"
     ).fetchall()
     con.close()
     return {r[0]: float(r[1] or 0) for r in rows}, unit
@@ -349,7 +405,11 @@ def write_report(out, clusters: list, rows: list, pairs: list, prefixes: list,
     print(f"\n## Near-duplicate suggestions (NOT merged — curator decides)\n", file=out)
     print(f"_Compared the {min(limit, len(clusters)):,} heaviest of "
           f"{len(clusters):,} clusters at similarity >= {threshold}. "
-          "Lighter clusters were not compared._\n", file=out)
+          "Lighter clusters were not compared, and within that set only "
+          "clusters sharing the first 4 normalized characters were scored "
+          "against each other — so a pair like `The Enquirer` (key ENQUIRER) "
+          "and `Cincinnati Enquirer` never meets, however similar._\n",
+          file=out)
     if not pairs:
         print("_None found._", file=out)
     for ratio, a, b in pairs[:60]:
@@ -416,7 +476,8 @@ def main(argv=None) -> int:
 
     weights, unit = load_weights(args.data_dir, cfg, table, column)
     clusters = cluster_values(weights)
-    rows = draft_rows(clusters, args.min_cluster)
+    rows = draft_rows(clusters, args.min_cluster,
+                      case_insensitive=bool(spec.get("case_insensitive")))
     pairs = near_duplicates(clusters, args.similarity, args.compare_top)
     prefixes = prefix_candidates(clusters)
     initialisms = initialism_candidates(clusters, args.compare_top)
@@ -424,8 +485,15 @@ def main(argv=None) -> int:
     suggested |= {c.key for pair in initialisms for c in pair}
     residual = residual_clusters(clusters, suggested)
 
-    write_map(out_path, rows)
-    print(f"wrote {len(rows):,} draft rows -> {out_path}", file=sys.stderr)
+    # --force writes at the live map, which is mostly semantic rows the seeder
+    # cannot regenerate — so it MERGES rather than replaces. Curated rows win.
+    written, kept, added = merge_with_existing(out_path, rows)
+    write_map(out_path, written)
+    print(f"wrote {len(written):,} rows -> {out_path}", file=sys.stderr)
+    if kept:
+        print(f"({kept:,} existing curated rows preserved, {added:,} new rows "
+              "added; the seeder never drops a row it did not write)",
+              file=sys.stderr)
     if out_path != map_path:
         print(f"(the pack's live map at {map_path} was NOT touched; "
               "curate the draft, then move it into place)", file=sys.stderr)

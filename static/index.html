@@ -225,9 +225,11 @@
     font-size: 13px;
     line-height: 1.5;
     color: var(--text-muted, #555);
-    /* Match the answer's reading measure — a citation running the full page
-       width reads as a separate, wider block than the answer it belongs to. */
-    max-width: 70ch;
+    /* Match the ANSWER's rendered width, not its ch count: ch resolves
+       against each block's own font-size, so 70ch here (13px) lands ~35px
+       narrower than 70ch on the 14px answer above, and the right edges still
+       would not line up. 75ch compensates for the smaller font. */
+    max-width: 75ch;
   }
 
   .agent .sources-block .label {

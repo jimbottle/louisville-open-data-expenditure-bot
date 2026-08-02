@@ -27,6 +27,17 @@ def con():
     return load_all_data("data")
 
 
+def _app_source() -> str:
+    """app.py's text, read without leaking the handle.
+
+    Several tests pin prompt fragments against the served source; importing
+    app instead would create the log dir and mount StaticFiles at module
+    scope, coupling those tests to the working directory for no benefit."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")
+    with open(path) as f:
+        return f.read()
+
+
 # ── Agency spend ──────────────────────────────────────────────────────────────
 
 def test_top_agency_is_public_works(con):
@@ -251,7 +262,7 @@ def test_grant_rollup_prompt_query_stays_valid(con):
     appear verbatim in app.py's prompt (no silent drift between prompt and
     test), and executing it must yield a TOTAL row equal to the sum of the
     per-fund rows with a plausible source count and magnitude."""
-    app_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")).read()
+    app_src = _app_source()
     assert GRANT_ROLLUP_QUERY in app_src, (
         "the prompt's copy-exact grant query no longer matches the tested one — "
         "update GRANT_ROLLUP_QUERY and this assertion together"
@@ -287,7 +298,7 @@ def test_tech_topic_query_matches_prompt_and_returns_both_views(con):
     query. Both legs must appear verbatim in app.py, both must return money,
     and the category leg must include the non-Computer-prefixed software
     categories that were once missing (a ~43% undercount)."""
-    app_src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")).read()
+    app_src = _app_source()
     for frag in (TECH_DEPT_SQL, TECH_CATEGORY_SQL):
         assert frag.replace("{yr}", "{last_complete_year}") in app_src, (
             "the prompt's copy-exact tech query no longer matches this test"
@@ -494,29 +505,28 @@ def test_arp_relief_money_is_labelled_the_way_the_prompt_says(con):
         "SELECT DISTINCT fund FROM expenditures WHERE fund IS NOT NULL"
     ).fetchall()}
     assert "ARP" in funds, "fund 'ARP' vanished — the prompt's ARPA mapping is now wrong"
+    # matching the filter the prompt prescribes, artifact exclusion included
     total = con.execute(
-        "SELECT SUM(extended_amount) FROM expenditures WHERE fund = 'ARP'"
+        "SELECT SUM(extended_amount) FROM expenditures "
+        "WHERE fund = 'ARP' AND is_data_artifact = FALSE"
     ).fetchone()[0]
     assert total and total > 1_000_000, f"fund 'ARP' holds only {total}"
     # the spelling the model reaches for on its own must still match nothing,
     # or the mapping would be unnecessary and possibly double-counting
     assert not [f for f in funds if "american rescue" in f.lower()]
-    assert any(f.startswith("CARES") for f in funds), "CARES relief fund missing"
+    # the prompt names this fund with an equality filter, so a prefix check
+    # would pass while the prescribed query returns $0
+    assert "CARES Coronavirus Relief Fund (CRF)" in funds
 
 
-def test_prompt_topic_mappings_name_values_that_exist(con):
-    """Every agency_canonical the SQL prompt hardcodes must still exist —
-    a renamed agency turns a topical question into a silent zero."""
-    import app
-    agencies = {r[0] for r in con.execute(
-        "SELECT DISTINCT agency_canonical FROM expenditures WHERE agency_canonical IS NOT NULL"
-    ).fetchall()}
-    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")).read()
-    for name in ("Louisville Metro Police Department", "Louisville Fire",
-                 "Parks & Recreation", "Public Works & Assets",
-                 "Metro Technology Services"):
-        assert name in src, f"{name} no longer referenced in the prompt"
-        assert name in agencies, f"prompt names agency '{name}' that is not in the data"
+def test_the_arp_mapping_is_pinned_in_the_prompt_itself():
+    """The data claim above is only useful if the prompt still makes it."""
+    src = _app_source()
+    assert "the fund value is the bare string 'ARP'" in src
+    assert "fund = 'CARES Coronavirus Relief Fund (CRF)'" in src
+    # the prescribed filter must exclude artifacts, like the adjacent bullets
+    bullet = [ln for ln in src.splitlines() if "ARPA / ARP / American Rescue Plan" in ln]
+    assert bullet and "is_data_artifact = FALSE" in bullet[0]
 
 
 # ── humanize_text: labels belong in tables, not in the middle of sentences ────
@@ -524,11 +534,23 @@ def test_prompt_topic_mappings_name_values_that_exist(con):
 def test_prose_mode_leaves_ordinary_english_words_alone():
     """`Other` is a salary column labelled "Other Pay", so the unrestricted
     mapping rewrote "Other notable spends" into "Other Pay notable spends".
-    `fund`, `region`, `program`, `status` and `project` are the same trap."""
+    Every word here is a real column name in some shipped table."""
     from data_model import humanize_text
     sentence = ("Other notable spends include the fund for a program in that "
-                "region, whose status on the project was unclear.")
+                "region; the Chief approved the Allocation, and the "
+                "Description of the project names the department and payee.")
     assert humanize_text(sentence, prose=True) == sentence
+
+
+def test_prose_mode_still_removes_camel_and_shouted_jargon():
+    """The earlier "has no underscore" proxy also spared jobTitle, CalYear and
+    LICENSENO, which then streamed into answers raw — the exact jargon this
+    function exists to remove."""
+    from data_model import humanize_text
+    out = humanize_text("Pay for the jobTitle listed in CalYear, plus the "
+                        "LICENSENO on file.", prose=True)
+    for jargon in ("jobTitle", "CalYear", "LICENSENO"):
+        assert jargon not in out, f"{jargon} survived prose humanization"
 
 
 def test_prose_mode_still_humanizes_real_identifiers():

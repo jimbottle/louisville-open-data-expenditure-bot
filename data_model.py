@@ -748,14 +748,19 @@ def humanize_text(text: str, table: str = "expenditures", prose: bool = False) -
     """Replace column names with semantic labels in display text.
     Falls back to converting snake_case to Title Case for unknown columns.
 
-    prose=True for running English (an answer), where a single-word column
-    name is overwhelmingly more likely to be an ordinary word than a column
-    reference: the salary table's `Other` column turned "Other notable spends"
-    into "Other Pay notable spends", and `fund`, `region`, `program`, `status`
-    and `project` are all the same trap. In prose only multi-word identifiers
-    (those containing an underscore, which no one writes by accident) are
-    substituted. Result tables keep the full mapping — there a bare `Other`
-    IS the column."""
+    prose=True for running English (an answer), where a column name shaped
+    like an ordinary word is overwhelmingly more likely to BE one: the salary
+    table's `Other` column turned "Other notable spends" into "Other Pay
+    notable spends", and `fund`, `region`, `program`, `project`, `Chief`,
+    `Allocation` and `Description` are all the same trap.
+
+    The exemption is by SHAPE, not by "has no underscore" — that earlier
+    proxy also spared genuine jargon like `jobTitle`, `CalYear` and
+    `LICENSENO`, which then streamed into answers raw ("the LICENSENO for
+    that contractor"), the very thing this function exists to remove. Only
+    single-case single words (`fund`, `Other`) are left alone; camelCase,
+    ALL-CAPS and underscored names are still substituted. Result tables keep
+    the full mapping — there a bare `Other` IS the column."""
     import re
     labels = ALL_LABELS.get(table, EXPENDITURE_LABELS)
     # Also include all labels from all tables for cross-table results
@@ -763,7 +768,7 @@ def humanize_text(text: str, table: str = "expenditures", prose: bool = False) -
     for tbl_labels in ALL_LABELS.values():
         all_flat.update(tbl_labels)
     for col, label in sorted(all_flat.items(), key=lambda x: -len(x[0])):
-        if prose and "_" not in col:
+        if prose and re.fullmatch(r"[A-Za-z][a-z]*", col):
             continue
         text = re.sub(rf'\b{re.escape(col)}\b', label, text)
     # Convert any remaining snake_case words to Title Case

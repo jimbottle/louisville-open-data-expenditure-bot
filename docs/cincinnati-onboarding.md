@@ -47,8 +47,10 @@ work), and it excludes the curation that separates "working" from "polished":
   names needed none. What remains is the semantic pass (acronyms, sibling
   entities like `The Enquirer` / `Cincinnati Enquirer`), prioritized by spend
   in docs/cincinnati-payee-curation.md.
-- **Frontend branding + starter questions** — UI still says Louisville; needs
-  config-driven branding.
+- ~~**Frontend branding + starter questions**~~ — *done*: every frontend
+  string now comes from the pack's `branding:` block via `GET /api/config`
+  (spec: docs/canonical-model.md §5b). Cincinnati still needs its own copy and
+  chips authored, but no code change.
 - **Fuzzy join quality** (salaries/licenses ↔ expenditures) untested.
 - **Hosting** — a second deployment target/subdomain if Cincinnati should be
   publicly demoable.
