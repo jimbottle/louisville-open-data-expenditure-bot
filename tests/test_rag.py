@@ -326,3 +326,56 @@ def test_retrieve_installs_fts_when_the_host_lacks_it(monkeypatch, fixture_db):
     hits = rag.retrieve("american rescue plan", k=1, db_path=fixture_db, min_score=0.1)
     assert hits and hits[0]["file_no"] == "R-057-21"
     assert any("INSTALL fts" in c for c in calls), "did not recover by installing"
+
+
+def test_refine_receives_the_documents_or_it_deletes_every_citation():
+    """The refiner's own rule is that anything the results don't support must
+    go, and a file number never appears in a results table — without the
+    document block it strips the citation the draft just made."""
+    import analytics_agent
+    captured = {}
+
+    class FakeClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    captured.update(kw)
+                    return iter([])
+
+    list(analytics_agent.refine_interpretation_stream(
+        FakeClient(), "m", "q", "SELECT 1", "RESULTS", "draft citing R-083-21",
+        documents="## Related city legislation\n- [R-083-21] priorities"))
+    user = [m for m in captured["messages"] if m["role"] == "user"][0]["content"]
+    assert "R-083-21] priorities" in user
+    # the document block must precede the draft, so "the draft" is unambiguous
+    assert user.index("Related city legislation") < user.index("DRAFT ANSWER")
+
+
+def test_refine_without_documents_is_unchanged():
+    import analytics_agent
+    captured = {}
+
+    class FakeClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    captured.update(kw)
+                    return iter([])
+
+    list(analytics_agent.refine_interpretation_stream(
+        FakeClient(), "m", "q", "SELECT 1", "RESULTS", "the draft"))
+    user = [m for m in captured["messages"] if m["role"] == "user"][0]["content"]
+    assert "legislation" not in user.lower()
+    assert user.endswith("DRAFT ANSWER:\nthe draft")
+
+
+def test_the_refine_rubric_carves_citations_out_of_its_delete_rule():
+    import re
+    from analytics_agent import REFINE_SYSTEM_PROMPT
+    flat = re.sub(r"\s+", " ", REFINE_SYSTEM_PROMPT)
+    assert "Delete anything the results don't support" in flat
+    assert "ONE exception to that deletion rule" in flat
+    # the carve-out must not become a licence to invent citations
+    assert "Never introduce a citation the draft did not make" in flat

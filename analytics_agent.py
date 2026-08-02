@@ -478,6 +478,11 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       computable from it. Delete anything the results don't support,
       including any sentence describing what a figure includes or what years
       it covers when the results don't state that.
+    - ONE exception to that deletion rule: a RELATED CITY LEGISLATION block may
+      follow the results. A sentence of context drawn from it IS supported —
+      keep it, with its file number spelled exactly as the draft wrote it.
+      Never introduce a citation the draft did not make, and never let a
+      document change, explain away, or override a figure.
     - NEVER total or net a long list yourself: arithmetic is only allowed
       over a handful of values you can verify digit by digit. If the results
       have no total row, do not state an overall total — describe the top
@@ -493,7 +498,7 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
     Return ONLY the rewritten answer, nothing else.""")
 
 
-def refine_interpretation_stream(client, model, question, sql, results, draft, on_retry=None, fallback_client=None, extra_facts=None):
+def refine_interpretation_stream(client, model, question, sql, results, draft, on_retry=None, fallback_client=None, extra_facts=None, documents=""):
     """Stream a refined (plain-language, consistency- and accuracy-checked)
     rewrite of a draft interpretation.
 
@@ -502,6 +507,10 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
     ~1-2K tokens instead of the ~7K a schema-bearing prompt would cost.
     extra_facts: per-city data facts (from the city config pack) the rewrite
     must enforce — city specifics never live in this shared rubric.
+    documents: the same retrieved-document block the draft saw. Without it the
+    refiner deletes every citation, because its own rule is that anything the
+    results table doesn't support must go — and a file number never appears in
+    a results table.
     """
     system_prompt = REFINE_SYSTEM_PROMPT
     if extra_facts:
@@ -509,7 +518,9 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
             "\n".join(f"- {f}" for f in extra_facts)
     user_msg = (
         f"QUESTION: {question}\n\nSQL EXECUTED:\n{sql}\n\n"
-        f"RESULTS:\n{results}\n\nDRAFT ANSWER:\n{draft}"
+        f"RESULTS:\n{results}\n\n"
+        + (f"{documents}\n\n" if documents else "")
+        + f"DRAFT ANSWER:\n{draft}"
     )
     def _make_call(c, m):
         def _call():

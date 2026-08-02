@@ -1032,7 +1032,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
             yield from refine_events_with_fallback(
                 refine_interpretation_stream(
                     client, MODEL, question, sql, result_str, draft, on_retry=on_retry, fallback_client=paid_client,
-                    extra_facts=CITY_FACTS,
+                    extra_facts=CITY_FACTS, documents=documents,
                 ),
                 draft,
                 send,
