@@ -359,12 +359,22 @@ def startup():
     # checked — and failing — per question.
     RAG_SETTINGS = rag.corpus_settings(CONFIG)
     RAG_DB = rag.db_path(CONFIG, DATA_DIR)
-    if os.path.exists(RAG_DB):
-        log.info("Document corpus: %s (min_score=%.1f, k=%d)",
-                 RAG_DB, RAG_SETTINGS["min_score"], RAG_SETTINGS["k"])
-    else:
+    if not os.path.exists(RAG_DB):
         log.info("No document corpus at %s — answers will carry no citations "
                  "(run: python rag.py ingest)", RAG_DB)
+    else:
+        # Probe rather than just stat the file. A present corpus can still be
+        # unqueryable — a container without the DuckDB FTS extension answered
+        # every question with citations silently disabled, visible only as a
+        # per-request warning. One real query at startup turns that into a
+        # single unmissable line.
+        try:
+            rag.retrieve("budget", k=1, db_path=RAG_DB, min_score=0.0)
+            log.info("Document corpus ready: %s (min_score=%.1f, k=%d)",
+                     RAG_DB, RAG_SETTINGS["min_score"], RAG_SETTINGS["k"])
+        except Exception as e:
+            log.error("Document corpus at %s is UNQUERYABLE (%s: %s) — answers "
+                      "will carry no citations", RAG_DB, type(e).__name__, e)
 
     con = load_all_data(DATA_DIR)
     # Compact schema for the system prompt (sent on every LLM call, so token

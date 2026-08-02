@@ -3,6 +3,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Bake the DuckDB FTS extension into the image. Retrieval LOADs it per query,
+# and LOAD does not install: without this the container answers every question
+# with citations silently disabled.
+RUN python -c "import duckdb; duckdb.connect().execute('INSTALL fts')"
 COPY analytics_agent.py app.py data_model.py city_config.py rag.py ./
 COPY cities/ cities/
 COPY static/ static/

@@ -154,6 +154,20 @@ def _build_db(rows: list, db_path: str) -> int:
         raise
 
 
+def _load_fts(con) -> None:
+    """LOAD the FTS extension, installing it once if this host lacks it.
+
+    LOAD alone fails on a machine where the extension was never installed —
+    which is every fresh container. The Dockerfile installs it at build time
+    so the common path is a plain LOAD with no network; this fallback keeps a
+    dev checkout or an older image working instead of silently dropping
+    citations."""
+    try:
+        con.execute("LOAD fts;")
+    except duckdb.Error:
+        con.execute("INSTALL fts; LOAD fts;")
+
+
 def retrieve(question: str, k: int = 3, db_path: str = DEFAULT_DB, min_score: float = 3.0) -> list:
     """Top-k document chunks for a question, with citation fields.
 
@@ -162,7 +176,7 @@ def retrieve(question: str, k: int = 3, db_path: str = DEFAULT_DB, min_score: fl
     """
     con = duckdb.connect(db_path, read_only=True)
     try:
-        con.execute("LOAD fts;")
+        _load_fts(con)
         hits = con.execute("""
             SELECT file_no, matter_type, status, intro_date, passed_date, enactment_no,
                    text, url,

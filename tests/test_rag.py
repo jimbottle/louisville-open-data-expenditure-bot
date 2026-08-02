@@ -302,3 +302,21 @@ def test_every_cited_document_is_carried_through():
     import app
     answer = "See O-374-22 and NDF102021BLC06 for the appropriations."
     assert len(app._cited_documents(HITS, answer)) == 2
+
+
+def test_retrieve_installs_fts_when_the_host_lacks_it(monkeypatch, fixture_db):
+    """A fresh container has no FTS extension, and LOAD does not install one.
+    Without the fallback every answer silently loses its citations."""
+    calls = []
+    real_execute = duckdb.DuckDBPyConnection.execute
+
+    def flaky(self, sql, *a, **k):
+        calls.append(sql)
+        if sql == "LOAD fts;" and len([c for c in calls if c == "LOAD fts;"]) == 1:
+            raise duckdb.IOException('Extension "fts.duckdb_extension" not found')
+        return real_execute(self, sql, *a, **k)
+
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", flaky)
+    hits = rag.retrieve("american rescue plan", k=1, db_path=fixture_db, min_score=0.1)
+    assert hits and hits[0]["file_no"] == "R-057-21"
+    assert any("INSTALL fts" in c for c in calls), "did not recover by installing"
