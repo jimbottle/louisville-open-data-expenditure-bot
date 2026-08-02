@@ -15,6 +15,7 @@ import time
 from datetime import date, datetime
 
 import openai
+import rag
 from fastapi import FastAPI, Request
 
 LOG_DIR = os.environ.get("LOG_DIR", "/logs")
@@ -77,6 +78,13 @@ from data_model import (
 
 DATA_DIR = os.environ.get("DATA_DIR", "data")
 MODEL = os.environ.get("MODEL", "gpt-oss-120b")  # Cerebras model; override via MODEL env
+
+# Set from the city pack at startup. The empty default means "no corpus": the
+# ask path checks the file's existence, so an app whose startup has not run
+# (or a deployment with no ingested documents) answers without citations
+# instead of raising.
+RAG_SETTINGS = {"min_score": 3.0, "k": 3}
+RAG_DB = ""
 
 RATE_LIMIT_MSG = "Evan was too cheap to use anything other than a free tier and we just hit that free tier's limit. Try again in a few minutes."
 
@@ -343,6 +351,20 @@ def _salary_status(yc: dict) -> str:
 @app.on_event("startup")
 def startup():
     global con, schema_desc, sql_system, interpret_system, client, paid_client
+    global RAG_SETTINGS, RAG_DB
+
+    # Document retrieval is a best-effort enrichment: a deployment with no
+    # ingested corpus (or a city pack with no rag block) simply answers
+    # without citations, so the absence is logged once here rather than
+    # checked — and failing — per question.
+    RAG_SETTINGS = rag.corpus_settings(CONFIG)
+    RAG_DB = rag.db_path(CONFIG, DATA_DIR)
+    if os.path.exists(RAG_DB):
+        log.info("Document corpus: %s (min_score=%.1f, k=%d)",
+                 RAG_DB, RAG_SETTINGS["min_score"], RAG_SETTINGS["k"])
+    else:
+        log.info("No document corpus at %s — answers will carry no citations "
+                 "(run: python rag.py ingest)", RAG_DB)
 
     con = load_all_data(DATA_DIR)
     # Compact schema for the system prompt (sent on every LLM call, so token
@@ -476,6 +498,7 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
 ## Accuracy Rules (CRITICAL)
 - NEVER rescale numbers: repeat values at the magnitude shown in the results (a value like 192,770.57 is about $192.8K, not millions).
 - Only state facts that appear in the results or the question. Do not describe what a figure includes or what years a dataset covers unless the results show it.
+- A "Related city legislation" block may follow the results. It is retrieved by keyword and is often only loosely related, so treat it as optional background: cite a file number inline (e.g. "per O-374-22") ONLY when that document actually explains a number in the results. Never cite it as the source of a figure, never let it contradict the results, and say nothing about it when it does not apply.
 """
     # Pack facts (placeholders resolved by the pack itself) plus the
     # data-derived year fact computed above.
@@ -661,6 +684,33 @@ def _save_cache():
 
 response_cache: dict[str, list[str]] = _load_cache()
 log.info("Response cache loaded: %d entries", len(response_cache))
+
+
+def _retrieve_documents(question: str) -> list:
+    """Related city documents for a question, or [] — never an exception.
+
+    Retrieval is enrichment, not an answer: a missing, locked or corrupt
+    corpus must degrade to an uncited answer rather than fail a request the
+    data alone can already answer."""
+    if not RAG_DB or not os.path.exists(RAG_DB):
+        return []
+    try:
+        return rag.retrieve(question, k=RAG_SETTINGS["k"], db_path=RAG_DB,
+                            min_score=RAG_SETTINGS["min_score"])
+    except Exception as e:
+        log.warning("Document retrieval failed (answering without it): %s", e)
+        return []
+
+
+def _cited_documents(doc_hits: list, answer_text: str) -> list:
+    """The retrieved documents the answer actually cited.
+
+    BM25 is poorly calibrated in absolute terms (docs/rag-spike.md §3), so the
+    retrieved set routinely includes a loosely-matching ordinance the model
+    rightly ignored — listing those would put a $1,000 neighborhood
+    appropriation under an answer about executive salaries. The model's
+    decision to name a file number is the relevance filter."""
+    return [h for h in doc_hits if h.get("file_no") and h["file_no"] in (answer_text or "")]
 
 
 def _sse_message(event_type: str, content: str) -> StreamingResponse:
@@ -852,6 +902,16 @@ async def ask(request: Request):
                 except Exception as e:
                     log.warning("Chart generation failed: %s", e)
 
+        # Related city documents (local BM25, ~ms). Retrieved before the
+        # interpretation so the model can cite legislation that explains the
+        # numbers; hits below the pack's threshold come back empty and the
+        # prompt simply carries no document block.
+        doc_hits = _retrieve_documents(question)
+        documents = rag.format_context(doc_hits)
+        if doc_hits:
+            yield send("debug", {"content": f"Retrieved {len(doc_hits)} document(s): " +
+                                 ", ".join(f"{h['file_no']} ({h['score']:.1f})" for h in doc_hits)})
+
         # Brief pause to avoid back-to-back RPM hits
         time.sleep(3)
 
@@ -890,7 +950,8 @@ Explain in plain text (no markdown) why this likely returned no results based on
         last_beat = time.time()
         try:
             for chunk in interpret_results_stream(
-                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry, history=history, fallback_client=paid_client
+                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry, history=history, fallback_client=paid_client,
+                documents=documents,
             ):
                 draft += chunk
                 interp_tokens += 1
@@ -936,9 +997,11 @@ Explain in plain text (no markdown) why this likely returned no results based on
             yield send("done", {})
             return
 
+        served_text = []
         if draft and draft_truncated:
             # A timed-out draft is served as-is with a visible marker instead
             # of being polished into something that reads as complete.
+            served_text.append(humanize_text(draft))
             yield send("interpretation", {"content": humanize_text(draft)})
             yield send("interpretation", {"content": "\n\n(Response truncated due to timeout)"})
         elif draft:
@@ -960,8 +1023,22 @@ Explain in plain text (no markdown) why this likely returned no results based on
                 on_fail=lambda e: track_error("interpretation", f"Refine failed: {str(e)[:150]}"),
                 timeout=stream_timeout,
                 counter=refine_counter,
+                sink=served_text,
             )
             interp_tokens += refine_counter["n"]
+
+        # Citations go out after the answer, as a footer under a finished
+        # response — and only for documents the answer actually cited.
+        cited = _cited_documents(doc_hits, "".join(served_text))
+        if cited:
+            yield send("sources", {"items": [
+                {"file_no": h["file_no"], "url": h["url"], "matter_type": h["matter_type"],
+                 "intro_date": h["intro_date"], "title": h["text"][:200]}
+                for h in cited
+            ]})
+        elif doc_hits:
+            yield send("debug", {"content":
+                f"{len(doc_hits)} document(s) retrieved, none cited in the answer"})
         track_usage(0, interp_tokens)
         log.info("Request complete — %d chunks streamed", interp_tokens)
 

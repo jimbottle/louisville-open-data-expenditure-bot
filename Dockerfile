@@ -3,7 +3,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY analytics_agent.py app.py data_model.py city_config.py ./
+COPY analytics_agent.py app.py data_model.py city_config.py rag.py ./
 COPY cities/ cities/
 COPY static/ static/
 EXPOSE 8000

@@ -65,6 +65,26 @@ data_facts:
   # appended as a fact, so a refresh can never leave it asserting a stale
   # year. Facts here may use {placeholders}; CityConfig.data_facts_for()
   # resolves them and drops any fact left unresolved.
+
+# Document corpus for retrieval (docs/rag-spike.md). Council legislation IS the
+# appropriation record, so it is the "why" behind the numbers. Per-city because
+# every Legistar city has its own client name and matter type ids; a pack that
+# omits this block falls back to rag.py's Louisville defaults.
+rag:
+  legistar_client: louisville
+  # Resolution, Ordinance, Capital Infrastructure Fund, Neighborhood
+  # Development Fund, Municipal Aid Program Funds, Paving Funds
+  matter_type_ids: [52, 53, 64, 65, 66, 70]
+  since: "2020-01-01"
+  # Bare filename: resolved against DATA_DIR so the same pack works in a dev
+  # checkout (./data) and in the container (/data).
+  db: rag_documents.duckdb
+  # BM25 scores are poorly calibrated in absolute terms: real hits land ~5+,
+  # nonsense queries still reach ~2.5-2.9 on stray tokens. 3.0 is the measured
+  # junk floor for this corpus (docs/rag-spike.md §3).
+  min_score: 3.0
+  k: 3
+
 expenditures:
   table: expenditures
   sources:

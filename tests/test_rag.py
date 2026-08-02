@@ -98,3 +98,207 @@ def test_format_context(fixture_db):
     block = rag.format_context(hits)
     assert "[O-416-21]" in block and "cite by file number" in block
     assert rag.format_context([]) == ""
+
+
+# ── config-pack driven corpus (a second city is a client name, not code) ─────
+
+def test_corpus_settings_come_from_the_pack_not_the_module():
+    from city_config import CityConfig
+    cfg = CityConfig({"rag": {
+        "legistar_client": "cincinnati", "matter_type_ids": [1, 2],
+        "since": "2019-01-01", "min_score": 4.5, "k": 7,
+    }}, ".")
+    s = rag.corpus_settings(cfg)
+    assert s["client"] == "cincinnati"
+    assert "cincinnati" in s["api"] and "cincinnati" in s["web"]
+    assert s["matter_type_ids"] == (1, 2)
+    assert s["since"] == "2019-01-01"
+    assert s["min_score"] == 4.5 and s["k"] == 7
+
+
+def test_a_pack_with_no_rag_block_falls_back_to_the_module_defaults():
+    from city_config import CityConfig
+    s = rag.corpus_settings(CityConfig({}, "."))
+    assert s["client"] == rag.LEGISTAR_CLIENT
+    assert s["matter_type_ids"] == rag.MATTER_TYPE_IDS
+    assert rag.corpus_settings(None)["client"] == rag.LEGISTAR_CLIENT
+
+
+def test_db_path_resolves_against_the_deployments_data_dir():
+    """The container mounts /data; a dev checkout uses ./data. The pack
+    declares a bare filename so the same pack works in both."""
+    from city_config import CityConfig
+    cfg = CityConfig({"rag": {"db": "rag_documents.duckdb"}}, ".")
+    assert rag.db_path(cfg, "/data") == os.path.join("/data", "rag_documents.duckdb")
+    assert rag.db_path(cfg, "data") == os.path.join("data", "rag_documents.duckdb")
+    # an explicit path is taken literally
+    explicit = CityConfig({"rag": {"db": "/srv/corpus.duckdb"}}, ".")
+    assert rag.db_path(explicit, "/data") == "/srv/corpus.duckdb"
+
+
+def test_the_shipped_louisville_pack_declares_a_usable_corpus():
+    from city_config import load_city_config
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cfg = load_city_config(os.path.join(repo, "cities", "louisville", "city.yaml"))
+    s = rag.corpus_settings(cfg)
+    assert s["client"] == "louisville"
+    assert len(s["matter_type_ids"]) >= 1
+    # bare filename, or the container would look for ./data inside /app
+    assert not os.path.dirname(s["db"])
+
+
+# ── the ask pipeline degrades instead of failing ─────────────────────────────
+
+def test_app_retrieval_returns_empty_when_no_corpus_exists(monkeypatch):
+    import app
+    monkeypatch.setattr(app, "RAG_DB", "/nonexistent/corpus.duckdb")
+    assert app._retrieve_documents("anything") == []
+
+
+def test_app_retrieval_swallows_a_corrupt_corpus(tmp_path, monkeypatch):
+    """A broken corpus must cost citations, never the answer."""
+    import app
+    bad = tmp_path / "corpus.duckdb"
+    bad.write_text("this is not a duckdb file")
+    monkeypatch.setattr(app, "RAG_DB", str(bad))
+    monkeypatch.setattr(app, "RAG_SETTINGS", {"min_score": 3.0, "k": 3})
+    assert app._retrieve_documents("anything") == []
+
+
+def test_app_retrieval_returns_hits_from_a_real_corpus(fixture_db, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "RAG_DB", fixture_db)
+    # BM25 scores scale with corpus size — the production floor of 3.0 is
+    # calibrated for 1,400 documents, not this three-row fixture.
+    monkeypatch.setattr(app, "RAG_SETTINGS", {"min_score": 0.1, "k": 3})
+    hits = app._retrieve_documents("American Rescue Plan Act funding")
+    assert hits and hits[0]["file_no"] == "R-057-21"
+    # every field the sources SSE event and the frontend link need
+    for key in ("file_no", "url", "matter_type", "intro_date", "text"):
+        assert hits[0][key] is not None
+
+
+def test_app_retrieval_honors_the_packs_threshold(fixture_db, monkeypatch):
+    """The junk floor is a pack setting, so it has to be read per request —
+    not baked in at the call site."""
+    import app
+    monkeypatch.setattr(app, "RAG_DB", fixture_db)
+    monkeypatch.setattr(app, "RAG_SETTINGS", {"min_score": 0.1, "k": 3})
+    assert app._retrieve_documents("American Rescue Plan Act funding")
+    monkeypatch.setattr(app, "RAG_SETTINGS", {"min_score": 99.0, "k": 3})
+    assert app._retrieve_documents("American Rescue Plan Act funding") == []
+
+
+def test_app_retrieval_honors_the_packs_k(fixture_db, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "RAG_DB", fixture_db)
+    monkeypatch.setattr(app, "RAG_SETTINGS", {"min_score": 0.0, "k": 1})
+    assert len(app._retrieve_documents("american rescue plan housing funding")) == 1
+
+
+# ── documents reach the prompt without poisoning the cache key ───────────────
+
+def test_documents_ride_the_user_message_not_the_system_prompt():
+    """Per-question context in the system prompt would change CACHE_VERSION on
+    every question and prune the whole response cache."""
+    import analytics_agent
+    captured = {}
+
+    class FakeClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    captured.update(kw)
+                    return iter([])
+
+    list(analytics_agent.interpret_results_stream(
+        FakeClient(), "m", "SYSTEM", "q", "SELECT 1", "RESULTS",
+        documents="## Related city legislation\n- [O-1] text",
+    ))
+    system = [m for m in captured["messages"] if m["role"] == "system"][0]["content"]
+    user = [m for m in captured["messages"] if m["role"] == "user"][0]["content"]
+    assert system == "SYSTEM"
+    assert "O-1" in user and "RESULTS" in user
+
+
+def test_no_documents_leaves_the_prompt_untouched():
+    import analytics_agent
+    captured = {}
+
+    class FakeClient:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kw):
+                    captured.update(kw)
+                    return iter([])
+
+    list(analytics_agent.interpret_results_stream(
+        FakeClient(), "m", "SYSTEM", "q", "SELECT 1", "RESULTS"))
+    user = [m for m in captured["messages"] if m["role"] == "user"][0]["content"]
+    assert user.endswith("RESULTS")
+    assert "legislation" not in user.lower()
+
+
+def test_both_interpret_prompts_guard_against_over_citing():
+    """A retrieved document is background, not a source for the numbers. Both
+    the served prompt and the CLI-path prompt must say so, or the model will
+    attribute figures to whatever legislation the keyword search returned."""
+    import analytics_agent
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    served = open(os.path.join(repo, "app.py")).read()
+    cli = analytics_agent.build_interpret_prompt("SCHEMA")
+    for text in (served, cli):
+        assert "Related city legislation" in text
+        assert "ONLY when that document actually explains" in text
+
+
+# ── the footer lists citations, not search results ──────────────────────────
+
+def test_refine_sink_collects_the_text_actually_served():
+    """The caller needs the served answer to know what it cited."""
+    from analytics_agent import refine_events_with_fallback
+    sink = []
+    list(refine_events_with_fallback(
+        iter(["Spending rose ", "per O-374-22."]), "DRAFT",
+        send=lambda t, d: (t, d), transform=str.upper, sink=sink))
+    assert "".join(sink) == "SPENDING ROSE PER O-374-22."
+
+
+def test_refine_sink_collects_the_draft_when_refinement_produces_nothing():
+    from analytics_agent import refine_events_with_fallback
+    sink = []
+    list(refine_events_with_fallback(
+        iter([]), "the draft answer", send=lambda t, d: (t, d), sink=sink))
+    assert "".join(sink) == "the draft answer"
+
+
+HITS = [
+    {"file_no": "O-374-22", "url": "u1", "matter_type": "Ordinance",
+     "intro_date": "2022-12-12", "text": "ARP reappropriations"},
+    {"file_no": "NDF102021BLC06", "url": "u2", "matter_type": "Fund",
+     "intro_date": "2021-10-20", "text": "$1,000 district appropriation"},
+]
+
+
+def test_uncited_retrievals_are_filtered_out_of_the_footer():
+    """BM25 returns a loosely-matching ordinance for almost any question; only
+    what the answer cites belongs under it."""
+    import app
+    answer = "Spending rose sharply in 2022, largely ARP money (per O-374-22)."
+    assert [h["file_no"] for h in app._cited_documents(HITS, answer)] == ["O-374-22"]
+
+
+def test_an_answer_citing_nothing_produces_no_footer():
+    import app
+    answer = "The three highest paid positions are Director, Chief, and Manager."
+    assert app._cited_documents(HITS, answer) == []
+    assert app._cited_documents(HITS, "") == []
+    assert app._cited_documents([], "cites O-374-22") == []
+
+
+def test_every_cited_document_is_carried_through():
+    import app
+    answer = "See O-374-22 and NDF102021BLC06 for the appropriations."
+    assert len(app._cited_documents(HITS, answer)) == 2

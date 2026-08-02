@@ -23,9 +23,12 @@ import time
 import duckdb
 import requests
 
+# Corpus source is per-city and lives in the config pack's `rag:` block —
+# most Legistar cities expose the same API (Cincinnati is on Legistar too), so
+# onboarding a second city's corpus is a client name and a list of matter type
+# ids, not code. These module defaults are the Louisville values and the
+# fallback for a pack that declares no rag block.
 LEGISTAR_CLIENT = "louisville"
-API = f"https://webapi.legistar.com/v1/{LEGISTAR_CLIENT}"
-WEB = f"https://{LEGISTAR_CLIENT}.legistar.com/LegislationDetail.aspx"
 
 # Spending-relevant matter types: Resolution, Ordinance, Capital Infrastructure
 # Fund, Neighborhood Development Fund, Municipal Aid Program Funds, Paving Funds
@@ -36,14 +39,47 @@ DEFAULT_SINCE = "2020-01-01"
 PAGE_SIZE = 1000
 
 
+def corpus_settings(cfg=None) -> dict:
+    """Resolve the corpus source for a city pack, falling back to Louisville."""
+    block = (getattr(cfg, "raw", {}) or {}).get("rag", {}) if cfg else {}
+    client = block.get("legistar_client") or LEGISTAR_CLIENT
+    return {
+        "client": client,
+        "api": f"https://webapi.legistar.com/v1/{client}",
+        "web": f"https://{client}.legistar.com/LegislationDetail.aspx",
+        "matter_type_ids": tuple(block.get("matter_type_ids") or MATTER_TYPE_IDS),
+        "since": block.get("since") or DEFAULT_SINCE,
+        "db": block.get("db") or DEFAULT_DB,
+        "min_score": float(block.get("min_score", 3.0)),
+        "k": int(block.get("k", 3)),
+    }
+
+
+def db_path(cfg=None, data_dir: str = None) -> str:
+    """Where this deployment's corpus DB lives.
+
+    A pack declares a bare filename, which is joined with the deployment's data
+    directory — a dev checkout reads ./data while the container mounts its data
+    volume at /data, and the pack must not have to know which. A value that
+    already carries a directory is taken literally."""
+    db = corpus_settings(cfg)["db"]
+    if os.path.dirname(db):
+        return db
+    return os.path.join(data_dir or os.environ.get("DATA_DIR", "data"), db)
+
+
 def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def ingest(db_path: str = DEFAULT_DB, since: str = DEFAULT_SINCE) -> int:
+def ingest(db_path: str = None, since: str = None, cfg=None) -> int:
     """Pull council matters into a DuckDB documents table and build the FTS index."""
+    s = corpus_settings(cfg)
+    db_path = db_path or s["db"]
+    since = since or s["since"]
+    API, WEB = s["api"], s["web"]
     rows = []
-    for type_id in MATTER_TYPE_IDS:
+    for type_id in s["matter_type_ids"]:
         skip = 0
         while True:
             params = {
@@ -159,19 +195,28 @@ def format_context(hits: list) -> str:
 def main():
     parser = argparse.ArgumentParser(description="City-document RAG spike")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    parser.add_argument("--city", help="city.yaml whose rag block defines the corpus")
     p_ing = sub.add_parser("ingest")
-    p_ing.add_argument("--since", default=DEFAULT_SINCE)
-    p_ing.add_argument("--db", default=DEFAULT_DB)
+    p_ing.add_argument("--since")
+    p_ing.add_argument("--db")
     p_q = sub.add_parser("query")
     p_q.add_argument("question")
-    p_q.add_argument("-k", type=int, default=3)
-    p_q.add_argument("--db", default=DEFAULT_DB)
+    p_q.add_argument("-k", type=int)
+    p_q.add_argument("--db")
     args = parser.parse_args()
 
+    cfg = None
+    if args.city:
+        from city_config import load_city_config
+        cfg = load_city_config(args.city)
+    settings = corpus_settings(cfg)
+
     if args.cmd == "ingest":
-        ingest(args.db, args.since)
+        ingest(args.db, args.since, cfg=cfg)
     else:
-        hits = retrieve(args.question, k=args.k, db_path=args.db)
+        hits = retrieve(args.question, k=args.k or settings["k"],
+                        db_path=args.db or settings["db"],
+                        min_score=settings["min_score"])
         if not hits:
             print("(no hits above threshold)")
         for h in hits:

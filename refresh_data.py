@@ -156,6 +156,28 @@ def scrape_officers(data_dir):
     )
 
 
+def ingest_documents(data_dir):
+    """Re-pull the council-document corpus used for answer citations.
+
+    A failure here is reported but never fatal to the refresh: stale documents
+    still cite correctly, and the spend data — the thing the bot actually
+    answers from — is already refreshed by this point. rag.ingest builds into
+    a .part file and swaps, so a crash mid-pull cannot leave the serving app
+    reading a half-written corpus."""
+    print(f"\n{'=' * 60}\n  DOCUMENT CORPUS\n{'=' * 60}")
+    try:
+        import rag
+        from city_config import load_city_config
+        cfg = load_city_config()
+        n = rag.ingest(rag.db_path(cfg, data_dir), cfg=cfg)
+        print(f"  {n:,} documents ingested")
+        return True
+    except Exception as e:
+        print(f"  Document ingest FAILED ({type(e).__name__}: {e}) — "
+              "answers will use the previous corpus")
+        return False
+
+
 def reload_graph(neo4j_uri, neo4j_password, data_dir):
     """Reload the Neo4j context graph."""
     print("\n" + "=" * 60)
@@ -184,6 +206,7 @@ def main():
     parser.add_argument("--skip-pull", action="store_true", help="Skip pulling, rebuild from existing CSVs")
     parser.add_argument("--skip-sos", action="store_true", help="Skip KY SOS lookups in profile builder")
     parser.add_argument("--skip-graph", action="store_true", help="Skip Neo4j graph reload")
+    parser.add_argument("--skip-documents", action="store_true", help="Skip council-document (RAG corpus) re-ingest")
     parser.add_argument("--graph-only", action="store_true", help="Only reload Neo4j graph")
     parser.add_argument("--profile-top", type=int, default=200, help="Number of top payees to profile")
     parser.add_argument("--neo4j-uri", default=os.environ.get("NEO4J_URI", "bolt://localhost:7687"))
@@ -214,7 +237,11 @@ def main():
         if not args.skip_sos:
             success = scrape_officers(args.data_dir) and success
 
-        # Step 4: Reload graph
+        # Step 4: Re-ingest the document corpus
+        if not args.skip_documents:
+            success = ingest_documents(args.data_dir) and success
+
+        # Step 5: Reload graph
         if not args.skip_graph:
             success = reload_graph(args.neo4j_uri, args.neo4j_password, args.data_dir) and success
 

@@ -218,6 +218,29 @@
     margin-bottom: 6px;
   }
 
+  .agent .sources-block {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-left: 3px solid var(--border);
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-muted, #555);
+  }
+
+  .agent .sources-block .label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+
+  .agent .source-row {
+    margin-bottom: 3px;
+  }
+
+  .agent .source-row a {
+    font-weight: 600;
+  }
+
   .agent .results-block {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -1004,6 +1027,7 @@ function buildReportBody(report, interpText, scale, extras = true) {
   if (extras) {
     if (report.sql) parts.push('', 'SQL:', cut(report.sql, 500));
     if (report.results) parts.push('', `Results (${report.rows ?? '?'} rows):`, cut(report.results, 400));
+    if (report.sources) parts.push('', 'Cited documents:', cut(report.sources, 300));
     if (report.debug.length) parts.push('', 'Debug:', cut(report.debug.join('\n'), 250));
   }
   parts.push('', 'What looked wrong (please describe):', '');
@@ -1056,7 +1080,7 @@ async function streamAnswer(question, opts = {}) {
   // Everything the report-answer email can include — the backend streams all
   // detail events (sql/results/log/debug) regardless of the Dev toggle now,
   // so every answer's report carries full detail.
-  const report = { question, sql: '', results: '', rows: null, debug: [] };
+  const report = { question, sql: '', results: '', rows: null, debug: [], sources: '' };
 
   // Send prior history (not including current question) for context
   const historyToSend = conversationHistory.slice(-6);
@@ -1308,6 +1332,39 @@ async function streamAnswer(question, opts = {}) {
               interpBlock.appendChild(document.createElement('br'));
             }
           });
+        }
+
+        else if (event.type === 'sources') {
+          // Related legislation, rendered as a footer under the answer. Links
+          // are built with textContent + setAttribute rather than innerHTML:
+          // titles and URLs come from a third-party API (Legistar), so they
+          // are data, never markup.
+          const items = event.items || [];
+          if (items.length) {
+            report.sources = items.map(s => `${s.file_no} ${s.url}`).join('\n');
+            const box = document.createElement('div');
+            box.className = 'sources-block';
+            const label = document.createElement('span');
+            label.className = 'label';
+            label.textContent = 'Related city legislation';
+            box.appendChild(label);
+            items.forEach(s => {
+              const row = document.createElement('div');
+              row.className = 'source-row';
+              const a = document.createElement('a');
+              a.setAttribute('href', s.url);
+              a.setAttribute('target', '_blank');
+              a.setAttribute('rel', 'noopener noreferrer');
+              a.textContent = s.file_no || 'Document';
+              row.appendChild(a);
+              const meta = [s.matter_type, s.intro_date].filter(Boolean).join(', ');
+              row.appendChild(document.createTextNode(
+                (meta ? ` (${meta})` : '') + (s.title ? ` — ${s.title}` : '')
+              ));
+              box.appendChild(row);
+            });
+            agentDiv.appendChild(box);
+          }
         }
 
         else if (event.type === 'log') {

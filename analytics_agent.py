@@ -288,6 +288,13 @@ def build_interpret_prompt(schema_desc: str, extra_facts=None) -> str:
           never borrow another table's coverage.
         - If results are empty, explain what that likely means.
         - If the data shows something notable or unexpected, call it out.
+        - A "Related city legislation" block may follow the results. It is
+          retrieved by keyword and is often only loosely related, so treat it
+          as optional background: cite a file number inline (e.g. "per
+          O-374-22") ONLY when that document actually explains a number in the
+          results. Never cite it as the source of a figure, never let it
+          contradict the results, and say nothing about it when it does not
+          apply.
         - Keep responses under 200 words unless the user asked for detail.
 
         ## Schema context
@@ -422,10 +429,17 @@ def interpret_results(
 
 
 def interpret_results_stream(
-    client: openai.OpenAI, model: str, system_prompt: str, question: str, sql: str, results: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None
+    client: openai.OpenAI, model: str, system_prompt: str, question: str, sql: str, results: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None, documents: str = ""
 ):
-    """Stream interpretation chunks as a generator."""
+    """Stream interpretation chunks as a generator.
+
+    documents: retrieved city-document context (rag.format_context). Appended
+    to the user message rather than the system prompt because it varies per
+    question — putting it in the system prompt would change the prompt hash
+    (and so invalidate the whole response cache) on every question."""
     user_msg = f"Question: {question}\n\nSQL executed:\n{sql}\n\nResults:\n{results}"
+    if documents:
+        user_msg += f"\n\n{documents}"
     def _make_call(c, m):
         def _call():
             messages = [{"role": "system", "content": system_prompt}]
@@ -514,7 +528,7 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
             yield chunk.choices[0].delta.content
 
 
-def refine_events_with_fallback(refine_iter, draft, send, transform=None, on_fail=None, timeout=90, counter=None):
+def refine_events_with_fallback(refine_iter, draft, send, transform=None, on_fail=None, timeout=90, counter=None, sink=None):
     """Yield SSE events for the refine pass with the no-lost-answer invariant:
     if the refiner fails before producing anything, the draft is served
     verbatim; if it fails mid-stream, a visible truncation note is appended
@@ -522,7 +536,9 @@ def refine_events_with_fallback(refine_iter, draft, send, transform=None, on_fai
 
     Pure orchestration (no app globals) so it is unit-testable: `send` builds
     the SSE frame, `transform` post-processes text (e.g. humanize), `on_fail`
-    receives the exception, `counter['n']` counts streamed chunks.
+    receives the exception, `counter['n']` counts streamed chunks, and `sink`
+    (a list) collects the text actually served — the caller needs that to know
+    what the answer says, e.g. which documents it ended up citing.
     """
     transform = transform or (lambda s: s)
     t0 = time.time()
@@ -532,7 +548,10 @@ def refine_events_with_fallback(refine_iter, draft, send, transform=None, on_fai
             refined_any = True
             if counter is not None:
                 counter["n"] += 1
-            yield send("interpretation", {"content": transform(chunk)})
+            text = transform(chunk)
+            if sink is not None:
+                sink.append(text)
+            yield send("interpretation", {"content": text})
             if time.time() - t0 > timeout:
                 log.warning("Refinement stream timed out after %ds", timeout)
                 yield send("interpretation", {"content": "\n\n(Response truncated due to timeout)"})
@@ -547,7 +566,10 @@ def refine_events_with_fallback(refine_iter, draft, send, transform=None, on_fai
         if refined_any:
             yield send("interpretation", {"content": "\n\n(Response truncated.)"})
     if not refined_any:
-        yield send("interpretation", {"content": transform(draft)})
+        text = transform(draft)
+        if sink is not None:
+            sink.append(text)
+        yield send("interpretation", {"content": text})
     else:
         yield send("debug", {"content": f"Refined in {time.time() - t0:.1f}s"})
 
