@@ -289,12 +289,14 @@ def build_interpret_prompt(schema_desc: str, extra_facts=None) -> str:
         - If results are empty, explain what that likely means.
         - If the data shows something notable or unexpected, call it out.
         - A "Related city legislation" block may follow the results. It is
-          retrieved by keyword and is often only loosely related, so treat it
-          as optional background: cite a file number inline (e.g. "per
-          O-374-22") ONLY when that document actually explains a number in the
-          results. Never cite it as the source of a figure, never let it
-          contradict the results, and say nothing about it when it does not
-          apply.
+          retrieved by keyword, so some entries will be irrelevant — judge
+          each one. When a document explains what the money was for, why it
+          was appropriated, or a figure in the results, add one short sentence
+          of context and name its file number inline (e.g. "Council set the
+          priorities for this money in R-083-21"). Ignore the rest in silence.
+          The results are always the source of every number: never attribute a
+          figure to a document, never let a document override the results, and
+          never list documents you did not use.
         - Keep responses under 200 words unless the user asked for detail.
 
         ## Schema context

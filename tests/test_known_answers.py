@@ -517,3 +517,31 @@ def test_prompt_topic_mappings_name_values_that_exist(con):
                  "Metro Technology Services"):
         assert name in src, f"{name} no longer referenced in the prompt"
         assert name in agencies, f"prompt names agency '{name}' that is not in the data"
+
+
+# ── humanize_text: labels belong in tables, not in the middle of sentences ────
+
+def test_prose_mode_leaves_ordinary_english_words_alone():
+    """`Other` is a salary column labelled "Other Pay", so the unrestricted
+    mapping rewrote "Other notable spends" into "Other Pay notable spends".
+    `fund`, `region`, `program`, `status` and `project` are the same trap."""
+    from data_model import humanize_text
+    sentence = ("Other notable spends include the fund for a program in that "
+                "region, whose status on the project was unclear.")
+    assert humanize_text(sentence, prose=True) == sentence
+
+
+def test_prose_mode_still_humanizes_real_identifiers():
+    from data_model import humanize_text
+    out = humanize_text("Totals come from extended_amount by agency_canonical.",
+                        prose=True)
+    assert "extended_amount" not in out and "agency_canonical" not in out
+    assert "Extended Amount" in out
+
+
+def test_table_mode_still_maps_bare_column_names():
+    """In a results table a bare `Other` really is the column — prose mode
+    must not have weakened the table path."""
+    from data_model import humanize_text
+    assert humanize_text("Other") != "Other"
+    assert humanize_text("extended_amount") == humanize_text("extended_amount", prose=True)

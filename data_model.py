@@ -744,9 +744,18 @@ def drop_total_rows(df, label_col: str, value_col: str = None):
     return df[~drop]
 
 
-def humanize_text(text: str, table: str = "expenditures") -> str:
+def humanize_text(text: str, table: str = "expenditures", prose: bool = False) -> str:
     """Replace column names with semantic labels in display text.
-    Falls back to converting snake_case to Title Case for unknown columns."""
+    Falls back to converting snake_case to Title Case for unknown columns.
+
+    prose=True for running English (an answer), where a single-word column
+    name is overwhelmingly more likely to be an ordinary word than a column
+    reference: the salary table's `Other` column turned "Other notable spends"
+    into "Other Pay notable spends", and `fund`, `region`, `program`, `status`
+    and `project` are all the same trap. In prose only multi-word identifiers
+    (those containing an underscore, which no one writes by accident) are
+    substituted. Result tables keep the full mapping — there a bare `Other`
+    IS the column."""
     import re
     labels = ALL_LABELS.get(table, EXPENDITURE_LABELS)
     # Also include all labels from all tables for cross-table results
@@ -754,6 +763,8 @@ def humanize_text(text: str, table: str = "expenditures") -> str:
     for tbl_labels in ALL_LABELS.values():
         all_flat.update(tbl_labels)
     for col, label in sorted(all_flat.items(), key=lambda x: -len(x[0])):
+        if prose and "_" not in col:
+            continue
         text = re.sub(rf'\b{re.escape(col)}\b', label, text)
     # Convert any remaining snake_case words to Title Case
     text = re.sub(r'\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b', lambda m: m.group(1).replace('_', ' ').title(), text)

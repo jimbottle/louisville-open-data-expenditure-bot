@@ -509,7 +509,7 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
 ## Accuracy Rules (CRITICAL)
 - NEVER rescale numbers: repeat values at the magnitude shown in the results (a value like 192,770.57 is about $192.8K, not millions).
 - Only state facts that appear in the results or the question. Do not describe what a figure includes or what years a dataset covers unless the results show it.
-- A "Related city legislation" block may follow the results. It is retrieved by keyword and is often only loosely related, so treat it as optional background: cite a file number inline (e.g. "per O-374-22") ONLY when that document actually explains a number in the results. Never cite it as the source of a figure, never let it contradict the results, and say nothing about it when it does not apply.
+- A "Related city legislation" block may follow the results. It is retrieved by keyword, so some entries will be irrelevant — judge each one. When a document explains what the money was for, why it was appropriated, or a figure in the results, add one short sentence of context and name its file number inline (e.g. "Council set the priorities for this money in R-083-21"). Ignore the rest in silence. The results are always the source of every number: never attribute a figure to a document, never let a document override the results, and never list documents you did not use.
 """
     # Pack facts (placeholders resolved by the pack itself) plus the
     # data-derived year fact computed above.
@@ -711,6 +711,11 @@ def _retrieve_documents(question: str) -> list:
     except Exception as e:
         log.warning("Document retrieval failed (answering without it): %s", e)
         return []
+
+
+def humanize_prose(text: str) -> str:
+    """humanize_text for running English — see its `prose` argument."""
+    return humanize_text(text, prose=True)
 
 
 def _cited_documents(doc_hits: list, answer_text: str) -> list:
@@ -940,7 +945,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
                     client, MODEL, interpret_system, empty_prompt, sql, "No rows returned", history=history, fallback_client=paid_client,
                     documents=documents,
                 ):
-                    yield send("interpretation", {"content": humanize_text(chunk)})
+                    yield send("interpretation", {"content": humanize_prose(chunk)})
             except Exception:
                 yield send("interpretation", {"content": "I wasn't able to find any data matching that question. Try broadening your search or rephrasing."})
             yield send("done", {})
@@ -1013,8 +1018,8 @@ Explain in plain text (no markdown) why this likely returned no results based on
         if draft and draft_truncated:
             # A timed-out draft is served as-is with a visible marker instead
             # of being polished into something that reads as complete.
-            served_text.append(humanize_text(draft))
-            yield send("interpretation", {"content": humanize_text(draft)})
+            served_text.append(humanize_prose(draft))
+            yield send("interpretation", {"content": humanize_prose(draft)})
             yield send("interpretation", {"content": "\n\n(Response truncated due to timeout)"})
         elif draft:
             # Refinement pass: rewrite the draft for plain language,
@@ -1031,7 +1036,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
                 ),
                 draft,
                 send,
-                transform=humanize_text,
+                transform=humanize_prose,
                 on_fail=lambda e: track_error("interpretation", f"Refine failed: {str(e)[:150]}"),
                 timeout=stream_timeout,
                 counter=refine_counter,

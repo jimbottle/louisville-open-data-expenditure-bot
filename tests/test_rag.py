@@ -249,9 +249,15 @@ def test_both_interpret_prompts_guard_against_over_citing():
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     served = open(os.path.join(repo, "app.py")).read()
     cli = analytics_agent.build_interpret_prompt("SCHEMA")
+    import re
     for text in (served, cli):
-        assert "Related city legislation" in text
-        assert "ONLY when that document actually explains" in text
+        # the CLI prompt is wrapped, so compare on normalized whitespace
+        flat = re.sub(r"\s+", " ", text)
+        assert "Related city legislation" in flat
+        # the model must judge relevance, cite what it uses, and never let a
+        # document become the authority for a number
+        assert "never attribute a figure to a document" in flat
+        assert "never list documents you did not use" in flat
 
 
 # ── the footer lists citations, not search results ──────────────────────────
