@@ -41,10 +41,12 @@ work), and it excludes the curation that separates "working" from "polished":
 
 ## Remaining for Louisville-level quality (not blocking, tracked as future work)
 
-- **Canonical map seeding/curation** — agency/payee maps are unseeded stubs
-  (engine mirrors source values). Louisville's maps took real curation; this
-  is the dominant human cost per city and needs the seeding tool from
-  docs/canonical-model.md §5.
+- **Canonical map seeding/curation** — *partly done*: the seeding tool
+  (docs/canonical-seeding.md) generated and installed a 1,205-row payee map,
+  collapsing 11,074 raw payees to 10,419 with zero false merges; the agency
+  names needed none. What remains is the semantic pass (acronyms, sibling
+  entities like `The Enquirer` / `Cincinnati Enquirer`), prioritized by spend
+  in docs/cincinnati-payee-curation.md.
 - **Frontend branding + starter questions** — UI still says Louisville; needs
   config-driven branding.
 - **Fuzzy join quality** (salaries/licenses ↔ expenditures) untested.

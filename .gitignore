@@ -12,3 +12,6 @@ __pycache__/
 # roborev snapshots
 /.roborev/
 data_cincinnati/
+
+# Seeder drafts are regenerable artifacts, never the curated map
+*.draft.csv
