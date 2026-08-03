@@ -810,3 +810,61 @@ def test_a_mostly_null_axis_leaves_nothing_to_chart():
                        "amt": [float(i) for i in range(61)]})
     out, _ = chart_window(df, "line", "month", "amt")
     assert len(out) < 2, "app.py raises on this and skips the chart"
+
+
+# ── an unordered result is not a random one ──────────────────────────────────
+
+def test_an_unordered_result_leads_with_the_largest_value():
+    """Generated SQL often omits ORDER BY entirely — the reported case was a
+    UNION ALL of a Mayor filter and a Police Chief filter — and DuckDB then
+    returns storage order. The reader gets a table in no discernible order and
+    a bar chart whose bars jump around, for a question that plainly meant
+    "who earns the most"."""
+    from data_model import order_for_display
+    df = pd.DataFrame({
+        "role": ["Mayor", "Mayor", "Police Chief", "Police Chief"],
+        "employee": ["James", "Greenberg", "Bates", "Humphrey"],
+        "ytd_total": [146035.41, 158115.58, 201104.74, 267811.04],
+    })
+    out = order_for_display(df, "SELECT ... UNION ALL SELECT ...;")
+    assert out["employee"].tolist() == ["Humphrey", "Bates", "Greenberg", "James"]
+    assert out["ytd_total"].is_monotonic_decreasing
+
+
+def test_an_explicit_order_by_is_never_second_guessed():
+    """An ORDER BY is an expressed intent, even when it disagrees with the
+    heuristic — including one that sorts ascending on purpose."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"payee": ["A", "B", "C"], "amt": [3.0, 1.0, 2.0]})
+    for sql in ("SELECT payee, amt FROM t ORDER BY payee",
+                "select * from t order by amt asc",
+                "SELECT * FROM t\nORDER   BY  amt DESC"):
+        assert order_for_display(df, sql)["amt"].tolist() == [3.0, 1.0, 2.0], sql
+
+
+def test_a_time_keyed_result_keeps_its_chronology():
+    """Chronology is the order of a trend, so reordering by value would make
+    the table nonsense and fight the chart layer, which sorts by axis."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"fiscal_year": [2024, 2025, 2026],
+                       "total_spend": [5.0, 9.0, 1.0]})
+    assert order_for_display(df, "SELECT ... GROUP BY 1")["fiscal_year"].tolist() == [2024, 2025, 2026]
+
+
+def test_reordering_is_stable_and_safe_on_odd_input():
+    """Ties keep the order the query produced; nothing here may raise."""
+    from data_model import order_for_display
+    tied = pd.DataFrame({"name": ["first", "second"], "amt": [7.0, 7.0]})
+    assert order_for_display(tied, "SELECT 1")["name"].tolist() == ["first", "second"]
+    # no measure to sort by, single row, and a missing sql are all no-ops
+    assert len(order_for_display(pd.DataFrame({"a": ["x", "y"]}), "SELECT 1")) == 2
+    assert len(order_for_display(pd.DataFrame({"a": [1.0]}), "SELECT 1")) == 1
+    assert len(order_for_display(pd.DataFrame({"a": [1.0, 2.0]}), None)) == 2
+
+
+def test_the_prompt_asks_for_an_explicit_order_by():
+    """The deterministic sort is a safety net; the SQL should say what it
+    means, and a UNION ALL needs its ORDER BY after the final SELECT."""
+    src = _app_source()
+    assert "ALWAYS give a multi-row result an explicit ORDER BY" in src
+    assert "UNION ALL queries too" in src

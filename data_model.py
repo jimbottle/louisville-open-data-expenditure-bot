@@ -542,6 +542,40 @@ def infer_chart(df) -> tuple:
     return chart_type, label_col, value_col
 
 
+# Reordering a huge frame costs more than it can possibly be worth, and
+# infer_chart's per-column nunique() is what makes it expensive.
+_MAX_REORDER_ROWS = 50_000
+
+
+def order_for_display(df, sql: str):
+    """Put the largest values first when the query expressed no order at all.
+
+    Generated SQL often omits ORDER BY entirely — a UNION ALL of a "Mayor"
+    filter and a "Police Chief" filter, say — and DuckDB then returns scan
+    order. The reader gets a table in no discernible order and a bar chart
+    whose bars jump around, when the question was plainly "who earns the
+    most". Sorting by the measure descending is what the question meant.
+
+    Applied ONLY when the SQL states no ordering anywhere. An explicit ORDER
+    BY is an expressed intent and is never second-guessed, even when it
+    disagrees with this heuristic. Time-keyed results are also left alone:
+    chronology is their order, and the chart layer sorts them by axis anyway.
+    """
+    if df is None or sql is None or len(df) < 2 or len(df) > _MAX_REORDER_ROWS:
+        return df
+    if re.search(r"\border\s+by\b", sql, re.I):
+        return df
+    try:
+        _, label_col, value_col = infer_chart(df)
+        if not value_col or (label_col and is_time_named(label_col)):
+            return df
+        # mergesort is stable, so rows tied on the measure keep the order the
+        # query produced rather than being shuffled.
+        return df.sort_values(value_col, ascending=False, kind="mergesort").reset_index(drop=True)
+    except Exception:
+        return df
+
+
 def chart_window(chart_df, chart_type: str, label_col: str, value_col: str) -> tuple:
     """Narrow a chartable frame to CHART_MAX_POINTS, and say which slice it is.
 

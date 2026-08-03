@@ -627,6 +627,11 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
     sql = fix_sql(sql)
     pd.set_option("display.float_format", lambda x: f"{x:,.2f}")
     result_df = con.execute(sql).fetchdf()
+    # Ordered here rather than at render time so the table, the chart and the
+    # text the model interprets all see the same rows in the same order — the
+    # summary should lead with the largest figure too.
+    from data_model import order_for_display
+    result_df = order_for_display(result_df, sql)
     result_str = result_df.to_string(index=False, max_rows=50)
     return result_df, result_str
 
