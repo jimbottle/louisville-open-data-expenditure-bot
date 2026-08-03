@@ -585,17 +585,30 @@ def selective_nested_order_direction(sql: str):
 
     is "which ten payees received the LEAST". Sorting that descending answers
     a different question with the same ten rows — largest-of-the-smallest
-    first — in the table, the chart, and the text the interpreter reads."""
-    return _scan_order_by(sql)[1]
+    first — in the table, the chart, and the text the interpreter reads.
+
+    The direction alone; callers that must also know WHICH column was sorted
+    (order_for_display does, since a direction only speaks for the measure)
+    read the (direction, key) pair from _scan_order_by."""
+    claimed = _scan_order_by(sql)[1]
+    return claimed[0] if claimed else None
 
 
 def _scan_order_by(sql: str) -> tuple:
-    """(has_top_level_order_by, selective_nested_direction)."""
+    """(has_top_level_order_by, selective_nested_clause).
+
+    selective_nested_clause is (direction, sort_key) for a nested ORDER BY
+    that a LIMIT makes selective, else None. The key is carried because the
+    direction only speaks for the measure when the measure is what was
+    sorted — see order_for_display.
+    """
     if not sql:
         return False, None
     top_level = False
-    direction = None
-    pending = []            # [(depth, direction)] awaiting a LIMIT at that depth
+    claimed = None
+    pending = []            # [(depth, direction, key)] awaiting a LIMIT
+    windows = []            # is the group at each depth an OVER (...) spec?
+    prev_word = ""
     depth, i, n = 0, 0, len(sql)
     while i < n:
         c = sql[i]
@@ -609,50 +622,79 @@ def _scan_order_by(sql: str) -> tuple:
                     break
                 i += 1
             i += 1
+            prev_word = ""
         elif c == '"':                                # quoted identifier
             i += 1
             while i < n and sql[i] != '"':
                 i += 1
             i += 1
+            prev_word = ""
         elif sql.startswith("--", i):
             nl = sql.find("\n", i)
             i = n if nl == -1 else nl + 1
         elif sql.startswith("/*", i):
-            end = sql.find("*/", i + 2)
-            i = n if end == -1 else end + 2
+            e = sql.find("*/", i + 2)
+            i = n if e == -1 else e + 2
         elif c == "(":
+            windows.append(prev_word.lower() == "over")
             depth += 1
+            prev_word = ""
             i += 1
         elif c == ")":
-            # A clause that never met a LIMIT before its group closed was
-            # cosmetic after all; it has no claim on the final order.
-            pending = [p for p in pending if p[0] < depth]
+            was_window = windows.pop() if windows else False
+            if was_window:
+                # A window spec orders rows WITHIN the function, never the
+                # result set. An enclosing LIMIT must not be able to claim it,
+                # or ROW_NUMBER() OVER (ORDER BY d ASC) ... LIMIT 5 would read
+                # as a bottom-N request.
+                pending = [p for p in pending if p[0] < depth]
+            else:
+                # Demote rather than drop: the LIMIT of a bottom-N query is as
+                # often written on the enclosing SELECT as inside the CTE, and
+                # a plain scan of an ordered CTE does come back in its order.
+                pending = [((p[0] - 1 if p[0] == depth else p[0]), p[1], p[2])
+                           for p in pending]
             depth = max(0, depth - 1)
+            prev_word = ""
             i += 1
-        else:
-            at_word = i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] == "_")
-            m = _ORDER_BY_RE.match(sql, i) if at_word else None
+        elif c.isalpha() or c == "_":
+            j = i
+            while j < n and (sql[j].isalnum() or sql[j] == "_"):
+                j += 1
+            word = sql[i:j]
+            low = word.lower()
+            m = _ORDER_BY_RE.match(sql, i) if low == "order" else None
             if m:
                 if depth == 0:
                     top_level = True
                 else:
-                    pending.append((depth, _first_key_direction(sql, m.end())))
+                    pending.append((depth,) + _first_key(sql, m.end()))
+                prev_word = ""
                 i = m.end()
                 continue
-            m = _LIMIT_RE.match(sql, i) if at_word else None
-            if m:
-                for d, direc in pending:
-                    if d == depth:
-                        direction = direc      # innermost-latest wins
+            if low == "limit":
+                for p in pending:
+                    if p[0] == depth:
+                        claimed = (p[1], p[2])      # innermost-latest wins
                 pending = [p for p in pending if p[0] != depth]
-                i = m.end()
+                prev_word = ""
+                i = j
                 continue
+            prev_word = word
+            i = j
+        else:
+            if not c.isspace():
+                prev_word = ""
             i += 1
-    return top_level, direction
+    return top_level, claimed
 
 
-def _first_key_direction(sql: str, pos: int) -> str:
-    """ASC/DESC of an ORDER BY's FIRST sort key. SQL's default is ASC."""
+def _first_key(sql: str, pos: int) -> tuple:
+    """(direction, key text) of an ORDER BY's FIRST sort key.
+
+    SQL's default is ASC, so a bare column means ascending — which is what
+    makes "ORDER BY total LIMIT 10" a bottom-N query."""
+    direction, end = "asc", None
     depth, i, n = 0, pos, len(sql)
     while i < n:
         c = sql[i]
@@ -665,15 +707,45 @@ def _first_key_direction(sql: str, pos: int) -> str:
         elif depth == 0:
             if c in ",;":
                 break
-            if not (sql[i - 1].isalnum() or sql[i - 1] == "_"):
-                if _DESC_RE.match(sql, i):
-                    return "desc"
-                if _ASC_RE.match(sql, i):
-                    return "asc"
-                if _LIMIT_RE.match(sql, i):
+            if c.isalpha() or c == "_":
+                j = i
+                while j < n and (sql[j].isalnum() or sql[j] == "_"):
+                    j += 1
+                low = sql[i:j].lower()
+                if low in ("asc", "desc"):
+                    direction = low
+                    if end is None:
+                        end = i
+                elif low in ("limit", "offset", "nulls", "fetch", "window"):
+                    if end is None:
+                        end = i
                     break
+                i = j
+                continue
         i += 1
-    return "asc"
+    if end is None:
+        end = i
+    return direction, sql[pos:end].strip().strip('"')
+
+
+def _key_is_measure(key: str, value_col: str, columns) -> bool:
+    """Did the selective ORDER BY sort the column we are about to sort by?
+
+    An ASC that slices on check_date or on a name says nothing about the
+    measure; transplanting it renders the cheapest payee first. A bare ordinal
+    is resolved against the frame's own columns, which is right for the common
+    SELECT * passthrough and declines to guess otherwise."""
+    if not key or not value_col:
+        return False
+    bare = key.split(".")[-1].strip().strip('"').lower()
+    target = value_col.strip().lower()
+    if bare == target:
+        return True
+    if bare.isdigit():
+        idx = int(bare) - 1
+        cols = list(columns)
+        return 0 <= idx < len(cols) and str(cols[idx]).strip().lower() == target
+    return False
 
 
 def order_for_display(df, sql: str):
@@ -701,10 +773,14 @@ def order_for_display(df, sql: str):
         if not value_col or (label_col and is_time_named(label_col)):
             return df
         # Largest-first by default, but a nested ORDER BY paired with a LIMIT
-        # already chose a direction — it decided which rows are here at all, so
-        # forcing DESC would answer a different question with the same rows.
-        nested = selective_nested_order_direction(sql)
-        ascending = nested == "asc"
+        # already chose a direction — it decided which rows are here at all,
+        # so forcing DESC would answer a different question with the same rows.
+        # Honoured only when that clause sorted the MEASURE: an ASC that slices
+        # on check_date or alphabetically says nothing about the totals, and
+        # borrowing it would put the cheapest payee on top.
+        nested = _scan_order_by(sql)[1]
+        ascending = bool(nested and nested[0] == "asc"
+                         and _key_is_measure(nested[1], value_col, df.columns))
         # mergesort is stable, so rows tied on the measure keep the order the
         # query produced rather than being shuffled.
         return df.sort_values(value_col, ascending=ascending,

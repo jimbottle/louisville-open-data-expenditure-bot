@@ -959,3 +959,67 @@ def test_a_limited_desc_cte_still_sorts_largest_first():
     from data_model import order_for_display
     df = pd.DataFrame({"payee": ["a", "b", "c"], "total_spend": [1.0, 3.0, 2.0]})
     assert order_for_display(df, _CTE_JOIN_SQL)["total_spend"].tolist() == [3.0, 2.0, 1.0]
+
+
+# ── the borrowed direction must speak for the MEASURE ────────────────────────
+
+_CTE_SLICE_BY_DATE_SQL = (
+    "WITH recent AS (SELECT * FROM expenditures ORDER BY check_date ASC LIMIT 100) "
+    "SELECT payee_canonical, SUM(extended_amount) AS total FROM recent GROUP BY 1"
+)
+_CTE_OUTER_LIMIT_SQL = (
+    "WITH lowest AS (SELECT payee_canonical, SUM(extended_amount) AS total "
+    "FROM expenditures GROUP BY 1 ORDER BY total ASC) SELECT * FROM lowest LIMIT 10"
+)
+_WINDOW_ASC_OUTER_LIMIT_SQL = (
+    "SELECT payee, ROW_NUMBER() OVER (ORDER BY check_date ASC) AS rn, total "
+    "FROM expenditures LIMIT 5"
+)
+
+
+def test_a_slice_on_a_non_measure_column_does_not_flip_the_measure():
+    """The ASC orders check_date — it picks the earliest 100 rows and says
+    nothing about the totals. Borrowing it renders the CHEAPEST payee first,
+    which is the symptom order_for_display exists to prevent."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"payee_canonical": ["cheap", "mid", "big"],
+                       "total": [1.0, 2.0, 3.0]})
+    out = order_for_display(df, _CTE_SLICE_BY_DATE_SQL)
+    assert out["total"].tolist() == [3.0, 2.0, 1.0], "largest-first is the default"
+
+
+def test_a_bottom_n_with_the_limit_on_the_enclosing_select():
+    """The other natural spelling of bottom-N: the ORDER BY sits in the CTE
+    and the LIMIT on the outer SELECT. A plain scan of an ordered CTE comes
+    back in its order, so this LIMIT is exactly as selective as an inner one."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"payee_canonical": ["cheap", "mid", "big"],
+                       "total": [1.0, 2.0, 3.0]})
+    assert order_for_display(df, _CTE_OUTER_LIMIT_SQL)["total"].tolist() == [1.0, 2.0, 3.0]
+    implicit = _CTE_OUTER_LIMIT_SQL.replace("ORDER BY total ASC", "ORDER BY total")
+    assert order_for_display(df, implicit)["total"].tolist() == [1.0, 2.0, 3.0]
+
+
+def test_a_window_spec_cannot_be_claimed_by_an_enclosing_limit():
+    """Allowing an outer LIMIT to claim a demoted clause must not let an
+    OVER (...) spec vote: it orders rows inside the function, never the
+    result set, so this is not a bottom-N request."""
+    from data_model import selective_nested_order_direction, order_for_display
+    assert selective_nested_order_direction(_WINDOW_ASC_OUTER_LIMIT_SQL) is None
+    df = pd.DataFrame({"payee": ["a", "b", "c"], "total": [1.0, 2.0, 3.0]})
+    assert order_for_display(df, _WINDOW_ASC_OUTER_LIMIT_SQL)["total"].tolist() == [3.0, 2.0, 1.0]
+
+
+@pytest.mark.parametrize("key,expected,why", [
+    ("total", True, "exact match"),
+    ("r.total", True, "table-qualified"),
+    ('"total"', True, "quoted"),
+    ("TOTAL", True, "case-insensitive"),
+    ("check_date", False, "a different column entirely"),
+    ("2", True, "ordinal resolving to the measure"),
+    ("1", False, "ordinal resolving to the label"),
+    ("9", False, "ordinal out of range declines to guess"),
+])
+def test_only_a_sort_on_the_measure_counts(key, expected, why):
+    from data_model import _key_is_measure
+    assert _key_is_measure(key, "total", ["payee", "total"]) is expected, why
