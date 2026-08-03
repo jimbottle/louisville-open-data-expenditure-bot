@@ -346,6 +346,34 @@
     transition: opacity 0.2s;
   }
 
+  /* Persistent "Lou is processing" line. Unlike .status-line it survives the
+     first content arriving, because the slowest phases (interpreting, then
+     refining) run AFTER the results table has already rendered — that is
+     precisely the stretch where the page otherwise looks finished but is not. */
+  .agent .processing-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+    padding: 2px 2px 6px;
+    transition: opacity 0.2s;
+  }
+  .agent .processing-line::before {
+    content: "";
+    width: 9px;
+    height: 9px;
+    border: 1.5px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: lou-spin 0.7s linear infinite;
+    flex: none;
+  }
+  @keyframes lou-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .agent .processing-line::before { animation-duration: 2.4s; }
+  }
+
   /* Quiet per-message action (Copy answer). */
   .agent .msg-action {
     align-self: flex-start;
@@ -1112,6 +1140,34 @@ async function streamAnswer(question, opts = {}) {
   activeController = controller;
   let receivedAnyEvent = false;
 
+  // "Lou is processing" — shown from submit until the stream ends, in BOTH
+  // modes. Deliberately independent of statusLine/typing, which are torn down
+  // as soon as the first content arrives: interpreting and refining happen
+  // after the results table renders, and that is the stretch where the answer
+  // looks complete but is still being written.
+  let processingLine = document.createElement('div');
+  processingLine.className = 'processing-line';
+  processingLine.setAttribute('role', 'status');
+  processingLine.setAttribute('aria-live', 'polite');
+  processingLine.textContent = 'Lou is processing…';
+  agentDiv.appendChild(processingLine);
+
+  const setProcessing = (text) => {
+    if (!processingLine) return;
+    processingLine.textContent = `Lou is processing… ${text}`.trim();
+    // Re-append so it stays the last thing in the turn as results, the chart
+    // and the interpretation are appended above it.
+    agentDiv.appendChild(processingLine);
+  };
+
+  const clearProcessing = () => {
+    if (!processingLine) return;
+    const pl = processingLine;
+    processingLine = null;
+    pl.style.opacity = '0';
+    setTimeout(() => pl.remove(), 200);
+  };
+
   const clearWaiting = () => {
     typing.remove();
     if (statusLine) {
@@ -1198,6 +1254,9 @@ async function streamAnswer(question, opts = {}) {
         // status events (e.g. the backend's "Summarizing…" sent after results) —
         // re-inserting relative to the now-removed typing node would throw.
         if (event.type === 'status') {
+          // The persistent line tracks every phase, in both modes — including
+          // the post-results ones the block below deliberately ignores.
+          setProcessing(event.content);
           if (!devMode && !receivedAnyEvent) {
             if (!statusLine) {
               statusLine = document.createElement('div');
@@ -1445,6 +1504,9 @@ async function streamAnswer(question, opts = {}) {
   } finally {
     clearTimeout(stallTimer);
     activeController = null;
+    // Every exit path — done, error, timeout, abort — passes through here, so
+    // the indicator can never outlive the request that created it.
+    clearProcessing();
   }
 
   // Safety net: if the stream ended without producing any renderable content,

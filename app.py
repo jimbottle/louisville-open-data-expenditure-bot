@@ -70,6 +70,7 @@ from data_model import (
     get_full_schema_description,
     humanize_text,
     infer_chart,
+    CHART_MAX_POINTS,
     load_all_data,
     year_context,
 )
@@ -983,9 +984,14 @@ async def ask(request: Request):
                     chart_df = drop_total_rows(chart_df, label_col, value_col)
                     if len(chart_df) < 2:
                         raise ValueError("too few chartable rows after dropping total rows")
-                    labels = chart_df[label_col].astype(str).tolist()[:30]
-                    values = chart_df[value_col].tolist()[:30]
+                    labels = chart_df[label_col].astype(str).tolist()[:CHART_MAX_POINTS]
+                    values = chart_df[value_col].tolist()[:CHART_MAX_POINTS]
                     title = humanize_text(value_col)
+                    # Say so when the chart is a window onto a longer result,
+                    # or a "top agencies" bar chart of 30 out of 61 reads as
+                    # the whole ranking.
+                    if len(chart_df) > CHART_MAX_POINTS:
+                        title += f" (top {CHART_MAX_POINTS} of {len(chart_df):,})"
                     label_axis = humanize_text(label_col)
                     yield send("chart", {
                         "chart_type": chart_type,

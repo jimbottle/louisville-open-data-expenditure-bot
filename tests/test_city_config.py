@@ -241,3 +241,27 @@ def test_api_config_handles_a_pack_with_no_city_name(monkeypatch):
     # one name for one unknown city: the tab must not read "City Open Data"
     # while the header reads "Open Data Bot"
     assert cfg["tab_title"] == cfg["bot_name"]
+
+
+# ── "Lou is processing" must span the whole request ──────────────────────────
+
+def test_the_processing_indicator_survives_the_first_content():
+    """The interpreting and refining phases run AFTER the results table has
+    rendered, so an indicator torn down by clearWaiting() (as the status line
+    and typing dots are) leaves the answer looking finished while it is still
+    being written. This one is cleared only in the stream's finally block, so
+    it covers every phase and cannot outlive a failed or aborted request."""
+    with open(os.path.join(REPO, "static", "index.html")) as f:
+        html = f.read()
+    assert "Lou is processing" in html
+    # its own element, not the transient status line
+    assert "processing-line" in html
+    # torn down exactly once, on the path every outcome passes through
+    assert "clearProcessing()" in html
+    finally_block = html[html.index("} finally {"):]
+    assert "clearProcessing()" in finally_block[:400], \
+        "the indicator must be cleared in the stream's finally, not only on success"
+    # and it must not be swept away with the initial-wait UI
+    clear_waiting = html[html.index("const clearWaiting = () => {"):]
+    assert "clearProcessing" not in clear_waiting[:clear_waiting.index("};")], \
+        "clearWaiting runs when the first content arrives — too early"

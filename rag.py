@@ -46,6 +46,36 @@ DEFAULT_SINCE = "2020-01-01"
 PAGE_SIZE = 1000
 
 
+def _matter_url(web: str, matter_id) -> str:
+    """Public InSite page for a matter, addressed by the API's own MatterId.
+
+    The obvious URL — LegislationDetail.aspx?ID=<MatterId>&GUID=<MatterGuid> —
+    does not work: InSite's ?ID= is a separate identifier space (O-167-22 is
+    MatterId 60267 in the API and ID 5922229 on the web, with a different GUID
+    as well), and the API exposes no field carrying the web id. Every such link
+    returns a 19-byte "Invalid parameters!" body under HTTP 200, which is why
+    this shipped looking healthy: the citation footer rendered, the link 200'd,
+    and only a human clicking it ever saw the failure.
+
+    Gateway.aspx?M=L resolves the API id server-side and redirects."""
+    return f"{web}?M=L&ID={matter_id}"
+
+
+def _repaired_url(url: str, matter_id) -> str:
+    """Heal a stored LegislationDetail URL at read time.
+
+    The URL is written into the corpus at ingest, and the corpus lives in a
+    mounted volume that a deploy does not replace — so shipping the corrected
+    _matter_url alone would leave production serving the same dead links off
+    the old database until someone remembered to re-ingest. The host is taken
+    from the stored URL so this needs no config, and a corpus written by the
+    fixed ingest passes through untouched."""
+    if url and "/LegislationDetail.aspx" in url:
+        return _matter_url(url.split("/LegislationDetail.aspx")[0] + "/Gateway.aspx",
+                           matter_id)
+    return url
+
+
 def corpus_settings(cfg=None) -> dict:
     """Resolve the corpus source for a city pack, falling back to Louisville."""
     block = (getattr(cfg, "raw", {}) or {}).get("rag", {}) if cfg else {}
@@ -53,7 +83,13 @@ def corpus_settings(cfg=None) -> dict:
     return {
         "client": client,
         "api": f"https://webapi.legistar.com/v1/{client}",
-        "web": f"https://{client}.legistar.com/LegislationDetail.aspx",
+        # Gateway, NOT LegislationDetail: the InSite viewer's ?ID= is a
+        # different identifier space from the Web API's MatterId (7-digit vs
+        # 5-digit, and its GUID differs too), so a LegislationDetail URL built
+        # from API data answers "Invalid parameters!" for every document.
+        # Gateway.aspx?M=L takes the API's own MatterId and redirects to the
+        # right page. See _matter_url.
+        "web": f"https://{client}.legistar.com/Gateway.aspx",
         "matter_type_ids": tuple(block.get("matter_type_ids") or MATTER_TYPE_IDS),
         "since": block.get("since") or DEFAULT_SINCE,
         "db": block.get("db") or DEFAULT_DB,
@@ -113,7 +149,7 @@ def ingest(db: str = None, since: str = None, cfg=None) -> int:
                     (m.get("MatterPassedDate") or "")[:10] or None,
                     m.get("MatterEnactmentNumber"),
                     text,
-                    f"{WEB}?ID={m['MatterId']}&GUID={m.get('MatterGuid', '')}",
+                    _matter_url(WEB, m["MatterId"]),
                 ))
             if len(batch) < PAGE_SIZE:
                 break
@@ -226,7 +262,7 @@ def retrieve(question: str, k: int = 3, db_path: str = DEFAULT_DB, min_score: fl
         _load_fts(con)
         hits = con.execute("""
             SELECT file_no, matter_type, status, intro_date, passed_date, enactment_no,
-                   text, url,
+                   text, url, doc_id,
                    fts_main_documents.match_bm25(doc_id, ?) AS score
             FROM documents
             WHERE score IS NOT NULL AND score >= ?
@@ -236,8 +272,13 @@ def retrieve(question: str, k: int = 3, db_path: str = DEFAULT_DB, min_score: fl
     finally:
         con.close()
     cols = ["file_no", "matter_type", "status", "intro_date", "passed_date",
-            "enactment_no", "text", "url", "score"]
-    return [dict(zip(cols, h)) for h in hits]
+            "enactment_no", "text", "url", "doc_id", "score"]
+    out = []
+    for h in hits:
+        d = dict(zip(cols, h))
+        d["url"] = _repaired_url(d["url"], d.pop("doc_id"))
+        out.append(d)
+    return out
 
 
 def corpus_size(db_path: str) -> int:

@@ -411,6 +411,16 @@ def get_compact_schema_description(con: duckdb.DuckDBPyConnection) -> str:
     return "\n".join(out)
 
 
+# How many points the chart actually renders. The caller truncates to this,
+# and a truncated chart says so in its title.
+CHART_MAX_POINTS = 30
+# Ceiling on how large a result may be and still be worth charting. It exists
+# only to keep a raw multi-thousand-row dump from being represented by its
+# first 30 rows; it must stay well ABOVE CHART_MAX_POINTS, because a result
+# that merely needs truncating is the normal case for a ranked "top spenders"
+# question. When this was 50 — under the render cap's own reach — a 61-row
+# agency ranking produced no chart at all while a 50-row one charted fine.
+CHART_MAX_ROWS = 300
 CHART_TIME_KEYWORDS = ("year", "fiscal", "month", "date")
 CHART_LABEL_KEYWORDS = CHART_TIME_KEYWORDS + ("name", "agency", "payee", "type", "category", "fund")
 
@@ -471,7 +481,7 @@ def infer_chart(df) -> tuple:
         label_col = next((c for c in cols if c != value_col and ndist(c) > 1), None)
 
     chart_type = None
-    if label_col and value_col and 2 <= n <= 50:
+    if label_col and value_col and 2 <= n <= CHART_MAX_ROWS:
         is_time = is_time_named(label_col)
         clean_series = ndist(label_col) == n  # one row per distinct time point
         if is_time and clean_series:

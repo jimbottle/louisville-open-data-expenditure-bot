@@ -586,3 +586,39 @@ def test_table_mode_still_maps_bare_column_names():
     from data_model import humanize_text
     assert humanize_text("Other") != "Other"
     assert humanize_text("extended_amount") == humanize_text("extended_amount", prose=True)
+
+
+# ── chart inference must not refuse what the renderer would happily truncate ──
+
+def test_a_ranking_longer_than_the_render_cap_still_charts():
+    """"Which agencies have spent the most?" returns 61 rows and produced NO
+    chart, while the same query capped at 50 charted fine — the inference
+    ceiling sat below the renderer's own reach. A ranked result that merely
+    needs truncating is the most chartable shape there is."""
+    import pandas as pd
+    from data_model import infer_chart, CHART_MAX_POINTS, CHART_MAX_ROWS
+    df = pd.DataFrame({
+        "agency_canonical": [f"Agency {i}" for i in range(61)],
+        "total_spend": [float(1_000_000_000 - i * 10_000_000) for i in range(61)],
+    })
+    assert infer_chart(df)[0] == "bar"
+    # the ceiling must stay clear of the render cap, or this regresses quietly
+    assert CHART_MAX_ROWS > CHART_MAX_POINTS
+
+
+def test_a_raw_dump_is_still_refused():
+    """The ceiling exists so a multi-thousand-row result is not 'summarized'
+    by whichever 30 rows happen to come first."""
+    import pandas as pd
+    from data_model import infer_chart, CHART_MAX_ROWS
+    df = pd.DataFrame({"payee": [f"P{i}" for i in range(CHART_MAX_ROWS + 1)],
+                       "amt": [float(i) for i in range(CHART_MAX_ROWS + 1)]})
+    assert infer_chart(df)[0] is None
+
+
+def test_a_truncated_chart_says_so_in_its_title():
+    """30 of 61 bars rendered as a bare 'Total Spend' reads as the whole
+    ranking. Pinned against the source, like the other prompt/UI contracts."""
+    src = _app_source()
+    assert "top {CHART_MAX_POINTS} of {len(chart_df):,}" in src
+    assert "[:CHART_MAX_POINTS]" in src, "the renderer must use the shared cap"

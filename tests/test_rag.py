@@ -564,3 +564,60 @@ def test_a_plain_load_never_consults_the_latch():
     con = _WorkingCon()
     rag._load_fts(con)
     assert con.statements == ["LOAD fts;"]
+
+
+# ── citation links must reach a real page ────────────────────────────────────
+
+def test_matter_urls_use_the_gateway_not_legislationdetail():
+    """LegislationDetail.aspx?ID=<MatterId> is the obvious URL and it is wrong:
+    InSite's ?ID= is a different identifier space from the Web API's MatterId
+    (O-167-22 is 60267 in the API, 5922229 on the web, with a different GUID
+    too), so every citation link answered "Invalid parameters!". Nothing caught
+    it because that error ships as HTTP 200 with a 19-byte body — the footer
+    rendered, the link resolved, and only a human clicking it ever found out."""
+    s = rag.corpus_settings()
+    assert s["web"].endswith("/Gateway.aspx"), "LegislationDetail cannot be built from API ids"
+    url = rag._matter_url(s["web"], 61715)
+    assert url == "https://louisville.legistar.com/Gateway.aspx?M=L&ID=61715"
+    assert "LegislationDetail" not in url
+    # the id must be the API's own MatterId, since that is all we ever have
+    assert url.endswith("ID=61715")
+
+
+def test_a_pack_gets_its_own_gateway_host():
+    from city_config import CityConfig
+    s = rag.corpus_settings(CityConfig({"rag": {"legistar_client": "cincinnati"}}, "."))
+    assert rag._matter_url(s["web"], 42) == \
+        "https://cincinnati.legistar.com/Gateway.aspx?M=L&ID=42"
+
+
+def test_a_stale_corpus_is_healed_at_read_time():
+    """The URL is baked in at ingest and the corpus lives in a mounted volume
+    a deploy does not replace, so fixing only the ingest would leave production
+    serving dead links off the old database. The host comes from the stored
+    URL, so no config is needed to repair it."""
+    old = "https://louisville.legistar.com/LegislationDetail.aspx?ID=58091&GUID=D065BDBC"
+    assert rag._repaired_url(old, 58091) == \
+        "https://louisville.legistar.com/Gateway.aspx?M=L&ID=58091"
+    # another city's corpus keeps its own host
+    assert rag._repaired_url(
+        "https://cincinnati.legistar.com/LegislationDetail.aspx?ID=1&GUID=x", 7) == \
+        "https://cincinnati.legistar.com/Gateway.aspx?M=L&ID=7"
+    # already-correct and empty URLs pass through untouched
+    good = "https://louisville.legistar.com/Gateway.aspx?M=L&ID=58091"
+    assert rag._repaired_url(good, 58091) == good
+    assert rag._repaired_url(None, 1) is None
+
+
+def test_retrieve_returns_healed_urls(fixture_db):
+    """End of the path that matters: what the citation footer actually links."""
+    import duckdb as _d
+    con = _d.connect(fixture_db)
+    con.execute("UPDATE documents SET url = "
+                "'https://louisville.legistar.com/LegislationDetail.aspx?ID=' "
+                "|| CAST(doc_id AS VARCHAR) || '&GUID=stale'")
+    con.close()
+    hits = rag.retrieve("american rescue plan", k=1, db_path=fixture_db, min_score=0.1)
+    assert hits
+    assert hits[0]["url"] == "https://louisville.legistar.com/Gateway.aspx?M=L&ID=1"
+    assert "doc_id" not in hits[0], "doc_id is an internal join key, not a citation field"
