@@ -623,7 +623,7 @@ def test_a_truncated_ranking_keeps_the_top_and_says_so():
     from data_model import chart_window, CHART_MAX_POINTS
     df = pd.DataFrame({"agency": [f"A{i}" for i in range(61)],
                        "total_spend": [float(1000 - i) for i in range(61)]})
-    out, note = chart_window(df, "bar", "total_spend")
+    out, note = chart_window(df, "bar", "agency", "total_spend")
     assert len(out) == CHART_MAX_POINTS
     assert note == f"top {CHART_MAX_POINTS} of 61"
     assert out["total_spend"].iloc[0] == 1000.0, "the heaviest row must survive"
@@ -638,7 +638,7 @@ def test_a_truncated_time_series_keeps_the_NEWEST_points():
     from data_model import chart_window, CHART_MAX_POINTS
     months = pd.date_range("2021-01-01", periods=61, freq="MS").strftime("%Y-%m")
     df = pd.DataFrame({"month": months, "total_spend": [float(i) for i in range(61)]})
-    out, note = chart_window(df, "line", "total_spend")
+    out, note = chart_window(df, "line", "month", "total_spend")
     assert note == f"last {CHART_MAX_POINTS} of 61"
     assert out["month"].iloc[-1] == months[-1], "the newest point must be charted"
     assert months[0] not in set(out["month"]), "the oldest points are the ones dropped"
@@ -650,7 +650,7 @@ def test_an_unranked_bar_result_does_not_claim_to_be_a_top_n():
     from data_model import chart_window, CHART_MAX_POINTS
     df = pd.DataFrame({"payee": [f"P{i:03d}" for i in range(61)],
                        "amt": [float((i * 37) % 61) for i in range(61)]})
-    _, note = chart_window(df, "bar", "amt")
+    _, note = chart_window(df, "bar", "payee", "amt")
     assert note == f"{CHART_MAX_POINTS} of 61"
     assert "top" not in note
 
@@ -659,7 +659,7 @@ def test_a_frame_that_fits_is_left_alone():
     import pandas as pd
     from data_model import chart_window
     df = pd.DataFrame({"a": ["x", "y"], "v": [2.0, 1.0]})
-    out, note = chart_window(df, "bar", "v")
+    out, note = chart_window(df, "bar", "a", "v")
     assert note is None and len(out) == 2
 
 
@@ -696,3 +696,50 @@ def test_loading_the_cache_drops_entries_with_dead_links(tmp_path, monkeypatch):
     loaded = app._load_cache()
     assert good_key in loaded
     assert dead_key not in loaded, "a cached dead link is served to a reader as-is"
+
+
+@pytest.mark.parametrize("order", ["ascending", "descending"])
+def test_a_month_series_keeps_its_newest_end_end_to_end(order):
+    """The bug the hand-written "line" test could not see. A month axis is
+    SUBSTR(invoice_date, 1, 7) -> '2021-01' strings, which failed the old
+    \\d{4}-only sortability check and were classified "bar" — so a 61-month
+    series went down the categorical path and lost everything recent, exactly
+    the truncation the tail branch was added to prevent. Runs the real
+    infer_chart -> chart_window path rather than asserting a chart type."""
+    from data_model import infer_chart, chart_window, CHART_MAX_POINTS
+    months = pd.date_range("2021-01-01", periods=61, freq="MS").strftime("%Y-%m")
+    spend = [float(i) for i in range(61)]
+    df = pd.DataFrame({"month": months, "total_spend": spend})
+    if order == "descending":            # SQL that ordered newest-first
+        df = df.iloc[::-1].reset_index(drop=True)
+
+    chart_type, label_col, value_col = infer_chart(df)
+    assert chart_type == "line", "a zero-padded YYYY-MM axis sorts chronologically"
+    out, note = chart_window(df, chart_type, label_col, value_col)
+    assert note == f"last {CHART_MAX_POINTS} of 61"
+    charted = set(out["month"])
+    assert months[-1] in charted, "the newest month must survive truncation"
+    assert months[0] not in charted, "the oldest months are what gets dropped"
+
+
+def test_a_month_axis_truncates_from_the_right_end_even_as_a_bar():
+    """Belt and braces: the decision is made from the frame, so a time axis
+    that lands on the categorical path for any other reason still keeps its
+    recent end instead of its oldest."""
+    from data_model import chart_window, CHART_MAX_POINTS
+    months = pd.date_range("2021-01-01", periods=61, freq="MS").strftime("%Y-%m")
+    df = pd.DataFrame({"month": months, "amt": [float(i) for i in range(61)]})
+    out, note = chart_window(df, "bar", "month", "amt")
+    assert note == f"last {CHART_MAX_POINTS} of 61"
+    assert months[-1] in set(out["month"])
+
+
+def test_a_non_chronological_label_is_not_mistaken_for_a_time_axis():
+    """Month NAMES mis-sort lexicographically, which is why infer_chart
+    downgrades them. chart_window must not then treat them as ordered time."""
+    from data_model import chart_window, CHART_MAX_POINTS
+    names = [f"{m} 2021" for m in
+             ("Apr", "Aug", "Dec", "Feb", "Jan", "Jul", "Jun", "Mar", "May", "Nov", "Oct", "Sep")] * 6
+    df = pd.DataFrame({"month_name": names[:61], "amt": [float(61 - i) for i in range(61)]})
+    _, note = chart_window(df, "bar", "month_name", "amt")
+    assert note == f"top {CHART_MAX_POINTS} of 61", "values descend, so this is a ranking"

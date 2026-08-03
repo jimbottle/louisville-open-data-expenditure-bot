@@ -425,6 +425,35 @@ CHART_TIME_KEYWORDS = ("year", "fiscal", "month", "date")
 CHART_LABEL_KEYWORDS = CHART_TIME_KEYWORDS + ("name", "agency", "payee", "type", "category", "fund")
 
 
+# YYYY, YYYY-MM, YYYY-MM-DD. Zero-padded ISO parts sort lexicographically in
+# chronological order, so a string column of these is a legitimate time axis.
+# Restricting this to bare \d{4} sent "spending by month" (SUBSTR(date,1,7) ->
+# '2021-01') down the categorical path, where it was charted from the wrong end.
+_ISO_DATE_PART = re.compile(r"\d{4}(-\d{2}){0,2}")
+
+
+def is_time_named(col: str) -> bool:
+    return any(k in col.lower() for k in CHART_TIME_KEYWORDS)
+
+
+def is_chronological(series, require_sorted: bool = True) -> bool:
+    """Is this column a time axis whose order is meaningful?
+
+    require_sorted=False asks only "could this be sorted chronologically?",
+    which is what chart-type inference needs; the default also demands the
+    frame actually BE in ascending order, which is what deciding which end to
+    truncate needs."""
+    if series.dtype.kind in "iufcM":
+        return bool(series.is_monotonic_increasing) if require_sorted else True
+    try:
+        s = series.dropna().astype(str)
+        if not bool(s.str.fullmatch(_ISO_DATE_PART).all()):
+            return False
+        return bool(s.is_monotonic_increasing) if require_sorted else True
+    except Exception:
+        return False
+
+
 def infer_chart(df) -> tuple:
     """Pick (chart_type, label_col, value_col) for a result DataFrame.
 
@@ -492,43 +521,47 @@ def infer_chart(df) -> tuple:
             chart_type = "bar"
 
     # A line axis must be chronologically sortable (the caller sorts by it):
-    # numeric, datetime, or 4-digit-year strings. A non-numeric string axis
+    # numeric, datetime, or zero-padded ISO date parts, which sort
+    # lexicographically in chronological order. A non-numeric string axis
     # (e.g. month NAMES) would mis-sort, so downgrade to a categorical chart.
     if chart_type == "line":
-        col = df[label_col]
-        sortable = col.dtype.kind in "iufcM"
-        if not sortable:
-            try:
-                sortable = bool(col.dropna().astype(str).str.fullmatch(r"\d{4}").all())
-            except Exception:
-                sortable = False
-        if not sortable:
+        if not is_chronological(df[label_col], require_sorted=False):
             chart_type = "pie" if n <= 5 else "bar"
 
     return chart_type, label_col, value_col
 
 
-def chart_window(chart_df, chart_type: str, value_col: str) -> tuple:
+def chart_window(chart_df, chart_type: str, label_col: str, value_col: str) -> tuple:
     """Narrow a chartable frame to CHART_MAX_POINTS, and say which slice it is.
 
     Returns (windowed_df, note) where note is None if nothing was dropped.
 
-    Which END to keep depends on the chart. A line frame arrives sorted
-    oldest-first, so taking the head would chart the 30 oldest months of a
-    61-month series and drop everything recent — the opposite of what the
-    question asked. A ranked bar frame is the reverse: its head IS the answer.
+    Which END to keep is decided from the FRAME, not from chart_type. Keying it
+    on chart_type == "line" looked right and was not: a month axis of '2021-01'
+    strings is classified "bar" whenever it fails the line-sortability check,
+    so a 61-month series still lost its recent end through the categorical
+    path. What matters is whether the axis is a time axis and how it is
+    ordered, which is a property of the data.
+
+    - a time axis ascending  -> keep the tail (the newest months)
+    - a time axis descending -> keep the head; it is already the newest
+    - anything else          -> keep the head
 
     The note is worded to what the frame actually is. "Top N" asserts a
     ranking, so it is claimed only when the values really do descend; a result
-    the SQL ordered by name is just the first N of M, and a time series is the
-    last N of M. Pure so the wording can be pinned in tests — the previous
-    version labelled a truncated series "top 30 of 61", which was wrong twice
-    over: not a ranking, and pointing away from the data it had cut."""
+    the SQL ordered by name is just N of M, and a time series is the last N."""
     total = len(chart_df)
     if total <= CHART_MAX_POINTS:
         return chart_df, None
-    if chart_type == "line":
-        return chart_df.tail(CHART_MAX_POINTS), f"last {CHART_MAX_POINTS} of {total:,}"
+
+    axis = chart_df[label_col] if label_col in chart_df else None
+    if chart_type == "line" or (axis is not None and is_time_named(label_col)):
+        if axis is None or is_chronological(axis):
+            return chart_df.tail(CHART_MAX_POINTS), f"last {CHART_MAX_POINTS} of {total:,}"
+        if is_chronological(axis[::-1]):
+            # Newest first already: the head IS the recent end.
+            return chart_df.head(CHART_MAX_POINTS), f"last {CHART_MAX_POINTS} of {total:,}"
+
     head = chart_df.head(CHART_MAX_POINTS)
     ranked = bool(head[value_col].is_monotonic_decreasing)
     return head, (f"top {CHART_MAX_POINTS} of {total:,}" if ranked

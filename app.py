@@ -1008,7 +1008,7 @@ async def ask(request: Request):
                         raise ValueError("too few chartable rows after dropping total rows")
                     # Which end to keep, and what to call the slice, depends on
                     # the chart (see data_model.chart_window).
-                    chart_df, window = chart_window(chart_df, chart_type, value_col)
+                    chart_df, window = chart_window(chart_df, chart_type, label_col, value_col)
                     title = humanize_text(value_col)
                     if window:
                         title += f" ({window})"
