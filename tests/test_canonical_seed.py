@@ -118,6 +118,15 @@ def test_an_acronym_is_recovered_from_a_lowercase_export_too():
     assert cs.smart_title("hntb ohio") == "HNTB Ohio"
 
 
+def test_no_acronym_shadows_a_joiner():
+    """smart_title consults ACRONYMS before JOINERS with no way back, so an
+    entry that is also a joiner shouts the preposition — "IN" once turned
+    curated rows into "Invest IN Neighborhoods" and "IN the Line of Duty".
+    Enforced mechanically because that collision is invisible on inspection:
+    both sets read as obviously correct on their own."""
+    assert not (cs.ACRONYMS & {j.upper() for j in cs.JOINERS})
+
+
 def test_real_words_are_never_preserved_as_acronyms():
     """The cost of guessing wrong in this direction is invisible: 'AIR
     Pollution Control District' looks like a data error, not a casing one."""
@@ -146,6 +155,11 @@ def test_real_words_are_never_preserved_as_acronyms():
     # rows in the Cincinnati pack.
     ("partners in health", "Partners in Health"),
     ("invest in neighborhoods", "Invest in Neighborhoods"),
+    # TN/WV are deliberately NOT in ACRONYMS — being vowel-less, the heuristic
+    # still owns them. Pinned here because "the heuristic covers it" is exactly
+    # the assumption that failed for KY: raising the two-character lower bound
+    # in _looks_like_acronym would otherwise demote this with the suite green.
+    ("tn dept of revenue", "TN Dept of Revenue"),
 ])
 def test_words_the_vowel_rule_cannot_see_are_not_shouted(raw, expected):
     """Judging the case-folded shape extended the acronym rule to lowercase
