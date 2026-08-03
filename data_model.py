@@ -548,15 +548,35 @@ _MAX_REORDER_ROWS = 50_000
 
 _ORDER_BY_RE = re.compile(r"order\s+by\b", re.I)
 
+# Window functions whose output is a RANK, which a later predicate filters on
+# (WHERE rn <= 3, QUALIFY). Their ORDER BY chooses which rows exist, so it
+# speaks to the result. Value-producing windows (SUM, AVG, LAG, FIRST_VALUE)
+# choose nothing and stay exempt.
+_RANKING_FNS = frozenset({
+    "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
+})
+
 
 def sql_orders_result(sql: str) -> bool:
     """Does this statement say anything about the order of its rows?
 
     True unless every ORDER BY it contains sits inside an OVER (...) window
-    spec. A window spec orders rows WITHIN the function and provably cannot
-    order the result set, so a query whose only ORDER BY lives there has
-    expressed nothing about row order — "top 3 payees per agency" via
-    ROW_NUMBER() comes back in storage order.
+    spec that computes a VALUE. Such a spec orders rows within the function
+    and cannot order — or choose — the result set.
+
+    A RANKING window is different and does count. Its ORDER BY decides which
+    rows survive the rank filter that inevitably follows (WHERE rn <= 3,
+    QUALIFY), exactly as an inner LIMIT does, so "bottom 3 payees per agency"
+    via ROW_NUMBER() ... ASC is a smallest-first question. Sorting it
+    descending renders largest-of-the-cheapest first — the same reversal this
+    function exists to avoid, and the last path by which it could still occur.
+    A running total via SUM() OVER (ORDER BY ...) selects nothing, so it stays
+    exempt.
+
+    The cost is that "top 3 per agency" (the DESC sibling) is no longer
+    reordered either: the two are indistinguishable without reading the
+    direction, and reading directions out of SQL is what repeatedly produced
+    reversed results. It comes back as the query built it.
 
     Everything else counts, wherever it sits. That is deliberately blunt: a
     nested ORDER BY in a CTE MAY be discarded by a join above it, but deciding
@@ -573,6 +593,9 @@ def sql_orders_result(sql: str) -> bool:
     if not sql:
         return False
     windows = []              # is the group at each depth an OVER (...) spec?
+    saw_result_order = False  # an ORDER BY outside any window spec
+    saw_window_order = False  # an ORDER BY inside one
+    has_ranking = False       # ROW_NUMBER/RANK/... appears anywhere in the code
     prev_word = ""
     depth, i, n = 0, 0, len(sql)
     while i < n:
@@ -618,18 +641,24 @@ def sql_orders_result(sql: str) -> bool:
             low = sql[i:j].lower()
             m = _ORDER_BY_RE.match(sql, i) if low == "order" else None
             if m:
-                if not any(windows):
-                    return True
+                # Decided at the end, not here: a ranking function may appear
+                # after the window clause it belongs to has been scanned.
+                if any(windows):
+                    saw_window_order = True
+                else:
+                    saw_result_order = True
                 prev_word = ""
                 i = m.end()
                 continue
+            if low in _RANKING_FNS:
+                has_ranking = True
             prev_word = sql[i:j]
             i = j
         else:
             if not c.isspace():
                 prev_word = ""
             i += 1
-    return False
+    return saw_result_order or (saw_window_order and has_ranking)
 
 
 def order_for_display(df, sql: str):

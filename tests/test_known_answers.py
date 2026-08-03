@@ -899,9 +899,8 @@ _CTE_OUTER_LIMIT_SQL = (
     # Reorderable: nothing in the statement speaks to row order.
     ("SELECT a, b FROM t", False, "no ORDER BY at all"),
     ("SELECT ... UNION ALL SELECT ...", False, "the reported salary query"),
-    (_WINDOW_FN_SQL, False, "only ORDER BY lives in OVER(...), which cannot order a result"),
-    ("SELECT p, ROW_NUMBER() OVER (ORDER BY d ASC) rn FROM e LIMIT 5", False,
-     "a window spec plus a LIMIT is still not a bottom-N request"),
+    ("SELECT p, total, SUM(total) OVER (ORDER BY d) AS running FROM e", False,
+     "a VALUE window selects no rows, so its ORDER BY speaks to nothing"),
     ("SELECT * FROM t WHERE payee = 'ORDER BY INC'", False, "string literal"),
     ("SELECT * FROM t -- ORDER BY amt", False, "line comment"),
     ("SELECT * FROM t /* ORDER BY amt */", False, "block comment"),
@@ -911,6 +910,11 @@ _CTE_OUTER_LIMIT_SQL = (
     ("select * from t order   by  amt desc", True, "case and whitespace"),
     (_CTE_BOTTOM_N_SQL, True, "bottom-N, LIMIT inside the CTE"),
     (_CTE_OUTER_LIMIT_SQL, True, "bottom-N, LIMIT on the enclosing SELECT"),
+    (_WINDOW_FN_SQL, True, "a RANKING window's ORDER BY chooses which rows survive"),
+    (_WINDOW_FN_SQL.replace("DESC", "ASC"), True, "and the bottom-N sibling likewise"),
+    ("SELECT p, SUM(a) AS total FROM e GROUP BY 1 "
+     "QUALIFY ROW_NUMBER() OVER (ORDER BY SUM(a) ASC) <= 10", True,
+     "QUALIFY filters the rank with no subquery at all"),
 ])
 def test_only_an_arbitrary_order_may_be_reordered(sql, ordered, why):
     from data_model import sql_orders_result
@@ -945,13 +949,26 @@ def test_a_bottom_n_or_sliced_result_is_never_flipped(sql, why):
     assert order_for_display(df, sql)["total"].tolist() == [1.0, 2.0, 3.0], why
 
 
-def test_a_window_only_query_is_still_reordered():
-    """The case that motivated looking past a bare substring match: "top 3
-    payees per agency" orders solely inside ROW_NUMBER() OVER (...), so its
-    rows genuinely do come back in storage order and need sorting."""
+def test_a_rank_filtered_window_is_left_alone_whichever_way_it_ranks():
+    """A ranking window's ORDER BY decides which rows survive the rank filter
+    that follows, exactly as an inner LIMIT does — so "bottom 3 per agency"
+    (ASC) is a smallest-first question and sorting it descending renders
+    largest-of-the-cheapest first. The DESC sibling is indistinguishable
+    without reading the direction out of the SQL, which is what repeatedly
+    produced reversed results, so both are served as the query built them."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"payee": ["cheap", "mid", "big"], "total": [1.0, 2.0, 3.0]})
+    for sql in (_WINDOW_FN_SQL, _WINDOW_FN_SQL.replace("DESC", "ASC")):
+        assert order_for_display(df, sql)["total"].tolist() == [1.0, 2.0, 3.0]
+
+
+def test_a_value_window_stays_exempt():
+    """SUM() OVER (ORDER BY ...) computes a running total; it neither orders
+    nor selects rows, so a query carrying only that is still arbitrary."""
     from data_model import order_for_display
     df = pd.DataFrame({"payee": ["a", "b", "c"], "total": [1.0, 3.0, 2.0]})
-    assert order_for_display(df, _WINDOW_FN_SQL)["total"].tolist() == [3.0, 2.0, 1.0]
+    sql = "SELECT payee, total, SUM(total) OVER (ORDER BY d) AS running FROM e"
+    assert order_for_display(df, sql)["total"].tolist() == [3.0, 2.0, 1.0]
 
 
 def test_the_reorder_is_only_ever_descending():
