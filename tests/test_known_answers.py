@@ -1023,3 +1023,55 @@ def test_a_window_spec_cannot_be_claimed_by_an_enclosing_limit():
 def test_only_a_sort_on_the_measure_counts(key, expected, why):
     from data_model import _key_is_measure
     assert _key_is_measure(key, "total", ["payee", "total"]) is expected, why
+
+
+# ── an outer LIMIT only counts when the outer query is a plain scan ──────────
+
+_CTE_ASC_THEN_JOIN_SQL = (
+    "WITH ranked AS (SELECT payee, SUM(amt) AS total FROM expenditures "
+    "GROUP BY 1 ORDER BY total ASC) "
+    "SELECT r.payee, r.total, x.sos_registered_agent "
+    "FROM ranked r JOIN x ON r.payee = x.payee LIMIT 20"
+)
+_CTE_ASC_THEN_REAGG_SQL = (
+    "WITH ranked AS (SELECT payee, SUM(amt) AS total FROM expenditures "
+    "GROUP BY 1 ORDER BY total ASC) "
+    "SELECT agency, SUM(total) AS total FROM ranked GROUP BY 1 LIMIT 15"
+)
+_CTE_INNER_LIMIT_THEN_JOIN_SQL = (
+    "WITH ranked AS (SELECT payee, total FROM t ORDER BY total ASC LIMIT 10) "
+    "SELECT r.payee, r.total, x.g FROM ranked r JOIN x ON 1=1"
+)
+
+
+@pytest.mark.parametrize("sql,why", [
+    (_CTE_ASC_THEN_JOIN_SQL, "a join throws the CTE's order away"),
+    (_CTE_ASC_THEN_REAGG_SQL, "a re-aggregation does too"),
+])
+def test_an_outer_limit_over_a_reshuffling_body_is_not_a_bottom_n(sql, why):
+    """Demotion lets an enclosing LIMIT claim a cosmetic clause, which is only
+    sound when the enclosing query is a plain scan — that is the justification
+    the demote branch is written on. Under a JOIN or a GROUP BY the CTE's order
+    is discarded and the LIMIT is a cap on output, not a selection, so
+    borrowing its ASC would put the cheapest payee on top."""
+    from data_model import selective_nested_order_direction, order_for_display
+    assert selective_nested_order_direction(sql) is None, why
+    df = pd.DataFrame({"payee": ["cheap", "mid", "big"], "total": [1.0, 2.0, 3.0]})
+    assert order_for_display(df, sql)["total"].tolist() == [3.0, 2.0, 1.0]
+
+
+def test_an_inner_limit_stays_selective_even_under_a_join():
+    """The distinction is WHERE the LIMIT sits, not whether a join follows.
+    This CTE really did pick the ten cheapest before the join fanned them out,
+    so ascending remains the question that was asked."""
+    from data_model import selective_nested_order_direction, order_for_display
+    assert selective_nested_order_direction(_CTE_INNER_LIMIT_THEN_JOIN_SQL) == "asc"
+    df = pd.DataFrame({"payee": ["cheap", "mid", "big"], "total": [1.0, 2.0, 3.0]})
+    out = order_for_display(df, _CTE_INNER_LIMIT_THEN_JOIN_SQL)
+    assert out["total"].tolist() == [1.0, 2.0, 3.0]
+
+
+def test_a_passthrough_outer_limit_still_reads_as_bottom_n():
+    """The shape demotion exists for must keep working."""
+    from data_model import selective_nested_order_direction
+    assert selective_nested_order_direction(_CTE_OUTER_LIMIT_SQL) == "asc"

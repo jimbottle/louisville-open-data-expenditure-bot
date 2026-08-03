@@ -548,6 +548,7 @@ _MAX_REORDER_ROWS = 50_000
 
 _ORDER_BY_RE = re.compile(r"order\s+by\b", re.I)
 _LIMIT_RE = re.compile(r"limit\b", re.I)
+_GROUP_BY_RE = re.compile(r"group\s+by\b", re.I)
 _ASC_RE = re.compile(r"asc\b", re.I)
 _DESC_RE = re.compile(r"desc\b", re.I)
 
@@ -606,8 +607,12 @@ def _scan_order_by(sql: str) -> tuple:
         return False, None
     top_level = False
     claimed = None
-    pending = []            # [(depth, direction, key)] awaiting a LIMIT
+    pending = []            # [(depth, direction, key, demoted)] awaiting a LIMIT
     windows = []            # is the group at each depth an OVER (...) spec?
+    # Does the query body at each depth discard the order of what it reads —
+    # a JOIN or a re-aggregation? Only a plain scan carries a CTE's order
+    # through, so only a plain scan may let its LIMIT claim a demoted clause.
+    discards = [False]
     prev_word = ""
     depth, i, n = 0, 0, len(sql)
     while i < n:
@@ -637,11 +642,14 @@ def _scan_order_by(sql: str) -> tuple:
             i = n if e == -1 else e + 2
         elif c == "(":
             windows.append(prev_word.lower() == "over")
+            discards.append(False)
             depth += 1
             prev_word = ""
             i += 1
         elif c == ")":
             was_window = windows.pop() if windows else False
+            if len(discards) > 1:
+                discards.pop()
             if was_window:
                 # A window spec orders rows WITHIN the function, never the
                 # result set. An enclosing LIMIT must not be able to claim it,
@@ -652,7 +660,9 @@ def _scan_order_by(sql: str) -> tuple:
                 # Demote rather than drop: the LIMIT of a bottom-N query is as
                 # often written on the enclosing SELECT as inside the CTE, and
                 # a plain scan of an ordered CTE does come back in its order.
-                pending = [((p[0] - 1 if p[0] == depth else p[0]), p[1], p[2])
+                # Marked as demoted so the claim can be refused if the enclosing
+                # body turns out NOT to be a plain scan.
+                pending = [((p[0] - 1, p[1], p[2], True) if p[0] == depth else p)
                            for p in pending]
             depth = max(0, depth - 1)
             prev_word = ""
@@ -668,14 +678,27 @@ def _scan_order_by(sql: str) -> tuple:
                 if depth == 0:
                     top_level = True
                 else:
-                    pending.append((depth,) + _first_key(sql, m.end()))
+                    pending.append((depth,) + _first_key(sql, m.end()) + (False,))
                 prev_word = ""
                 i = m.end()
                 continue
+            m = _GROUP_BY_RE.match(sql, i) if low == "group" else None
+            if m or low == "join":
+                # This body reshuffles what it reads, so a CTE's order does not
+                # survive into it and its LIMIT is a cap on the output, not a
+                # bottom-N selection.
+                if depth < len(discards):
+                    discards[depth] = True
+                prev_word = ""
+                i = m.end() if m else j
+                continue
             if low == "limit":
                 for p in pending:
-                    if p[0] == depth:
-                        claimed = (p[1], p[2])      # innermost-latest wins
+                    if p[0] != depth:
+                        continue
+                    if p[3] and depth < len(discards) and discards[depth]:
+                        continue        # demoted into a join/re-aggregation
+                    claimed = (p[1], p[2])          # innermost-latest wins
                 pending = [p for p in pending if p[0] != depth]
                 prev_word = ""
                 i = j
