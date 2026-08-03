@@ -561,6 +561,15 @@ def chart_window(chart_df, chart_type: str, label_col: str, value_col: str) -> t
     The note is worded to what the frame actually is. "Top N" asserts a
     ranking, so it is claimed only when the values really do descend; a result
     the SQL ordered by name is just N of M, and a time series is the last N."""
+    # A null bucket has no place on an axis. It renders as a bar literally
+    # labelled "NaT"/"None" carrying that bucket's real total, and because both
+    # pandas and DuckDB sort nulls LAST it lands at the newest end of a time
+    # axis — where a reader takes it for the current month. Dropped before the
+    # window is chosen so `total` counts only what can actually be charted, and
+    # the note stays true to the points rendered.
+    if label_col in chart_df:
+        chart_df = chart_df[chart_df[label_col].notna()]
+
     total = len(chart_df)
     if total <= CHART_MAX_POINTS:
         return chart_df, None

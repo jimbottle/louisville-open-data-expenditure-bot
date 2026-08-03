@@ -769,9 +769,18 @@ def test_one_null_time_bucket_does_not_flip_the_truncation_end(dtype):
     df = df.sort_values("month")
     chart_type, label_col, value_col = infer_chart(df)
     out, note = chart_window(df, chart_type, label_col, value_col)
-    assert note == f"last {CHART_MAX_POINTS} of 61"
-    assert newest in set(out["month"].dropna()), "the newest month must survive"
-    assert stamps[0] not in set(out["month"].dropna()), "the oldest end is what gets dropped"
+    # 60 real buckets, not 61: the null one is not chartable, and the note must
+    # count what is actually rendered.
+    assert note == f"last {CHART_MAX_POINTS} of 60"
+    assert len(out) == CHART_MAX_POINTS
+    assert newest in set(out["month"]), "the newest month must survive"
+    assert stamps[0] not in set(out["month"]), "the oldest end is what gets dropped"
+    # The null bucket sorts LAST, so before it was dropped it rendered as a bar
+    # labelled "NaT"/"None" at the newest position, carrying a real total.
+    rendered = out["month"].astype(str).tolist()
+    assert not [lbl for lbl in rendered if lbl in ("NaT", "None", "nan")], \
+        f"a null bucket was charted as a real point: {rendered[-3:]}"
+    assert out["month"].notna().all()
 
 
 def test_an_all_null_axis_is_not_treated_as_ordered_time():
@@ -779,3 +788,25 @@ def test_an_all_null_axis_is_not_treated_as_ordered_time():
     from data_model import is_chronological
     assert not is_chronological(pd.Series([None, None, None], dtype="object"))
     assert not is_chronological(pd.Series([pd.NaT, pd.NaT]))
+
+
+def test_a_null_label_is_never_charted_as_a_point():
+    """Nulls sort LAST in both pandas and DuckDB, so on a time axis the null
+    bucket lands at the newest position — a bar labelled "NaT" carrying a real
+    SUM, which a reader takes for the current month. It is not a category
+    either, so it is dropped for every chart type, not only time axes."""
+    from data_model import chart_window, CHART_MAX_POINTS
+    labels = [f"Agency {i}" for i in range(60)] + [None]
+    df = pd.DataFrame({"agency": labels, "amt": [float(100 - i) for i in range(61)]})
+    out, note = chart_window(df, "bar", "agency", "amt")
+    assert note == f"top {CHART_MAX_POINTS} of 60", "the count must exclude the unchartable row"
+    assert out["agency"].notna().all()
+
+
+def test_a_mostly_null_axis_leaves_nothing_to_chart():
+    """The caller re-checks after chart_window for exactly this."""
+    from data_model import chart_window
+    df = pd.DataFrame({"month": [None] * 60 + ["2026-01"],
+                       "amt": [float(i) for i in range(61)]})
+    out, _ = chart_window(df, "line", "month", "amt")
+    assert len(out) < 2, "app.py raises on this and skips the chart"

@@ -1009,6 +1009,10 @@ async def ask(request: Request):
                     # Which end to keep, and what to call the slice, depends on
                     # the chart (see data_model.chart_window).
                     chart_df, window = chart_window(chart_df, chart_type, label_col, value_col)
+                    # chart_window also drops null-labelled rows, so re-check:
+                    # a result whose axis is mostly null has nothing to plot.
+                    if len(chart_df) < 2:
+                        raise ValueError("too few chartable rows after dropping null labels")
                     title = humanize_text(value_col)
                     if window:
                         title += f" ({window})"
