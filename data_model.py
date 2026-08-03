@@ -547,6 +547,9 @@ def infer_chart(df) -> tuple:
 _MAX_REORDER_ROWS = 50_000
 
 _ORDER_BY_RE = re.compile(r"order\s+by\b", re.I)
+_LIMIT_RE = re.compile(r"limit\b", re.I)
+_ASC_RE = re.compile(r"asc\b", re.I)
+_DESC_RE = re.compile(r"desc\b", re.I)
 
 
 def has_top_level_order_by(sql: str) -> bool:
@@ -566,8 +569,33 @@ def has_top_level_order_by(sql: str) -> bool:
 
     String literals, quoted identifiers and comments are skipped so a payee
     named "ORDER BY" or a commented-out clause cannot vote."""
+    return _scan_order_by(sql)[0]
+
+
+def selective_nested_order_direction(sql: str):
+    """'asc'/'desc' if a nested ORDER BY also LIMITs, else None.
+
+    A nested ORDER BY is usually cosmetic and discarded by whatever wraps it.
+    Paired with a LIMIT it stops being cosmetic and becomes SELECTIVE: it
+    decides WHICH rows survive, so its direction is the question being asked.
+
+        WITH lowest AS (SELECT payee, SUM(amt) AS total FROM e
+                        GROUP BY 1 ORDER BY total ASC LIMIT 10)
+        SELECT * FROM lowest
+
+    is "which ten payees received the LEAST". Sorting that descending answers
+    a different question with the same ten rows — largest-of-the-smallest
+    first — in the table, the chart, and the text the interpreter reads."""
+    return _scan_order_by(sql)[1]
+
+
+def _scan_order_by(sql: str) -> tuple:
+    """(has_top_level_order_by, selective_nested_direction)."""
     if not sql:
-        return False
+        return False, None
+    top_level = False
+    direction = None
+    pending = []            # [(depth, direction)] awaiting a LIMIT at that depth
     depth, i, n = 0, 0, len(sql)
     while i < n:
         c = sql[i]
@@ -596,15 +624,56 @@ def has_top_level_order_by(sql: str) -> bool:
             depth += 1
             i += 1
         elif c == ")":
+            # A clause that never met a LIMIT before its group closed was
+            # cosmetic after all; it has no claim on the final order.
+            pending = [p for p in pending if p[0] < depth]
             depth = max(0, depth - 1)
             i += 1
         else:
-            if (depth == 0 and c in "oO"
-                    and (i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] == "_"))
-                    and _ORDER_BY_RE.match(sql, i)):
-                return True
+            at_word = i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] == "_")
+            m = _ORDER_BY_RE.match(sql, i) if at_word else None
+            if m:
+                if depth == 0:
+                    top_level = True
+                else:
+                    pending.append((depth, _first_key_direction(sql, m.end())))
+                i = m.end()
+                continue
+            m = _LIMIT_RE.match(sql, i) if at_word else None
+            if m:
+                for d, direc in pending:
+                    if d == depth:
+                        direction = direc      # innermost-latest wins
+                pending = [p for p in pending if p[0] != depth]
+                i = m.end()
+                continue
             i += 1
-    return False
+    return top_level, direction
+
+
+def _first_key_direction(sql: str, pos: int) -> str:
+    """ASC/DESC of an ORDER BY's FIRST sort key. SQL's default is ASC."""
+    depth, i, n = 0, pos, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0:
+            if c in ",;":
+                break
+            if not (sql[i - 1].isalnum() or sql[i - 1] == "_"):
+                if _DESC_RE.match(sql, i):
+                    return "desc"
+                if _ASC_RE.match(sql, i):
+                    return "asc"
+                if _LIMIT_RE.match(sql, i):
+                    break
+        i += 1
+    return "asc"
 
 
 def order_for_display(df, sql: str):
@@ -631,9 +700,15 @@ def order_for_display(df, sql: str):
         _, label_col, value_col = infer_chart(df)
         if not value_col or (label_col and is_time_named(label_col)):
             return df
+        # Largest-first by default, but a nested ORDER BY paired with a LIMIT
+        # already chose a direction — it decided which rows are here at all, so
+        # forcing DESC would answer a different question with the same rows.
+        nested = selective_nested_order_direction(sql)
+        ascending = nested == "asc"
         # mergesort is stable, so rows tied on the measure keep the order the
         # query produced rather than being shuffled.
-        return df.sort_values(value_col, ascending=False, kind="mergesort").reset_index(drop=True)
+        return df.sort_values(value_col, ascending=ascending,
+                              kind="mergesort").reset_index(drop=True)
     except Exception:
         return df
 

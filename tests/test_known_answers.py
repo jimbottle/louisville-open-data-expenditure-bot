@@ -913,3 +913,49 @@ def test_a_nested_order_by_does_not_block_the_reorder(sql):
     from data_model import order_for_display
     df = pd.DataFrame({"payee": ["A", "B", "C"], "total": [1.0, 3.0, 2.0]})
     assert order_for_display(df, sql)["total"].tolist() == [3.0, 2.0, 1.0]
+
+
+# ── a nested ORDER BY paired with LIMIT is selective, not cosmetic ───────────
+
+_CTE_BOTTOM_N_SQL = (
+    "WITH lowest AS (SELECT payee_canonical, SUM(extended_amount) AS total "
+    "FROM expenditures GROUP BY 1 ORDER BY total ASC LIMIT 10) SELECT * FROM lowest"
+)
+
+
+@pytest.mark.parametrize("sql,expected,why", [
+    (_CTE_BOTTOM_N_SQL, "asc", "explicit ASC with LIMIT"),
+    (_CTE_BOTTOM_N_SQL.replace("ORDER BY total ASC", "ORDER BY total"), "asc",
+     "SQL's default direction is ASC"),
+    (_CTE_JOIN_SQL, "desc", "the CTE asked for largest-first"),
+    (_WINDOW_FN_SQL, None, "no LIMIT, so the inner order is cosmetic"),
+    ("SELECT payee, total FROM t", None, "nothing nested at all"),
+    ("SELECT payee, total FROM t ORDER BY total ASC", None, "top-level is handled elsewhere"),
+])
+def test_a_nested_order_by_is_selective_only_when_it_limits(sql, expected, why):
+    """A nested ORDER BY is normally discarded by whatever wraps it. Paired
+    with a LIMIT it decides WHICH rows exist, so its direction is the question
+    being asked."""
+    from data_model import selective_nested_order_direction
+    assert selective_nested_order_direction(sql) == expected, why
+
+
+def test_a_bottom_n_query_is_not_flipped_to_largest_first():
+    """"Which ten payees received the least" must not render largest-of-the-ten
+    first — in the table, the chart, or the row text the interpreter reads.
+    The depth-aware guard newly exposed this: the only ORDER BY sits at depth
+    1, so the frame reached the unconditional descending sort."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"payee": ["cheapest", "mid", "priciest"],
+                       "total": [1.0, 2.0, 3.0]})
+    out = order_for_display(df, _CTE_BOTTOM_N_SQL)
+    assert out["payee"].tolist() == ["cheapest", "mid", "priciest"]
+    assert out["total"].is_monotonic_increasing
+
+
+def test_a_limited_desc_cte_still_sorts_largest_first():
+    """The 3069 case must not regress: the join discards the CTE's order, so
+    the rows still need sorting — just in the direction the CTE asked for."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"payee": ["a", "b", "c"], "total_spend": [1.0, 3.0, 2.0]})
+    assert order_for_display(df, _CTE_JOIN_SQL)["total_spend"].tolist() == [3.0, 2.0, 1.0]
