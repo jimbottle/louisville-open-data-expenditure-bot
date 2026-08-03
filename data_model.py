@@ -508,6 +508,33 @@ def infer_chart(df) -> tuple:
     return chart_type, label_col, value_col
 
 
+def chart_window(chart_df, chart_type: str, value_col: str) -> tuple:
+    """Narrow a chartable frame to CHART_MAX_POINTS, and say which slice it is.
+
+    Returns (windowed_df, note) where note is None if nothing was dropped.
+
+    Which END to keep depends on the chart. A line frame arrives sorted
+    oldest-first, so taking the head would chart the 30 oldest months of a
+    61-month series and drop everything recent — the opposite of what the
+    question asked. A ranked bar frame is the reverse: its head IS the answer.
+
+    The note is worded to what the frame actually is. "Top N" asserts a
+    ranking, so it is claimed only when the values really do descend; a result
+    the SQL ordered by name is just the first N of M, and a time series is the
+    last N of M. Pure so the wording can be pinned in tests — the previous
+    version labelled a truncated series "top 30 of 61", which was wrong twice
+    over: not a ranking, and pointing away from the data it had cut."""
+    total = len(chart_df)
+    if total <= CHART_MAX_POINTS:
+        return chart_df, None
+    if chart_type == "line":
+        return chart_df.tail(CHART_MAX_POINTS), f"last {CHART_MAX_POINTS} of {total:,}"
+    head = chart_df.head(CHART_MAX_POINTS)
+    ranked = bool(head[value_col].is_monotonic_decreasing)
+    return head, (f"top {CHART_MAX_POINTS} of {total:,}" if ranked
+                  else f"{CHART_MAX_POINTS} of {total:,}")
+
+
 def fiscal_year_end(year: int, fy_start_month: int = 1):
     """Last calendar day of fiscal `year` for a fiscal year starting in
     `fy_start_month` (Louisville: 7 -> FY2026 ends 2026-06-30)."""

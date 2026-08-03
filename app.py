@@ -70,7 +70,7 @@ from data_model import (
     get_full_schema_description,
     humanize_text,
     infer_chart,
-    CHART_MAX_POINTS,
+    chart_window,
     load_all_data,
     year_context,
 )
@@ -534,7 +534,8 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
     # the starter questions after deploys that change prompts).
     global CACHE_VERSION
     CACHE_VERSION = hashlib.sha1(
-        (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CITY_FACTS)).encode()
+        (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CITY_FACTS)
+         + CITATION_FORMAT).encode()
     ).hexdigest()[:8]
     stale = [k for k in response_cache if not k.startswith(CACHE_VERSION + ":")]
     if stale:
@@ -681,6 +682,14 @@ CACHE_FILE = os.path.join(os.environ.get("STATS_DIR", os.environ.get("DATA_DIR",
 # fix can never be shadowed by a stale cache entry.
 CACHE_VERSION = "unversioned"
 
+# Bumped when the SHAPE of a cached frame changes rather than the prompts.
+# A cached answer replays its stored SSE frames verbatim and never re-runs
+# retrieval, so a fix to how a citation URL is built cannot reach it: the
+# prompts are untouched, the version is unchanged, and warm_cache.py has
+# already pre-warmed the starter questions most readers see. The cache lives
+# in the louisville-state volume, which a deploy does not replace.
+CITATION_FORMAT = "gateway-v1"
+
 # City data facts with year placeholders resolved (set at startup).
 CITY_FACTS: list[str] = []
 
@@ -690,12 +699,25 @@ def _cache_key(question: str) -> str:
 
 
 def _load_cache() -> dict[str, list[str]]:
-    """Load cache from disk."""
+    """Load cache from disk, dropping entries that would replay a dead link.
+
+    The version bump above already orphans everything written before the
+    Gateway fix, but this states the invariant directly and outlives it: a
+    cached answer never re-runs retrieval, so rag's read-time healing cannot
+    reach one. An entry carrying a LegislationDetail URL is an entry that
+    serves "Invalid parameters!" to a reader, whatever its version prefix."""
     try:
         with open(CACHE_FILE) as f:
-            return json.load(f)
+            cache = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    dead = [k for k, frames in cache.items()
+            if any("LegislationDetail.aspx" in f for f in frames)]
+    for k in dead:
+        del cache[k]
+    if dead:
+        log.info("Dropped %d cached answer(s) carrying dead citation links", len(dead))
+    return cache
 
 
 def _save_cache():
@@ -984,14 +1006,14 @@ async def ask(request: Request):
                     chart_df = drop_total_rows(chart_df, label_col, value_col)
                     if len(chart_df) < 2:
                         raise ValueError("too few chartable rows after dropping total rows")
-                    labels = chart_df[label_col].astype(str).tolist()[:CHART_MAX_POINTS]
-                    values = chart_df[value_col].tolist()[:CHART_MAX_POINTS]
+                    # Which end to keep, and what to call the slice, depends on
+                    # the chart (see data_model.chart_window).
+                    chart_df, window = chart_window(chart_df, chart_type, value_col)
                     title = humanize_text(value_col)
-                    # Say so when the chart is a window onto a longer result,
-                    # or a "top agencies" bar chart of 30 out of 61 reads as
-                    # the whole ranking.
-                    if len(chart_df) > CHART_MAX_POINTS:
-                        title += f" (top {CHART_MAX_POINTS} of {len(chart_df):,})"
+                    if window:
+                        title += f" ({window})"
+                    labels = chart_df[label_col].astype(str).tolist()
+                    values = chart_df[value_col].tolist()
                     label_axis = humanize_text(label_col)
                     yield send("chart", {
                         "chart_type": chart_type,

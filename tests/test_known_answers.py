@@ -616,9 +616,83 @@ def test_a_raw_dump_is_still_refused():
     assert infer_chart(df)[0] is None
 
 
-def test_a_truncated_chart_says_so_in_its_title():
+def test_a_truncated_ranking_keeps_the_top_and_says_so():
     """30 of 61 bars rendered as a bare 'Total Spend' reads as the whole
-    ranking. Pinned against the source, like the other prompt/UI contracts."""
+    ranking."""
+    import pandas as pd
+    from data_model import chart_window, CHART_MAX_POINTS
+    df = pd.DataFrame({"agency": [f"A{i}" for i in range(61)],
+                       "total_spend": [float(1000 - i) for i in range(61)]})
+    out, note = chart_window(df, "bar", "total_spend")
+    assert len(out) == CHART_MAX_POINTS
+    assert note == f"top {CHART_MAX_POINTS} of 61"
+    assert out["total_spend"].iloc[0] == 1000.0, "the heaviest row must survive"
+
+
+def test_a_truncated_time_series_keeps_the_NEWEST_points():
+    """The caller sorts a line frame oldest-first, so taking the head charts
+    the 30 oldest months of a 61-month series and drops everything recent —
+    while labelling it 'top 30', which is both untrue and points away from the
+    data it cut. This is the regression that raising the ceiling introduced."""
+    import pandas as pd
+    from data_model import chart_window, CHART_MAX_POINTS
+    months = pd.date_range("2021-01-01", periods=61, freq="MS").strftime("%Y-%m")
+    df = pd.DataFrame({"month": months, "total_spend": [float(i) for i in range(61)]})
+    out, note = chart_window(df, "line", "total_spend")
+    assert note == f"last {CHART_MAX_POINTS} of 61"
+    assert out["month"].iloc[-1] == months[-1], "the newest point must be charted"
+    assert months[0] not in set(out["month"]), "the oldest points are the ones dropped"
+
+
+def test_an_unranked_bar_result_does_not_claim_to_be_a_top_n():
+    """A result the SQL ordered by name is just the first N of M."""
+    import pandas as pd
+    from data_model import chart_window, CHART_MAX_POINTS
+    df = pd.DataFrame({"payee": [f"P{i:03d}" for i in range(61)],
+                       "amt": [float((i * 37) % 61) for i in range(61)]})
+    _, note = chart_window(df, "bar", "amt")
+    assert note == f"{CHART_MAX_POINTS} of 61"
+    assert "top" not in note
+
+
+def test_a_frame_that_fits_is_left_alone():
+    import pandas as pd
+    from data_model import chart_window
+    df = pd.DataFrame({"a": ["x", "y"], "v": [2.0, 1.0]})
+    out, note = chart_window(df, "bar", "v")
+    assert note is None and len(out) == 2
+
+
+# ── a cached answer can never replay a dead citation link ────────────────────
+
+def test_the_citation_format_participates_in_the_cache_version():
+    """A cached answer replays its stored SSE frames verbatim and never
+    re-runs retrieval, so rag's read-time healing cannot reach one. The cache
+    version was a hash of the PROMPTS only, and fixing a URL changes no
+    prompt — so the Gateway fix would have shipped while warm_cache.py's
+    pre-warmed starter answers kept serving 'Invalid parameters!' forever."""
     src = _app_source()
-    assert "top {CHART_MAX_POINTS} of {len(chart_df):,}" in src
-    assert "[:CHART_MAX_POINTS]" in src, "the renderer must use the shared cap"
+    assert "CITATION_FORMAT" in src
+    version_call = src[src.index("CACHE_VERSION = hashlib.sha1("):]
+    version_call = version_call[:version_call.index(").hexdigest()")]
+    assert "CITATION_FORMAT" in version_call, \
+        "a citation-format change must orphan every cached answer"
+
+
+def test_loading_the_cache_drops_entries_with_dead_links(tmp_path, monkeypatch):
+    """States the invariant directly rather than relying on the version bump,
+    which only helps the one time someone remembers to change it."""
+    import json as _json
+    import app
+    good_key, dead_key = "v1:good question", "v1:dead question"
+    cache = {
+        good_key: ['data: {"type": "sources", "content": "Gateway.aspx?M=L&ID=1"}\n\n'],
+        dead_key: ['data: {"type": "sources", "content": "LegislationDetail.aspx?ID=1&GUID=x"}\n\n'],
+    }
+    path = tmp_path / ".response_cache.json"
+    with open(path, "w") as f:
+        _json.dump(cache, f)
+    monkeypatch.setattr(app, "CACHE_FILE", str(path))
+    loaded = app._load_cache()
+    assert good_key in loaded
+    assert dead_key not in loaded, "a cached dead link is served to a reader as-is"
