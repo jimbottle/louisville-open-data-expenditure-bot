@@ -443,13 +443,24 @@ def is_chronological(series, require_sorted: bool = True) -> bool:
     which is what chart-type inference needs; the default also demands the
     frame actually BE in ascending order, which is what deciding which end to
     truncate needs."""
-    if series.dtype.kind in "iufcM":
-        return bool(series.is_monotonic_increasing) if require_sorted else True
-    try:
-        s = series.dropna().astype(str)
-        if not bool(s.str.fullmatch(_ISO_DATE_PART).all()):
-            return False
+    # Nulls are dropped for BOTH kinds before the ordering test, because
+    # is_monotonic_increasing is False whenever a series contains NaN/NaT. When
+    # only the string branch dropped them, one null month bucket made a
+    # genuinely chronological axis answer False in both directions, and
+    # chart_window fell through to head() — the wrong-end truncation again, by
+    # a third route. Nulls here are real: the Louisville pack filters
+    # `fiscal_year IS NOT NULL` because the raw rows carry them, and generated
+    # SQL will not reliably do the same.
+    s = series.dropna()
+    if s.empty:
+        return False
+    if s.dtype.kind in "iufcM":
         return bool(s.is_monotonic_increasing) if require_sorted else True
+    try:
+        t = s.astype(str)
+        if not bool(t.str.fullmatch(_ISO_DATE_PART).all()):
+            return False
+        return bool(t.is_monotonic_increasing) if require_sorted else True
     except Exception:
         return False
 

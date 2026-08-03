@@ -743,3 +743,39 @@ def test_a_non_chronological_label_is_not_mistaken_for_a_time_axis():
     df = pd.DataFrame({"month_name": names[:61], "amt": [float(61 - i) for i in range(61)]})
     _, note = chart_window(df, "bar", "month_name", "amt")
     assert note == f"top {CHART_MAX_POINTS} of 61", "values descend, so this is a ranking"
+
+
+@pytest.mark.parametrize("dtype", ["datetime", "string"])
+def test_one_null_time_bucket_does_not_flip_the_truncation_end(dtype):
+    """is_monotonic_increasing is False whenever a series holds NaN/NaT, and
+    only the string branch of is_chronological dropped nulls. So a single null
+    month made a genuinely chronological axis answer False in BOTH directions,
+    and chart_window fell through to head() — charting 2021-01..2023-07 and
+    dropping everything to 2026-01, the same wrong-end truncation by a third
+    route. Nulls are real here: the Louisville pack filters `fiscal_year IS NOT
+    NULL` because the raw rows carry them, and generated SQL may not."""
+    from data_model import infer_chart, chart_window, CHART_MAX_POINTS
+    stamps = pd.date_range("2021-01-01", periods=61, freq="MS")
+    if dtype == "datetime":
+        axis = pd.Series(list(stamps))
+        axis.iloc[7] = pd.NaT
+        newest = stamps[-1]
+    else:
+        axis = pd.Series(list(stamps.strftime("%Y-%m")))
+        axis.iloc[7] = None
+        newest = stamps.strftime("%Y-%m")[-1]
+
+    df = pd.DataFrame({"month": axis, "total_spend": [float(i) for i in range(61)]})
+    df = df.sort_values("month")
+    chart_type, label_col, value_col = infer_chart(df)
+    out, note = chart_window(df, chart_type, label_col, value_col)
+    assert note == f"last {CHART_MAX_POINTS} of 61"
+    assert newest in set(out["month"].dropna()), "the newest month must survive"
+    assert stamps[0] not in set(out["month"].dropna()), "the oldest end is what gets dropped"
+
+
+def test_an_all_null_axis_is_not_treated_as_ordered_time():
+    """Nothing to order by, so it must not claim a chronological window."""
+    from data_model import is_chronological
+    assert not is_chronological(pd.Series([None, None, None], dtype="object"))
+    assert not is_chronological(pd.Series([pd.NaT, pd.NaT]))
