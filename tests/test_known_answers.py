@@ -870,7 +870,14 @@ def test_the_prompt_asks_for_an_explicit_order_by():
     assert "UNION ALL queries too" in src
 
 
-# ── only a TOP-LEVEL order counts as the query expressing one ────────────────
+
+# ── which results may be reordered at all ────────────────────────────────────
+# The rule is deliberately blunt: a result is reorderable only when its order
+# is definitionally arbitrary — every ORDER BY it contains, if any, lives in an
+# OVER (...) spec, which cannot order a result set. Deciding which nested
+# clauses "really" survive means deciding whether every enclosing body is a
+# plain scan, through CTE chains, derived tables, comma joins and set
+# operations; five attempts at that judgement each shipped a REVERSED order.
 
 _WINDOW_FN_SQL = (
     "SELECT agency_canonical, payee_canonical, total FROM ("
@@ -878,200 +885,81 @@ _WINDOW_FN_SQL = (
     "ROW_NUMBER() OVER (PARTITION BY agency_canonical ORDER BY SUM(extended_amount) DESC) AS rn "
     "FROM expenditures GROUP BY 1,2) WHERE rn <= 3"
 )
-_CTE_JOIN_SQL = (
-    "WITH ranked AS (SELECT payee, total_spend FROM summary_top_contractors "
-    "ORDER BY total_spend DESC LIMIT 20) "
-    "SELECT r.payee, r.total_spend, e.sos_registered_agent FROM ranked r JOIN x ON 1=1"
-)
-
-
-@pytest.mark.parametrize("sql,expected,why", [
-    ("SELECT a, b FROM t", False, "nothing to honour"),
-    ("SELECT a FROM t ORDER BY a", True, "plain top-level clause"),
-    ("select * from t order   by  amt desc", True, "case and whitespace"),
-    ("SELECT ... UNION ALL SELECT ... ORDER BY x", True, "after the final SELECT"),
-    (_WINDOW_FN_SQL, False, "ORDER BY lives inside OVER(...)"),
-    (_CTE_JOIN_SQL, False, "a join discards the CTE's ordering"),
-    ("WITH r AS (SELECT * FROM t) SELECT * FROM r ORDER BY amt", True, "CTE plus a real clause"),
-    ("SELECT * FROM t WHERE payee = 'ORDER BY INC'", False, "string literal"),
-    ("SELECT * FROM t -- ORDER BY amt", False, "line comment"),
-    ("SELECT * FROM t /* ORDER BY amt */", False, "block comment"),
-    ("SELECT reorder_by FROM t", False, "word boundary"),
-])
-def test_only_a_top_level_order_by_counts(sql, expected, why):
-    """Matching the substring anywhere fails open on the two shapes this bot
-    plausibly generates: "top 3 payees per agency" orders only inside
-    ROW_NUMBER() OVER (...), and a CTE's ORDER BY is discarded by the join
-    around it. Both return storage order while containing the words."""
-    from data_model import has_top_level_order_by
-    assert has_top_level_order_by(sql) is expected, why
-
-
-@pytest.mark.parametrize("sql", [_WINDOW_FN_SQL, _CTE_JOIN_SQL])
-def test_a_nested_order_by_does_not_block_the_reorder(sql):
-    """The end that matters: these results must still be sorted for display."""
-    from data_model import order_for_display
-    df = pd.DataFrame({"payee": ["A", "B", "C"], "total": [1.0, 3.0, 2.0]})
-    assert order_for_display(df, sql)["total"].tolist() == [3.0, 2.0, 1.0]
-
-
-# ── a nested ORDER BY paired with LIMIT is selective, not cosmetic ───────────
-
 _CTE_BOTTOM_N_SQL = (
     "WITH lowest AS (SELECT payee_canonical, SUM(extended_amount) AS total "
     "FROM expenditures GROUP BY 1 ORDER BY total ASC LIMIT 10) SELECT * FROM lowest"
-)
-
-
-@pytest.mark.parametrize("sql,expected,why", [
-    (_CTE_BOTTOM_N_SQL, "asc", "explicit ASC with LIMIT"),
-    (_CTE_BOTTOM_N_SQL.replace("ORDER BY total ASC", "ORDER BY total"), "asc",
-     "SQL's default direction is ASC"),
-    (_CTE_JOIN_SQL, "desc", "the CTE asked for largest-first"),
-    (_WINDOW_FN_SQL, None, "no LIMIT, so the inner order is cosmetic"),
-    ("SELECT payee, total FROM t", None, "nothing nested at all"),
-    ("SELECT payee, total FROM t ORDER BY total ASC", None, "top-level is handled elsewhere"),
-])
-def test_a_nested_order_by_is_selective_only_when_it_limits(sql, expected, why):
-    """A nested ORDER BY is normally discarded by whatever wraps it. Paired
-    with a LIMIT it decides WHICH rows exist, so its direction is the question
-    being asked."""
-    from data_model import selective_nested_order_direction
-    assert selective_nested_order_direction(sql) == expected, why
-
-
-def test_a_bottom_n_query_is_not_flipped_to_largest_first():
-    """"Which ten payees received the least" must not render largest-of-the-ten
-    first — in the table, the chart, or the row text the interpreter reads.
-    The depth-aware guard newly exposed this: the only ORDER BY sits at depth
-    1, so the frame reached the unconditional descending sort."""
-    from data_model import order_for_display
-    df = pd.DataFrame({"payee": ["cheapest", "mid", "priciest"],
-                       "total": [1.0, 2.0, 3.0]})
-    out = order_for_display(df, _CTE_BOTTOM_N_SQL)
-    assert out["payee"].tolist() == ["cheapest", "mid", "priciest"]
-    assert out["total"].is_monotonic_increasing
-
-
-def test_a_limited_desc_cte_still_sorts_largest_first():
-    """The 3069 case must not regress: the join discards the CTE's order, so
-    the rows still need sorting — just in the direction the CTE asked for."""
-    from data_model import order_for_display
-    df = pd.DataFrame({"payee": ["a", "b", "c"], "total_spend": [1.0, 3.0, 2.0]})
-    assert order_for_display(df, _CTE_JOIN_SQL)["total_spend"].tolist() == [3.0, 2.0, 1.0]
-
-
-# ── the borrowed direction must speak for the MEASURE ────────────────────────
-
-_CTE_SLICE_BY_DATE_SQL = (
-    "WITH recent AS (SELECT * FROM expenditures ORDER BY check_date ASC LIMIT 100) "
-    "SELECT payee_canonical, SUM(extended_amount) AS total FROM recent GROUP BY 1"
 )
 _CTE_OUTER_LIMIT_SQL = (
     "WITH lowest AS (SELECT payee_canonical, SUM(extended_amount) AS total "
     "FROM expenditures GROUP BY 1 ORDER BY total ASC) SELECT * FROM lowest LIMIT 10"
 )
-_WINDOW_ASC_OUTER_LIMIT_SQL = (
-    "SELECT payee, ROW_NUMBER() OVER (ORDER BY check_date ASC) AS rn, total "
-    "FROM expenditures LIMIT 5"
-)
 
 
-def test_a_slice_on_a_non_measure_column_does_not_flip_the_measure():
-    """The ASC orders check_date — it picks the earliest 100 rows and says
-    nothing about the totals. Borrowing it renders the CHEAPEST payee first,
-    which is the symptom order_for_display exists to prevent."""
-    from data_model import order_for_display
-    df = pd.DataFrame({"payee_canonical": ["cheap", "mid", "big"],
-                       "total": [1.0, 2.0, 3.0]})
-    out = order_for_display(df, _CTE_SLICE_BY_DATE_SQL)
-    assert out["total"].tolist() == [3.0, 2.0, 1.0], "largest-first is the default"
-
-
-def test_a_bottom_n_with_the_limit_on_the_enclosing_select():
-    """The other natural spelling of bottom-N: the ORDER BY sits in the CTE
-    and the LIMIT on the outer SELECT. A plain scan of an ordered CTE comes
-    back in its order, so this LIMIT is exactly as selective as an inner one."""
-    from data_model import order_for_display
-    df = pd.DataFrame({"payee_canonical": ["cheap", "mid", "big"],
-                       "total": [1.0, 2.0, 3.0]})
-    assert order_for_display(df, _CTE_OUTER_LIMIT_SQL)["total"].tolist() == [1.0, 2.0, 3.0]
-    implicit = _CTE_OUTER_LIMIT_SQL.replace("ORDER BY total ASC", "ORDER BY total")
-    assert order_for_display(df, implicit)["total"].tolist() == [1.0, 2.0, 3.0]
-
-
-def test_a_window_spec_cannot_be_claimed_by_an_enclosing_limit():
-    """Allowing an outer LIMIT to claim a demoted clause must not let an
-    OVER (...) spec vote: it orders rows inside the function, never the
-    result set, so this is not a bottom-N request."""
-    from data_model import selective_nested_order_direction, order_for_display
-    assert selective_nested_order_direction(_WINDOW_ASC_OUTER_LIMIT_SQL) is None
-    df = pd.DataFrame({"payee": ["a", "b", "c"], "total": [1.0, 2.0, 3.0]})
-    assert order_for_display(df, _WINDOW_ASC_OUTER_LIMIT_SQL)["total"].tolist() == [3.0, 2.0, 1.0]
-
-
-@pytest.mark.parametrize("key,expected,why", [
-    ("total", True, "exact match"),
-    ("r.total", True, "table-qualified"),
-    ('"total"', True, "quoted"),
-    ("TOTAL", True, "case-insensitive"),
-    ("check_date", False, "a different column entirely"),
-    ("2", True, "ordinal resolving to the measure"),
-    ("1", False, "ordinal resolving to the label"),
-    ("9", False, "ordinal out of range declines to guess"),
+@pytest.mark.parametrize("sql,ordered,why", [
+    # Reorderable: nothing in the statement speaks to row order.
+    ("SELECT a, b FROM t", False, "no ORDER BY at all"),
+    ("SELECT ... UNION ALL SELECT ...", False, "the reported salary query"),
+    (_WINDOW_FN_SQL, False, "only ORDER BY lives in OVER(...), which cannot order a result"),
+    ("SELECT p, ROW_NUMBER() OVER (ORDER BY d ASC) rn FROM e LIMIT 5", False,
+     "a window spec plus a LIMIT is still not a bottom-N request"),
+    ("SELECT * FROM t WHERE payee = 'ORDER BY INC'", False, "string literal"),
+    ("SELECT * FROM t -- ORDER BY amt", False, "line comment"),
+    ("SELECT * FROM t /* ORDER BY amt */", False, "block comment"),
+    ("SELECT reorder_by FROM t", False, "word boundary"),
+    # Not reorderable: the query said something about order, so it is left alone.
+    ("SELECT a FROM t ORDER BY a", True, "plain top-level clause"),
+    ("select * from t order   by  amt desc", True, "case and whitespace"),
+    (_CTE_BOTTOM_N_SQL, True, "bottom-N, LIMIT inside the CTE"),
+    (_CTE_OUTER_LIMIT_SQL, True, "bottom-N, LIMIT on the enclosing SELECT"),
 ])
-def test_only_a_sort_on_the_measure_counts(key, expected, why):
-    from data_model import _key_is_measure
-    assert _key_is_measure(key, "total", ["payee", "total"]) is expected, why
-
-
-# ── an outer LIMIT only counts when the outer query is a plain scan ──────────
-
-_CTE_ASC_THEN_JOIN_SQL = (
-    "WITH ranked AS (SELECT payee, SUM(amt) AS total FROM expenditures "
-    "GROUP BY 1 ORDER BY total ASC) "
-    "SELECT r.payee, r.total, x.sos_registered_agent "
-    "FROM ranked r JOIN x ON r.payee = x.payee LIMIT 20"
-)
-_CTE_ASC_THEN_REAGG_SQL = (
-    "WITH ranked AS (SELECT payee, SUM(amt) AS total FROM expenditures "
-    "GROUP BY 1 ORDER BY total ASC) "
-    "SELECT agency, SUM(total) AS total FROM ranked GROUP BY 1 LIMIT 15"
-)
-_CTE_INNER_LIMIT_THEN_JOIN_SQL = (
-    "WITH ranked AS (SELECT payee, total FROM t ORDER BY total ASC LIMIT 10) "
-    "SELECT r.payee, r.total, x.g FROM ranked r JOIN x ON 1=1"
-)
+def test_only_an_arbitrary_order_may_be_reordered(sql, ordered, why):
+    from data_model import sql_orders_result
+    assert sql_orders_result(sql) is ordered, why
 
 
 @pytest.mark.parametrize("sql,why", [
-    (_CTE_ASC_THEN_JOIN_SQL, "a join throws the CTE's order away"),
-    (_CTE_ASC_THEN_REAGG_SQL, "a re-aggregation does too"),
+    (_CTE_BOTTOM_N_SQL, "LIMIT inside the CTE"),
+    (_CTE_OUTER_LIMIT_SQL, "LIMIT on the enclosing SELECT"),
+    (_CTE_BOTTOM_N_SQL.replace("ORDER BY total ASC", "ORDER BY total"),
+     "SQL's default direction is ASC"),
+    ("WITH r AS (SELECT p, SUM(a) AS total FROM e GROUP BY 1 ORDER BY total ASC), "
+     "j AS (SELECT r.p, r.total FROM r JOIN x ON 1=1) SELECT * FROM j LIMIT 20",
+     "the join lives in an intermediate CTE"),
+    ("WITH r AS (SELECT p, SUM(a) AS total FROM e GROUP BY 1 ORDER BY total ASC) "
+     "SELECT * FROM (SELECT r.p, r.total FROM r JOIN x ON 1=1) LIMIT 20",
+     "derived table"),
+    ("WITH r AS (SELECT p, SUM(a) AS total FROM e GROUP BY 1 ORDER BY total ASC) "
+     "SELECT r.p, r.total FROM r, x WHERE r.p = x.p LIMIT 20", "implicit comma join"),
+    ("WITH r AS (SELECT p, SUM(a) AS total FROM e GROUP BY 1 ORDER BY total ASC) "
+     "SELECT * FROM r UNION SELECT * FROM o LIMIT 20", "set operation"),
+    ("WITH recent AS (SELECT * FROM e ORDER BY check_date ASC LIMIT 100) "
+     "SELECT p, SUM(a) AS total FROM recent GROUP BY 1", "a slice on a non-measure column"),
 ])
-def test_an_outer_limit_over_a_reshuffling_body_is_not_a_bottom_n(sql, why):
-    """Demotion lets an enclosing LIMIT claim a cosmetic clause, which is only
-    sound when the enclosing query is a plain scan — that is the justification
-    the demote branch is written on. Under a JOIN or a GROUP BY the CTE's order
-    is discarded and the LIMIT is a cap on output, not a selection, so
-    borrowing its ASC would put the cheapest payee on top."""
-    from data_model import selective_nested_order_direction, order_for_display
-    assert selective_nested_order_direction(sql) is None, why
+def test_a_bottom_n_or_sliced_result_is_never_flipped(sql, why):
+    """Every one of these once rendered smallest-first as largest-first, or the
+    reverse, because the direction was inferred from the query text. None of
+    them is reordered now — the frame is served exactly as the query built it,
+    which is at worst unhelpful rather than confidently wrong."""
+    from data_model import order_for_display
     df = pd.DataFrame({"payee": ["cheap", "mid", "big"], "total": [1.0, 2.0, 3.0]})
-    assert order_for_display(df, sql)["total"].tolist() == [3.0, 2.0, 1.0]
+    assert order_for_display(df, sql)["total"].tolist() == [1.0, 2.0, 3.0], why
 
 
-def test_an_inner_limit_stays_selective_even_under_a_join():
-    """The distinction is WHERE the LIMIT sits, not whether a join follows.
-    This CTE really did pick the ten cheapest before the join fanned them out,
-    so ascending remains the question that was asked."""
-    from data_model import selective_nested_order_direction, order_for_display
-    assert selective_nested_order_direction(_CTE_INNER_LIMIT_THEN_JOIN_SQL) == "asc"
-    df = pd.DataFrame({"payee": ["cheap", "mid", "big"], "total": [1.0, 2.0, 3.0]})
-    out = order_for_display(df, _CTE_INNER_LIMIT_THEN_JOIN_SQL)
-    assert out["total"].tolist() == [1.0, 2.0, 3.0]
+def test_a_window_only_query_is_still_reordered():
+    """The case that motivated looking past a bare substring match: "top 3
+    payees per agency" orders solely inside ROW_NUMBER() OVER (...), so its
+    rows genuinely do come back in storage order and need sorting."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"payee": ["a", "b", "c"], "total": [1.0, 3.0, 2.0]})
+    assert order_for_display(df, _WINDOW_FN_SQL)["total"].tolist() == [3.0, 2.0, 1.0]
 
 
-def test_a_passthrough_outer_limit_still_reads_as_bottom_n():
-    """The shape demotion exists for must keep working."""
-    from data_model import selective_nested_order_direction
-    assert selective_nested_order_direction(_CTE_OUTER_LIMIT_SQL) == "asc"
+def test_the_reorder_is_only_ever_descending():
+    """The direction is never taken from the query. Borrowing it is how this
+    function turned "which ten payees received the least" into
+    largest-of-the-ten-first, five separate ways."""
+    src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "data_model.py")).read()
+    body = src[src.index("def order_for_display("):src.index("def chart_window(")]
+    assert "ascending=False" in body
+    assert "ascending=True" not in body

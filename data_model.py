@@ -547,72 +547,32 @@ def infer_chart(df) -> tuple:
 _MAX_REORDER_ROWS = 50_000
 
 _ORDER_BY_RE = re.compile(r"order\s+by\b", re.I)
-_LIMIT_RE = re.compile(r"limit\b", re.I)
-_GROUP_BY_RE = re.compile(r"group\s+by\b", re.I)
-_ASC_RE = re.compile(r"asc\b", re.I)
-_DESC_RE = re.compile(r"desc\b", re.I)
 
 
-def has_top_level_order_by(sql: str) -> bool:
-    """Does this statement order its FINAL result set?
+def sql_orders_result(sql: str) -> bool:
+    """Does this statement say anything about the order of its rows?
 
-    Paren depth is the whole point. An ORDER BY inside OVER(...), a CTE or a
-    subquery says nothing about the order rows come back in — DuckDB does not
-    propagate a subquery's ordering through a join — so the natural "top 3
-    payees per agency" query,
+    True unless every ORDER BY it contains sits inside an OVER (...) window
+    spec. A window spec orders rows WITHIN the function and provably cannot
+    order the result set, so a query whose only ORDER BY lives there has
+    expressed nothing about row order — "top 3 payees per agency" via
+    ROW_NUMBER() comes back in storage order.
 
-        SELECT ... FROM (SELECT ..., ROW_NUMBER() OVER (
-            PARTITION BY agency ORDER BY SUM(amount) DESC) AS rn ...) WHERE rn <= 3
-
-    returns storage order while plainly containing the words "ORDER BY".
-    Matching the substring anywhere would hand exactly those results back
-    unsorted, which is the case order_for_display exists to catch.
+    Everything else counts, wherever it sits. That is deliberately blunt: a
+    nested ORDER BY in a CTE MAY be discarded by a join above it, but deciding
+    which ones survive means deciding whether every enclosing body is a plain
+    scan, through CTE chains, derived tables, comma joins and set operations.
+    Five successive attempts at that judgement each shipped a wrong ORDER —
+    a bottom-N query rendered largest-first, a date slice rendered
+    cheapest-first — because the failure mode of guessing wrong is not "no
+    help" but "confidently reversed". Declining to reorder leaves a table
+    exactly as the query produced it, which is at worst unhelpful.
 
     String literals, quoted identifiers and comments are skipped so a payee
     named "ORDER BY" or a commented-out clause cannot vote."""
-    return _scan_order_by(sql)[0]
-
-
-def selective_nested_order_direction(sql: str):
-    """'asc'/'desc' if a nested ORDER BY also LIMITs, else None.
-
-    A nested ORDER BY is usually cosmetic and discarded by whatever wraps it.
-    Paired with a LIMIT it stops being cosmetic and becomes SELECTIVE: it
-    decides WHICH rows survive, so its direction is the question being asked.
-
-        WITH lowest AS (SELECT payee, SUM(amt) AS total FROM e
-                        GROUP BY 1 ORDER BY total ASC LIMIT 10)
-        SELECT * FROM lowest
-
-    is "which ten payees received the LEAST". Sorting that descending answers
-    a different question with the same ten rows — largest-of-the-smallest
-    first — in the table, the chart, and the text the interpreter reads.
-
-    The direction alone; callers that must also know WHICH column was sorted
-    (order_for_display does, since a direction only speaks for the measure)
-    read the (direction, key) pair from _scan_order_by."""
-    claimed = _scan_order_by(sql)[1]
-    return claimed[0] if claimed else None
-
-
-def _scan_order_by(sql: str) -> tuple:
-    """(has_top_level_order_by, selective_nested_clause).
-
-    selective_nested_clause is (direction, sort_key) for a nested ORDER BY
-    that a LIMIT makes selective, else None. The key is carried because the
-    direction only speaks for the measure when the measure is what was
-    sorted — see order_for_display.
-    """
     if not sql:
-        return False, None
-    top_level = False
-    claimed = None
-    pending = []            # [(depth, direction, key, demoted)] awaiting a LIMIT
-    windows = []            # is the group at each depth an OVER (...) spec?
-    # Does the query body at each depth discard the order of what it reads —
-    # a JOIN or a re-aggregation? Only a plain scan carries a CTE's order
-    # through, so only a plain scan may let its LIMIT claim a demoted clause.
-    discards = [False]
+        return False
+    windows = []              # is the group at each depth an OVER (...) spec?
     prev_word = ""
     depth, i, n = 0, 0, len(sql)
     while i < n:
@@ -642,28 +602,12 @@ def _scan_order_by(sql: str) -> tuple:
             i = n if e == -1 else e + 2
         elif c == "(":
             windows.append(prev_word.lower() == "over")
-            discards.append(False)
             depth += 1
             prev_word = ""
             i += 1
         elif c == ")":
-            was_window = windows.pop() if windows else False
-            if len(discards) > 1:
-                discards.pop()
-            if was_window:
-                # A window spec orders rows WITHIN the function, never the
-                # result set. An enclosing LIMIT must not be able to claim it,
-                # or ROW_NUMBER() OVER (ORDER BY d ASC) ... LIMIT 5 would read
-                # as a bottom-N request.
-                pending = [p for p in pending if p[0] < depth]
-            else:
-                # Demote rather than drop: the LIMIT of a bottom-N query is as
-                # often written on the enclosing SELECT as inside the CTE, and
-                # a plain scan of an ordered CTE does come back in its order.
-                # Marked as demoted so the claim can be refused if the enclosing
-                # body turns out NOT to be a plain scan.
-                pending = [((p[0] - 1, p[1], p[2], True) if p[0] == depth else p)
-                           for p in pending]
+            if windows:
+                windows.pop()
             depth = max(0, depth - 1)
             prev_word = ""
             i += 1
@@ -671,103 +615,20 @@ def _scan_order_by(sql: str) -> tuple:
             j = i
             while j < n and (sql[j].isalnum() or sql[j] == "_"):
                 j += 1
-            word = sql[i:j]
-            low = word.lower()
+            low = sql[i:j].lower()
             m = _ORDER_BY_RE.match(sql, i) if low == "order" else None
             if m:
-                if depth == 0:
-                    top_level = True
-                else:
-                    pending.append((depth,) + _first_key(sql, m.end()) + (False,))
+                if not any(windows):
+                    return True
                 prev_word = ""
                 i = m.end()
                 continue
-            m = _GROUP_BY_RE.match(sql, i) if low == "group" else None
-            if m or low == "join":
-                # This body reshuffles what it reads, so a CTE's order does not
-                # survive into it and its LIMIT is a cap on the output, not a
-                # bottom-N selection.
-                if depth < len(discards):
-                    discards[depth] = True
-                prev_word = ""
-                i = m.end() if m else j
-                continue
-            if low == "limit":
-                for p in pending:
-                    if p[0] != depth:
-                        continue
-                    if p[3] and depth < len(discards) and discards[depth]:
-                        continue        # demoted into a join/re-aggregation
-                    claimed = (p[1], p[2])          # innermost-latest wins
-                pending = [p for p in pending if p[0] != depth]
-                prev_word = ""
-                i = j
-                continue
-            prev_word = word
+            prev_word = sql[i:j]
             i = j
         else:
             if not c.isspace():
                 prev_word = ""
             i += 1
-    return top_level, claimed
-
-
-def _first_key(sql: str, pos: int) -> tuple:
-    """(direction, key text) of an ORDER BY's FIRST sort key.
-
-    SQL's default is ASC, so a bare column means ascending — which is what
-    makes "ORDER BY total LIMIT 10" a bottom-N query."""
-    direction, end = "asc", None
-    depth, i, n = 0, pos, len(sql)
-    while i < n:
-        c = sql[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            if depth == 0:
-                break
-            depth -= 1
-        elif depth == 0:
-            if c in ",;":
-                break
-            if c.isalpha() or c == "_":
-                j = i
-                while j < n and (sql[j].isalnum() or sql[j] == "_"):
-                    j += 1
-                low = sql[i:j].lower()
-                if low in ("asc", "desc"):
-                    direction = low
-                    if end is None:
-                        end = i
-                elif low in ("limit", "offset", "nulls", "fetch", "window"):
-                    if end is None:
-                        end = i
-                    break
-                i = j
-                continue
-        i += 1
-    if end is None:
-        end = i
-    return direction, sql[pos:end].strip().strip('"')
-
-
-def _key_is_measure(key: str, value_col: str, columns) -> bool:
-    """Did the selective ORDER BY sort the column we are about to sort by?
-
-    An ASC that slices on check_date or on a name says nothing about the
-    measure; transplanting it renders the cheapest payee first. A bare ordinal
-    is resolved against the frame's own columns, which is right for the common
-    SELECT * passthrough and declines to guess otherwise."""
-    if not key or not value_col:
-        return False
-    bare = key.split(".")[-1].strip().strip('"').lower()
-    target = value_col.strip().lower()
-    if bare == target:
-        return True
-    if bare.isdigit():
-        idx = int(bare) - 1
-        cols = list(columns)
-        return 0 <= idx < len(cols) and str(cols[idx]).strip().lower() == target
     return False
 
 
@@ -780,33 +641,24 @@ def order_for_display(df, sql: str):
     whose bars jump around, when the question was plainly "who earns the
     most". Sorting by the measure descending is what the question meant.
 
-    Applied ONLY when the SQL orders nothing at the TOP level. An ORDER BY
-    that governs the final result is an expressed intent and is never
-    second-guessed, even when it disagrees with this heuristic — but one
-    buried in OVER(...) or a CTE governs nothing (see has_top_level_order_by).
-    Time-keyed results are also left alone: chronology is their order, and the
-    chart layer sorts them by axis anyway.
+    Applied only to results whose order is definitionally arbitrary (see
+    sql_orders_result), and only ever DESCENDING. The direction is never
+    inferred from the query: a borrowed direction is how this function
+    repeatedly turned "which ten payees received the least" into
+    largest-of-the-ten-first. Time-keyed results are left alone too —
+    chronology is their order, and the chart layer sorts them by axis.
     """
     if df is None or sql is None or len(df) < 2 or len(df) > _MAX_REORDER_ROWS:
         return df
-    if has_top_level_order_by(sql):
+    if sql_orders_result(sql):
         return df
     try:
         _, label_col, value_col = infer_chart(df)
         if not value_col or (label_col and is_time_named(label_col)):
             return df
-        # Largest-first by default, but a nested ORDER BY paired with a LIMIT
-        # already chose a direction — it decided which rows are here at all,
-        # so forcing DESC would answer a different question with the same rows.
-        # Honoured only when that clause sorted the MEASURE: an ASC that slices
-        # on check_date or alphabetically says nothing about the totals, and
-        # borrowing it would put the cheapest payee on top.
-        nested = _scan_order_by(sql)[1]
-        ascending = bool(nested and nested[0] == "asc"
-                         and _key_is_measure(nested[1], value_col, df.columns))
         # mergesort is stable, so rows tied on the measure keep the order the
         # query produced rather than being shuffled.
-        return df.sort_values(value_col, ascending=ascending,
+        return df.sort_values(value_col, ascending=False,
                               kind="mergesort").reset_index(drop=True)
     except Exception:
         return df
