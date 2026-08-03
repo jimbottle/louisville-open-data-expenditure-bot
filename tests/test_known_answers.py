@@ -899,8 +899,7 @@ _CTE_OUTER_LIMIT_SQL = (
     # Reorderable: nothing in the statement speaks to row order.
     ("SELECT a, b FROM t", False, "no ORDER BY at all"),
     ("SELECT ... UNION ALL SELECT ...", False, "the reported salary query"),
-    ("SELECT p, total, SUM(total) OVER (ORDER BY d) AS running FROM e", False,
-     "a VALUE window selects no rows, so its ORDER BY speaks to nothing"),
+    ("SELECT p, SUM(a) AS total FROM e GROUP BY 1", False, "a plain aggregate"),
     ("SELECT * FROM t WHERE payee = 'ORDER BY INC'", False, "string literal"),
     ("SELECT * FROM t -- ORDER BY amt", False, "line comment"),
     ("SELECT * FROM t /* ORDER BY amt */", False, "block comment"),
@@ -910,11 +909,18 @@ _CTE_OUTER_LIMIT_SQL = (
     ("select * from t order   by  amt desc", True, "case and whitespace"),
     (_CTE_BOTTOM_N_SQL, True, "bottom-N, LIMIT inside the CTE"),
     (_CTE_OUTER_LIMIT_SQL, True, "bottom-N, LIMIT on the enclosing SELECT"),
-    (_WINDOW_FN_SQL, True, "a RANKING window's ORDER BY chooses which rows survive"),
-    (_WINDOW_FN_SQL.replace("DESC", "ASC"), True, "and the bottom-N sibling likewise"),
+    (_WINDOW_FN_SQL, True, "a window ORDER BY counts too — it may be a rank filter"),
+    (_WINDOW_FN_SQL.replace("DESC", "ASC"), True, "the bottom-N sibling likewise"),
     ("SELECT p, SUM(a) AS total FROM e GROUP BY 1 "
      "QUALIFY ROW_NUMBER() OVER (ORDER BY SUM(a) ASC) <= 10", True,
-     "QUALIFY filters the rank with no subquery at all"),
+     "QUALIFY filters a rank with no subquery at all"),
+    ("SELECT p, total, SUM(total) OVER (ORDER BY d) AS running FROM e", True,
+     "ACCEPTED COST: a value window decorates rather than selects, but "
+     "telling the two apart is what leaked seven times"),
+    ("SELECT p, d, amt FROM (SELECT *, ROW_NUMBER() OVER "
+     "(PARTITION BY p ORDER BY d DESC) rn FROM e) WHERE rn = 1", True,
+     "ACCEPTED COST: the de-duplication idiom is genuinely arbitrary across "
+     "entities, but its rank key is indistinguishable from a bottom-N's"),
 ])
 def test_only_an_arbitrary_order_may_be_reordered(sql, ordered, why):
     from data_model import sql_orders_result
@@ -962,13 +968,41 @@ def test_a_rank_filtered_window_is_left_alone_whichever_way_it_ranks():
         assert order_for_display(df, sql)["total"].tolist() == [1.0, 2.0, 3.0]
 
 
-def test_a_value_window_stays_exempt():
-    """SUM() OVER (ORDER BY ...) computes a running total; it neither orders
-    nor selects rows, so a query carrying only that is still arbitrary."""
+def test_a_query_carrying_any_order_by_is_served_as_built():
+    """The accepted cost of the blunt rule, pinned rather than latent. Both of
+    these ARE genuinely arbitrary results that would benefit from sorting —
+    but a value window's ORDER BY and a rank filter's ORDER BY are the same
+    tokens, and a bottom-N can rank a plain column just as a de-dupe ranks a
+    date. Seven attempts to separate them each shipped a reversed result."""
     from data_model import order_for_display
     df = pd.DataFrame({"payee": ["a", "b", "c"], "total": [1.0, 3.0, 2.0]})
-    sql = "SELECT payee, total, SUM(total) OVER (ORDER BY d) AS running FROM e"
-    assert order_for_display(df, sql)["total"].tolist() == [3.0, 2.0, 1.0]
+    for sql in (
+        "SELECT payee, total, SUM(total) OVER (ORDER BY d) AS running FROM e",
+        "SELECT p, d, amt FROM (SELECT *, ROW_NUMBER() OVER "
+        "(PARTITION BY p ORDER BY d DESC) rn FROM e) WHERE rn = 1",
+    ):
+        assert order_for_display(df, sql)["total"].tolist() == [1.0, 3.0, 2.0]
+
+
+def test_no_sql_shape_can_invert_a_result():
+    """The invariant the whole rule exists for: every query that selected rows
+    by rank or limit — in any spelling found across eight review rounds — is
+    served exactly as built, so none of them can come back reversed."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"payee": ["cheap", "mid", "big"], "total": [1.0, 2.0, 3.0]})
+    selective = [
+        _CTE_BOTTOM_N_SQL,
+        _CTE_OUTER_LIMIT_SQL,
+        _WINDOW_FN_SQL.replace("DESC", "ASC"),
+        "SELECT a,p,total FROM (SELECT a,p,total, ROW_NUMBER() OVER "
+        "(PARTITION BY a ORDER BY total ASC) rn FROM s) WHERE rn <= 3",
+        "SELECT p, SUM(a) AS total FROM e GROUP BY 1 "
+        "QUALIFY ROW_NUMBER() OVER (ORDER BY SUM(a) ASC) <= 10",
+        "WITH recent AS (SELECT * FROM e ORDER BY d ASC LIMIT 100) "
+        "SELECT p, SUM(a) AS total FROM recent GROUP BY 1",
+    ]
+    for sql in selective:
+        assert order_for_display(df, sql)["total"].tolist() == [1.0, 2.0, 3.0], sql
 
 
 def test_the_reorder_is_only_ever_descending():

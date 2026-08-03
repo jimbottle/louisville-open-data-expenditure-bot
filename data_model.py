@@ -548,56 +548,44 @@ _MAX_REORDER_ROWS = 50_000
 
 _ORDER_BY_RE = re.compile(r"order\s+by\b", re.I)
 
-# Window functions whose output is a RANK, which a later predicate filters on
-# (WHERE rn <= 3, QUALIFY). Their ORDER BY chooses which rows exist, so it
-# speaks to the result. Value-producing windows (SUM, AVG, LAG, FIRST_VALUE)
-# choose nothing and stay exempt.
-_RANKING_FNS = frozenset({
-    "row_number", "rank", "dense_rank", "percent_rank", "cume_dist", "ntile",
-})
-
 
 def sql_orders_result(sql: str) -> bool:
-    """Does this statement say anything about the order of its rows?
+    """Does this statement contain ANY ordering instruction?
 
-    True unless every ORDER BY it contains sits inside an OVER (...) window
-    spec that computes a VALUE. Such a spec orders rows within the function
-    and cannot order — or choose — the result set.
+    True if the words ORDER BY appear anywhere outside a string literal, a
+    quoted identifier or a comment. Nothing finer: not paren depth, not window
+    specs, not ranking functions, not which column was keyed.
 
-    A RANKING window is different and does count. Its ORDER BY decides which
-    rows survive the rank filter that inevitably follows (WHERE rn <= 3,
-    QUALIFY), exactly as an inner LIMIT does, so "bottom 3 payees per agency"
-    via ROW_NUMBER() ... ASC is a smallest-first question. Sorting it
-    descending renders largest-of-the-cheapest first — the same reversal this
-    function exists to avoid, and the last path by which it could still occur.
-    A running total via SUM() OVER (ORDER BY ...) selects nothing, so it stays
-    exempt.
+    That bluntness is the conclusion of seven attempts at something smarter,
+    each of which shipped a REVERSED result. The distinction being chased is
+    "did this clause select rows or merely decorate them", and every proxy for
+    it leaked:
 
-    The cost is that "top 3 per agency" (the DESC sibling) is no longer
-    reordered either: the two are indistinguishable without reading the
-    direction, and reading directions out of SQL is what repeatedly produced
-    reversed results. It comes back as the query built it.
+      - top-level only          -> flipped bottom-N in a CTE
+      - borrow the direction    -> flipped a slice keyed on a date
+      - require a paired LIMIT  -> flipped when the LIMIT sat one level out
+      - gate on the outer body  -> flipped through CTE chains, derived tables,
+                                   comma joins and UNION
+      - exempt window specs     -> flipped rank-filtered ASC windows
+      - disqualify ranking fns  -> suppressed the de-duplication idiom, and
+                                   still could not see a bottom-N whose rank
+                                   key is a plain column rather than an
+                                   aggregate
 
-    Everything else counts, wherever it sits. That is deliberately blunt: a
-    nested ORDER BY in a CTE MAY be discarded by a join above it, but deciding
-    which ones survive means deciding whether every enclosing body is a plain
-    scan, through CTE chains, derived tables, comma joins and set operations.
-    Five successive attempts at that judgement each shipped a wrong ORDER —
-    a bottom-N query rendered largest-first, a date slice rendered
-    cheapest-first — because the failure mode of guessing wrong is not "no
-    help" but "confidently reversed". Declining to reorder leaves a table
-    exactly as the query produced it, which is at worst unhelpful.
+    A wrong order is worse than no order: it presents "the ten payees who
+    received the LEAST" as a descending ranking, in the table, the chart, and
+    the prose the model writes from it. So the only results reordered are
+    those about which the query said nothing whatsoever.
 
-    String literals, quoted identifiers and comments are skipped so a payee
-    named "ORDER BY" or a commented-out clause cannot vote."""
+    The cost is real and accepted: a query carrying a purely cosmetic ORDER BY
+    — a de-duplicating ROW_NUMBER() window, a CTE whose order a join discards
+    — is served as the engine returns it, which may look arbitrary. The fix
+    for those belongs in the SQL prompt, which asks for an explicit ORDER BY
+    on every multi-row result; that is the layer that can tell what the
+    question meant."""
     if not sql:
         return False
-    windows = []              # is the group at each depth an OVER (...) spec?
-    saw_result_order = False  # an ORDER BY outside any window spec
-    saw_window_order = False  # an ORDER BY inside one
-    has_ranking = False       # ROW_NUMBER/RANK/... appears anywhere in the code
-    prev_word = ""
-    depth, i, n = 0, 0, len(sql)
+    i, n = 0, len(sql)
     while i < n:
         c = sql[i]
         if c == "'":                                  # string literal ('' escapes)
@@ -610,55 +598,27 @@ def sql_orders_result(sql: str) -> bool:
                     break
                 i += 1
             i += 1
-            prev_word = ""
         elif c == '"':                                # quoted identifier
             i += 1
             while i < n and sql[i] != '"':
                 i += 1
             i += 1
-            prev_word = ""
         elif sql.startswith("--", i):
             nl = sql.find("\n", i)
             i = n if nl == -1 else nl + 1
         elif sql.startswith("/*", i):
             e = sql.find("*/", i + 2)
             i = n if e == -1 else e + 2
-        elif c == "(":
-            windows.append(prev_word.lower() == "over")
-            depth += 1
-            prev_word = ""
-            i += 1
-        elif c == ")":
-            if windows:
-                windows.pop()
-            depth = max(0, depth - 1)
-            prev_word = ""
-            i += 1
         elif c.isalpha() or c == "_":
             j = i
             while j < n and (sql[j].isalnum() or sql[j] == "_"):
                 j += 1
-            low = sql[i:j].lower()
-            m = _ORDER_BY_RE.match(sql, i) if low == "order" else None
-            if m:
-                # Decided at the end, not here: a ranking function may appear
-                # after the window clause it belongs to has been scanned.
-                if any(windows):
-                    saw_window_order = True
-                else:
-                    saw_result_order = True
-                prev_word = ""
-                i = m.end()
-                continue
-            if low in _RANKING_FNS:
-                has_ranking = True
-            prev_word = sql[i:j]
+            if sql[i:j].lower() == "order" and _ORDER_BY_RE.match(sql, i):
+                return True
             i = j
         else:
-            if not c.isspace():
-                prev_word = ""
             i += 1
-    return saw_result_order or (saw_window_order and has_ranking)
+    return False
 
 
 def order_for_display(df, sql: str):
