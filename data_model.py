@@ -546,6 +546,66 @@ def infer_chart(df) -> tuple:
 # infer_chart's per-column nunique() is what makes it expensive.
 _MAX_REORDER_ROWS = 50_000
 
+_ORDER_BY_RE = re.compile(r"order\s+by\b", re.I)
+
+
+def has_top_level_order_by(sql: str) -> bool:
+    """Does this statement order its FINAL result set?
+
+    Paren depth is the whole point. An ORDER BY inside OVER(...), a CTE or a
+    subquery says nothing about the order rows come back in — DuckDB does not
+    propagate a subquery's ordering through a join — so the natural "top 3
+    payees per agency" query,
+
+        SELECT ... FROM (SELECT ..., ROW_NUMBER() OVER (
+            PARTITION BY agency ORDER BY SUM(amount) DESC) AS rn ...) WHERE rn <= 3
+
+    returns storage order while plainly containing the words "ORDER BY".
+    Matching the substring anywhere would hand exactly those results back
+    unsorted, which is the case order_for_display exists to catch.
+
+    String literals, quoted identifiers and comments are skipped so a payee
+    named "ORDER BY" or a commented-out clause cannot vote."""
+    if not sql:
+        return False
+    depth, i, n = 0, 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":                                  # string literal ('' escapes)
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":
+                        i += 2
+                        continue
+                    break
+                i += 1
+            i += 1
+        elif c == '"':                                # quoted identifier
+            i += 1
+            while i < n and sql[i] != '"':
+                i += 1
+            i += 1
+        elif sql.startswith("--", i):
+            nl = sql.find("\n", i)
+            i = n if nl == -1 else nl + 1
+        elif sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+        elif c == "(":
+            depth += 1
+            i += 1
+        elif c == ")":
+            depth = max(0, depth - 1)
+            i += 1
+        else:
+            if (depth == 0 and c in "oO"
+                    and (i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] == "_"))
+                    and _ORDER_BY_RE.match(sql, i)):
+                return True
+            i += 1
+    return False
+
 
 def order_for_display(df, sql: str):
     """Put the largest values first when the query expressed no order at all.
@@ -556,14 +616,16 @@ def order_for_display(df, sql: str):
     whose bars jump around, when the question was plainly "who earns the
     most". Sorting by the measure descending is what the question meant.
 
-    Applied ONLY when the SQL states no ordering anywhere. An explicit ORDER
-    BY is an expressed intent and is never second-guessed, even when it
-    disagrees with this heuristic. Time-keyed results are also left alone:
-    chronology is their order, and the chart layer sorts them by axis anyway.
+    Applied ONLY when the SQL orders nothing at the TOP level. An ORDER BY
+    that governs the final result is an expressed intent and is never
+    second-guessed, even when it disagrees with this heuristic — but one
+    buried in OVER(...) or a CTE governs nothing (see has_top_level_order_by).
+    Time-keyed results are also left alone: chronology is their order, and the
+    chart layer sorts them by axis anyway.
     """
     if df is None or sql is None or len(df) < 2 or len(df) > _MAX_REORDER_ROWS:
         return df
-    if re.search(r"\border\s+by\b", sql, re.I):
+    if has_top_level_order_by(sql):
         return df
     try:
         _, label_col, value_col = infer_chart(df)

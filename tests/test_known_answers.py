@@ -868,3 +868,48 @@ def test_the_prompt_asks_for_an_explicit_order_by():
     src = _app_source()
     assert "ALWAYS give a multi-row result an explicit ORDER BY" in src
     assert "UNION ALL queries too" in src
+
+
+# ── only a TOP-LEVEL order counts as the query expressing one ────────────────
+
+_WINDOW_FN_SQL = (
+    "SELECT agency_canonical, payee_canonical, total FROM ("
+    "SELECT agency_canonical, payee_canonical, SUM(extended_amount) AS total, "
+    "ROW_NUMBER() OVER (PARTITION BY agency_canonical ORDER BY SUM(extended_amount) DESC) AS rn "
+    "FROM expenditures GROUP BY 1,2) WHERE rn <= 3"
+)
+_CTE_JOIN_SQL = (
+    "WITH ranked AS (SELECT payee, total_spend FROM summary_top_contractors "
+    "ORDER BY total_spend DESC LIMIT 20) "
+    "SELECT r.payee, r.total_spend, e.sos_registered_agent FROM ranked r JOIN x ON 1=1"
+)
+
+
+@pytest.mark.parametrize("sql,expected,why", [
+    ("SELECT a, b FROM t", False, "nothing to honour"),
+    ("SELECT a FROM t ORDER BY a", True, "plain top-level clause"),
+    ("select * from t order   by  amt desc", True, "case and whitespace"),
+    ("SELECT ... UNION ALL SELECT ... ORDER BY x", True, "after the final SELECT"),
+    (_WINDOW_FN_SQL, False, "ORDER BY lives inside OVER(...)"),
+    (_CTE_JOIN_SQL, False, "a join discards the CTE's ordering"),
+    ("WITH r AS (SELECT * FROM t) SELECT * FROM r ORDER BY amt", True, "CTE plus a real clause"),
+    ("SELECT * FROM t WHERE payee = 'ORDER BY INC'", False, "string literal"),
+    ("SELECT * FROM t -- ORDER BY amt", False, "line comment"),
+    ("SELECT * FROM t /* ORDER BY amt */", False, "block comment"),
+    ("SELECT reorder_by FROM t", False, "word boundary"),
+])
+def test_only_a_top_level_order_by_counts(sql, expected, why):
+    """Matching the substring anywhere fails open on the two shapes this bot
+    plausibly generates: "top 3 payees per agency" orders only inside
+    ROW_NUMBER() OVER (...), and a CTE's ORDER BY is discarded by the join
+    around it. Both return storage order while containing the words."""
+    from data_model import has_top_level_order_by
+    assert has_top_level_order_by(sql) is expected, why
+
+
+@pytest.mark.parametrize("sql", [_WINDOW_FN_SQL, _CTE_JOIN_SQL])
+def test_a_nested_order_by_does_not_block_the_reorder(sql):
+    """The end that matters: these results must still be sorted for display."""
+    from data_model import order_for_display
+    df = pd.DataFrame({"payee": ["A", "B", "C"], "total": [1.0, 3.0, 2.0]})
+    assert order_for_display(df, sql)["total"].tolist() == [3.0, 2.0, 1.0]
