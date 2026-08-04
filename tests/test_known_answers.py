@@ -1101,27 +1101,42 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
     assert "Fund 1" in s.splitlines()[1]
     assert "in the order the query produced them" in note
 
-    # Both surfaces, checked the same way: strip the one sentence that is
+    # Every surface is checked the same way: strip the one sentence that is
     # ALLOWED to say largest/smallest — the prohibition — and neither word may
-    # survive anywhere else.
+    # survive anywhere else. Case-FOLDED, because these prompts are written as
+    # sentences and several bullets already open on a capitalised keyword
+    # ("- NEVER rescale...", "- A long result is TRUNCATED..."), so
+    # "- Largest rows are shown first." is the natural mutation shape, not a
+    # contrived one — and a case-sensitive check misses it on every surface at
+    # once.
     def _without(text, clause):
-        assert clause in text, f"prohibition missing from: {text}"
-        i = text.index(clause)
-        return text[:i] + text[i + len(clause):]
+        folded, c = text.lower(), clause.lower()
+        assert c in folded, f"prohibition missing from: {text}"
+        i = folded.index(c)
+        return folded[:i] + folded[i + len(c):]
+
+    def _assert_no_direction(text, where):
+        low = text.lower()
+        assert "largest" not in low and "smallest" not in low, f"{where}: {text}"
 
     _NOTE_PROHIBITION = ("Do not describe the shown rows as the largest or the "
                          "smallest unless the query's own ordering says so.")
-    residue = _without(note, _NOTE_PROHIBITION)
-    assert "largest" not in residue and "smallest" not in residue, residue
-    template_residue = _without(TRUNCATION_NOTE, _NOTE_PROHIBITION)
-    assert "largest" not in template_residue and "smallest" not in template_residue
+    _assert_no_direction(_without(note, _NOTE_PROHIBITION), "runtime note")
+    _assert_no_direction(_without(TRUNCATION_NOTE, _NOTE_PROHIBITION), "note template")
 
     # The counts clauses are interpolated INTO the note — including on the
     # ROLLUP path the grant query actually takes, which this test's own query
     # does not exercise. Neither may mention direction at all, so no
     # prohibition needs stripping.
-    for template in (TRUNCATION_COUNTS, TRUNCATION_COUNTS_WITH_TOTALS):
-        assert "largest" not in template and "smallest" not in template, template
+    _assert_no_direction(TRUNCATION_COUNTS, "counts template")
+    _assert_no_direction(TRUNCATION_COUNTS_WITH_TOTALS, "rollup counts template")
+
+    # The refiner is the SECOND model-visible prompt reading this same table —
+    # app.py hands it result_str, note included, and it writes the text the
+    # user actually sees. A direction claim there reinstates the reversal on
+    # the final editing pass. It carries no prohibition, so nothing is stripped.
+    from analytics_agent import REFINE_SYSTEM_PROMPT
+    _assert_no_direction(REFINE_SYSTEM_PROMPT, "refine prompt")
 
     # The regression this test is NAMED for lived in the prompt. Scanned over
     # the WHOLE interpretation prompt, not one physical line: that bullet is
@@ -1132,12 +1147,10 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
     src = _app_source()
     prompt = src[src.index('interpret_system = f"""'):]
     prompt = prompt[:prompt.index('\n"""')]
-    prompt_residue = _without(
-        prompt,
-        "Do not call them the largest or the smallest unless the query's "
-        "ordering actually says so.")
-    assert "largest" not in prompt_residue and "smallest" not in prompt_residue, \
-        "the interpretation prompt characterises the visible rows"
+    _assert_no_direction(
+        _without(prompt, "Do not call them the largest or the smallest unless "
+                         "the query's ordering actually says so."),
+        "interpretation prompt")
 
 
 def test_the_truncation_note_is_part_of_the_cache_key():

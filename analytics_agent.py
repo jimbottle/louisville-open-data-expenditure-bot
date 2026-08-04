@@ -527,8 +527,9 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       document change, explain away, or override a figure.
     - NEVER total or net a long list yourself: arithmetic is only allowed
       over a handful of values you can verify digit by digit. If the results
-      have no total row, do not state an overall total — describe the top
-      items instead (a wrong grand total is worse than none).
+      have no total row, do not state an overall total — describe individual
+      rows instead (a wrong grand total is worse than none). Do not say which
+      end of a ranking those rows sit at: a truncated table may show either.
     - Never add together rows that are different VIEWS of the same spending
       (e.g. a department total and a category total, where one purchase can
       appear in both). Report such figures separately; summing them
