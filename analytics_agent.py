@@ -91,6 +91,11 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
 DEFAULT_MODEL = "qwen-3-235b-a22b-instruct-2507"
 DEFAULT_BASE_URL = "https://api.cerebras.ai/v1"
 
+# Rows rendered into the result table the model interprets and the UI shows.
+# pandas splits this budget between the head and the tail, so a longer result
+# is served with a gap in the middle — see execute_sql_safe.
+MAX_DISPLAY_ROWS = 50
+
 
 # ── Model fallback ───────────────────────────────────────────────────────────
 # Providers deprecate models without notice (qwen-3-235b 404'd in prod while
@@ -632,7 +637,38 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
     # summary should lead with the largest figure too.
     from data_model import order_for_display
     result_df = order_for_display(result_df, sql)
-    result_str = result_df.to_string(index=False, max_rows=50)
+    result_str = result_df.to_string(index=False, max_rows=MAX_DISPLAY_ROWS)
+    if len(result_df) > MAX_DISPLAY_ROWS:
+        # How many rows are actual entities, excluding a ROLLUP grand total —
+        # the same subtraction the chart makes, so the two agree. The grant
+        # query returns 103 rows for 102 funds, and quoting 103 next to a
+        # chart titled "top 30 of 102" is the mismatch this note exists to
+        # avoid re-creating.
+        entities = None
+        try:
+            from data_model import infer_chart, drop_total_rows
+            _, lbl, val = infer_chart(result_df)
+            if lbl and val:
+                n_real = len(drop_total_rows(result_df, lbl, val))
+                if n_real != len(result_df):
+                    entities = n_real
+        except Exception:
+            pass
+        counts = (f"this table has {len(result_df):,} rows, of which {entities:,} "
+                  f"are data rows and the rest are totals/subtotals"
+                  if entities is not None else
+                  f"this table has {len(result_df):,} rows")
+        # pandas renders the head and the tail with a bare "..." between them.
+        # A model reading that enumerates the visible head and presents it as
+        # the whole answer: 102 grant funds became "here are the 24 sources",
+        # silently dropping everything past the gap. Say what was cut.
+        half = MAX_DISPLAY_ROWS // 2
+        result_str += (
+            f"\n\n[TRUNCATED: {counts}. Shown above are the first {half} and the "
+            f"last {half}; the {len(result_df) - MAX_DISPLAY_ROWS:,} in between are "
+            f"NOT shown. Any ranking you give from it is partial — say how many you "
+            f"are naming, and quote the DATA row count when you say how many exist.]"
+        )
     return result_df, result_str
 
 

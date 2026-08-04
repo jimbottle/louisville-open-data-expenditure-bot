@@ -1014,3 +1014,67 @@ def test_the_reorder_is_only_ever_descending():
     body = src[src.index("def order_for_display("):src.index("def chart_window(")]
     assert "ascending=False" in body
     assert "ascending=True" not in body
+
+
+# ── a truncated result must not read as a complete one ───────────────────────
+
+def test_a_long_result_says_what_was_cut():
+    """"How much grant funding, and from which sources?" returns 103 rows.
+    pandas renders 25 head + "..." + 25 tail, and the model enumerated the 24
+    visible funds (the head minus the ROLLUP total) as though that were every
+    source — while the chart beside it said "top 30 of 102". The gap has to be
+    stated, not implied by an ellipsis."""
+    import duckdb
+    from analytics_agent import execute_sql_safe, MAX_DISPLAY_ROWS
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t AS SELECT i AS fund, i * 1.0 AS amt "
+                f"FROM range({MAX_DISPLAY_ROWS + 53}) t(i)")
+    _, s = execute_sql_safe(con, "SELECT fund, amt FROM t ORDER BY amt DESC")
+    con.close()
+    note = [ln for ln in s.splitlines() if ln.startswith("[")]
+    assert note, "a truncated table shipped with no note"
+    assert f"has {MAX_DISPLAY_ROWS + 53} rows" in note[0]
+    assert "53 in between are NOT shown" in note[0]
+    assert "partial" in note[0]
+    # the grant result's 103rd row is a ROLLUP total, so the row count is not
+    # a count of funding sources — the chart beside it correctly says 102
+    assert "quote the DATA row count" in note[0]
+
+
+def test_the_note_separates_data_rows_from_a_rollup_total():
+    """The grant query returns 103 rows for 102 funds — the extra is a ROLLUP
+    grand total. Quoting 103 beside a chart titled "top 30 of 102" is the
+    mismatch that prompted this, so the note makes the same subtraction the
+    chart does."""
+    import duckdb
+    from analytics_agent import execute_sql_safe, MAX_DISPLAY_ROWS
+    n = MAX_DISPLAY_ROWS + 20
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t AS SELECT 'Fund ' || i AS fund, i * 1.0 AS amt "
+                f"FROM range(1, {n + 1}) t(i)")
+    _, s = execute_sql_safe(
+        con,
+        "SELECT COALESCE(fund, 'TOTAL - ALL FUNDS') AS fund, SUM(amt) AS amt "
+        "FROM t GROUP BY ROLLUP(fund)")
+    con.close()
+    note = [ln for ln in s.splitlines() if ln.startswith("[")][0]
+    assert f"has {n + 1:,} rows" in note, note
+    assert f"{n:,} are data rows" in note, note
+
+
+def test_a_short_result_gets_no_note():
+    """Nothing was cut, so nothing to disclose."""
+    import duckdb
+    from analytics_agent import execute_sql_safe, MAX_DISPLAY_ROWS
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE t AS SELECT i AS fund, i * 1.0 AS amt "
+                f"FROM range({MAX_DISPLAY_ROWS}) t(i)")
+    _, s = execute_sql_safe(con, "SELECT fund, amt FROM t ORDER BY amt DESC")
+    con.close()
+    assert not [ln for ln in s.splitlines() if ln.startswith("[")]
+
+
+def test_the_prompt_forbids_passing_off_a_truncated_list_as_complete():
+    src = _app_source()
+    assert "A long result is TRUNCATED" in src
+    assert "the largest few" in src

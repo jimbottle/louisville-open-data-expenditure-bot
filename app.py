@@ -519,6 +519,7 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
 
 ## Accuracy Rules (CRITICAL)
 - NEVER rescale numbers: repeat values at the magnitude shown in the results (a value like 192,770.57 is about $192.8K, not millions).
+- A long result is TRUNCATED, and a note after the table says so. The rows either side of the gap are the largest and the smallest — the middle is missing. Never present a list drawn from a truncated table as if it were complete: say how many rows there are in total and that you are naming the largest few ("the 10 largest of 102 funding sources"). Never imply the smallest rows shown are the end of the ranking; they are the bottom of the data, not the bottom of your list.
 - Only state facts that appear in the results or the question. Do not describe what a figure includes or what years a dataset covers unless the results show it.
 - A "Related city legislation" block may follow the results. It is retrieved by keyword, so some entries will be irrelevant — judge each one. When a document explains what the money was for, why it was appropriated, or a figure in the results, add one short sentence of context and name its file number inline (e.g. "Council set the priorities for this money in R-083-21"). Ignore the rest in silence. The results are always the source of every number: never attribute a figure to a document, never let a document override the results, and never list documents you did not use.
 """
