@@ -1034,7 +1034,7 @@ def test_a_long_result_says_what_was_cut():
     note = [ln for ln in s.splitlines() if ln.startswith("[")]
     assert note, "a truncated table shipped with no note"
     assert f"has {MAX_DISPLAY_ROWS + 53} rows" in note[0]
-    assert "53 in between are NOT shown" in note[0]
+    assert "53 rows in between are NOT shown" in note[0]
     assert "partial" in note[0]
     # the grant result's 103rd row is a ROLLUP total, so the row count is not
     # a count of funding sources — the chart beside it correctly says 102
@@ -1077,4 +1077,39 @@ def test_a_short_result_gets_no_note():
 def test_the_prompt_forbids_passing_off_a_truncated_list_as_complete():
     src = _app_source()
     assert "A long result is TRUNCATED" in src
-    assert "the largest few" in src
+    assert "IN WHATEVER ORDER THE QUERY PRODUCED" in src
+
+
+def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
+    """order_for_display sorts by the measure ONLY when the SQL has no ORDER BY;
+    anything carrying one is served as built, including ASC and keys like a
+    month or a payee name. So "which funds received the least" puts the
+    SMALLEST rows in the visible head — calling them "the largest few" is the
+    same reversal the ordering rules were stripped back to prevent, committed
+    in prose instead of in the frame."""
+    import duckdb
+    from analytics_agent import execute_sql_safe, TRUNCATION_NOTE, MAX_DISPLAY_ROWS
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t AS SELECT 'Fund ' || i AS fund, i * 1.0 AS amt "
+                f"FROM range(1, {MAX_DISPLAY_ROWS + 40}) t(i)")
+    _, s = execute_sql_safe(con, "SELECT fund, amt FROM t ORDER BY amt ASC")
+    con.close()
+    note = [ln for ln in s.splitlines() if ln.startswith("[")][0]
+    # the ascending query really does show the smallest rows first
+    assert " Fund 1 " in s.splitlines()[1] or "Fund 1" in s.splitlines()[1]
+    claim = note.split("Do not describe")[0]
+    assert "largest" not in claim and "smallest" not in claim, claim
+    assert "in the order the query produced them" in note
+    assert "largest" not in TRUNCATION_NOTE.split("Do not describe")[0]
+
+
+def test_the_truncation_note_is_part_of_the_cache_key():
+    """The note is model-visible input. When only the prompts were hashed, a
+    note-only edit changed what the model read while cached answers stayed
+    valid — observed live, where two verification runs replayed a pre-fix
+    answer and looked like the fix had failed."""
+    src = _app_source()
+    call = src[src.index("CACHE_VERSION = hashlib.sha1("):]
+    call = call[:call.index(").hexdigest()")]
+    assert "TRUNCATION_NOTE" in call
+    assert "MAX_DISPLAY_ROWS" in call

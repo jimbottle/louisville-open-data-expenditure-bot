@@ -96,6 +96,29 @@ DEFAULT_BASE_URL = "https://api.cerebras.ai/v1"
 # is served with a gap in the middle — see execute_sql_safe.
 MAX_DISPLAY_ROWS = 50
 
+# Appended to a truncated result table. pandas renders the head and the tail
+# with a bare "..." between them, and a model reading that enumerates the
+# visible head and presents it as the whole answer: 102 grant funds became
+# "here are the 24 sources", silently dropping everything past the gap.
+#
+# Deliberately order-NEUTRAL. order_for_display sorts by the measure only when
+# the SQL contains no ORDER BY at all; anything carrying one is served as
+# built, which includes ASC and keys like a month or a payee name. Calling the
+# head "the largest" would be a reversal for exactly those queries — the same
+# failure class the ordering rules were stripped back to avoid, just committed
+# in prose instead of in the frame.
+#
+# Hashed into CACHE_VERSION (see app.py): it is model-visible input, so a
+# change here must orphan answers written under the previous wording.
+TRUNCATION_NOTE = (
+    "[TRUNCATED: {counts}. Shown above are the first {half} rows and the last "
+    "{half}, in the order the query produced them; the {omitted} rows in "
+    "between are NOT shown. Do not describe the shown rows as the largest or "
+    "the smallest unless the query's own ordering says so. Any list you give "
+    "from this is partial — say how many you are naming, and quote the DATA "
+    "row count when you say how many exist.]"
+)
+
 
 # ── Model fallback ───────────────────────────────────────────────────────────
 # Providers deprecate models without notice (qwen-3-235b 404'd in prod while
@@ -658,17 +681,9 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
                   f"are data rows and the rest are totals/subtotals"
                   if entities is not None else
                   f"this table has {len(result_df):,} rows")
-        # pandas renders the head and the tail with a bare "..." between them.
-        # A model reading that enumerates the visible head and presents it as
-        # the whole answer: 102 grant funds became "here are the 24 sources",
-        # silently dropping everything past the gap. Say what was cut.
         half = MAX_DISPLAY_ROWS // 2
-        result_str += (
-            f"\n\n[TRUNCATED: {counts}. Shown above are the first {half} and the "
-            f"last {half}; the {len(result_df) - MAX_DISPLAY_ROWS:,} in between are "
-            f"NOT shown. Any ranking you give from it is partial — say how many you "
-            f"are naming, and quote the DATA row count when you say how many exist.]"
-        )
+        result_str += "\n\n" + TRUNCATION_NOTE.format(
+            counts=counts, half=half, omitted=f"{len(result_df) - MAX_DISPLAY_ROWS:,}")
     return result_df, result_str
 
 

@@ -51,6 +51,8 @@ from fastapi.staticfiles import StaticFiles
 from analytics_agent import (
     execute_sql_safe,
     generate_sql,
+    MAX_DISPLAY_ROWS,
+    TRUNCATION_NOTE,
     get_active_model,
     get_last_tier_used,
     get_model_fallback_event,
@@ -519,7 +521,7 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
 
 ## Accuracy Rules (CRITICAL)
 - NEVER rescale numbers: repeat values at the magnitude shown in the results (a value like 192,770.57 is about $192.8K, not millions).
-- A long result is TRUNCATED, and a note after the table says so. The rows either side of the gap are the largest and the smallest — the middle is missing. Never present a list drawn from a truncated table as if it were complete: say how many rows there are in total and that you are naming the largest few ("the 10 largest of 102 funding sources"). Never imply the smallest rows shown are the end of the ranking; they are the bottom of the data, not the bottom of your list.
+- A long result is TRUNCATED, and a note after the table says so. What you can see is the first rows and the last rows IN WHATEVER ORDER THE QUERY PRODUCED — which may be by amount, by date, by name, ascending or descending — and the middle is missing. Do not call them the largest or the smallest unless the query's ordering actually says so. Never present a list drawn from a truncated table as complete: say how many you are naming and how many exist ("10 of 102 funding sources"), using the data row count from the note.
 - Only state facts that appear in the results or the question. Do not describe what a figure includes or what years a dataset covers unless the results show it.
 - A "Related city legislation" block may follow the results. It is retrieved by keyword, so some entries will be irrelevant — judge each one. When a document explains what the money was for, why it was appropriated, or a figure in the results, add one short sentence of context and name its file number inline (e.g. "Council set the priorities for this money in R-083-21"). Ignore the rest in silence. The results are always the source of every number: never attribute a figure to a document, never let a document override the results, and never list documents you did not use.
 """
@@ -535,9 +537,15 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
     # prompt change automatically invalidates stale cached answers (re-warm
     # the starter questions after deploys that change prompts).
     global CACHE_VERSION
+    # Everything the model reads goes into the version, not just the prompts:
+    # the truncation note and the row cap that shapes the table are model-
+    # visible input too. Leaving them out meant a note-only edit changed what
+    # the model was told while cached answers stayed valid — observed live,
+    # where two verification runs replayed a pre-fix answer and looked like the
+    # fix had failed. A stale answer here misquotes a row count to a reader.
     CACHE_VERSION = hashlib.sha1(
         (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CITY_FACTS)
-         + CITATION_FORMAT).encode()
+         + CITATION_FORMAT + TRUNCATION_NOTE + str(MAX_DISPLAY_ROWS)).encode()
     ).hexdigest()[:8]
     stale = [k for k in response_cache if not k.startswith(CACHE_VERSION + ":")]
     if stale:
