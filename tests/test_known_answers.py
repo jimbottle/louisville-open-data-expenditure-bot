@@ -1115,9 +1115,20 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
         i = folded.index(c)
         return folded[:i] + folded[i + len(c):]
 
+    # One word list, one matcher, every surface. Applying a wider bar to only
+    # some of them is how "describe the top items" survived on the two surfaces
+    # that actually accompany the truncated table: it is neither "largest" nor
+    # "smallest". Word boundaries because a bare substring fires on "stop",
+    # "topic" and "laptop", which would point a future editor at an ordering
+    # problem that does not exist — the mirror of the substring bug already
+    # fixed in the cache-key test.
+    _POSITION_WORDS = ("largest", "smallest", "biggest", "highest", "lowest", "top")
+
     def _assert_no_direction(text, where):
+        import re as _re
         low = text.lower()
-        assert "largest" not in low and "smallest" not in low, f"{where}: {text}"
+        hits = [w for w in _POSITION_WORDS if _re.search(rf"\b{w}\b", low)]
+        assert not hits, f"{where} takes a position on order {hits}: {text}"
 
     _NOTE_PROHIBITION = ("Do not describe the shown rows as the largest or the "
                          "smallest unless the query's own ordering says so.")
@@ -1146,12 +1157,10 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
     # already covers an unsupported ranking claim, and the scoped prohibitions
     # live on the two surfaces that can see the truncation note.
     #
-    # So no positional word may appear here at all — a stricter bar than the
-    # other surfaces, and one a re-flattened rule cannot satisfy.
+    # So no positional word may appear here at all — checked with the same
+    # helper and the same list as every other surface.
     from analytics_agent import REFINE_SYSTEM_PROMPT
-    low_refine = REFINE_SYSTEM_PROMPT.lower()
-    for word in ("largest", "smallest", "biggest", "highest", "lowest", "top"):
-        assert word not in low_refine, f"refine prompt takes a position on order: {word!r}"
+    _assert_no_direction(REFINE_SYSTEM_PROMPT, "refine prompt")
 
     # The regression this test is NAMED for lived in the prompt. Scanned over
     # the WHOLE interpretation prompt, not one physical line: that bullet is
