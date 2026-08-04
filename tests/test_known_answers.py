@@ -1133,19 +1133,25 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
 
     # The refiner is the SECOND model-visible prompt reading this same table —
     # app.py hands it result_str, note included, and it writes the text the
-    # user actually sees. A direction claim there reinstates the reversal on
-    # the final editing pass. Nothing is stripped because its rule is phrased
-    # without directional words.
+    # user actually sees.
     #
-    # If that rule ever needs them, give REFINE_SYSTEM_PROMPT the same
-    # _without() prohibition-stripping the note and interpret_system get —
-    # do NOT reword the rule to satisfy this assertion. That happened once:
-    # the rule was flattened to an unconditional "do not say which end of a
-    # ranking those rows sit at", which told the final editor to delete "the
-    # largest spender was Public Works" from a complete ORDER BY ... DESC
-    # result, contradicting the prompt's own "lead with the direct answer".
+    # It says NOTHING about position, and that is the invariant: not "describe
+    # the top items" (which pointed at the smallest rows on a truncated
+    # ascending result), and not a rule about when a ranking claim is allowed.
+    # Two attempts at such a rule each forbade a TRUE claim, because display
+    # order is a property of the pipeline rather than of the SQL: keying on
+    # "the SQL's ORDER BY" is wrong precisely when there is none, since
+    # order_for_display then sorts by the measure descending before
+    # truncation. The general "Delete anything the results don't support"
+    # already covers an unsupported ranking claim, and the scoped prohibitions
+    # live on the two surfaces that can see the truncation note.
+    #
+    # So no positional word may appear here at all — a stricter bar than the
+    # other surfaces, and one a re-flattened rule cannot satisfy.
     from analytics_agent import REFINE_SYSTEM_PROMPT
-    _assert_no_direction(REFINE_SYSTEM_PROMPT, "refine prompt")
+    low_refine = REFINE_SYSTEM_PROMPT.lower()
+    for word in ("largest", "smallest", "biggest", "highest", "lowest", "top"):
+        assert word not in low_refine, f"refine prompt takes a position on order: {word!r}"
 
     # The regression this test is NAMED for lived in the prompt. Scanned over
     # the WHOLE interpretation prompt, not one physical line: that bullet is
