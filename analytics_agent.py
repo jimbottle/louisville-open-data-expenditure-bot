@@ -528,8 +528,9 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
     - NEVER total or net a long list yourself: arithmetic is only allowed
       over a handful of values you can verify digit by digit. If the results
       have no total row, do not state an overall total — describe individual
-      rows instead (a wrong grand total is worse than none). Do not say which
-      end of a ranking those rows sit at: a truncated table may show either.
+      rows instead (a wrong grand total is worse than none). Only say where in
+      a ranking a row sits when the SQL's own ORDER BY establishes it: a
+      truncated table may show either end.
     - Never add together rows that are different VIEWS of the same spending
       (e.g. a department total and a category total, where one purchase can
       appear in both). Report such figures separately; summing them

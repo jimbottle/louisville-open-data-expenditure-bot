@@ -1134,7 +1134,16 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
     # The refiner is the SECOND model-visible prompt reading this same table —
     # app.py hands it result_str, note included, and it writes the text the
     # user actually sees. A direction claim there reinstates the reversal on
-    # the final editing pass. It carries no prohibition, so nothing is stripped.
+    # the final editing pass. Nothing is stripped because its rule is phrased
+    # without directional words.
+    #
+    # If that rule ever needs them, give REFINE_SYSTEM_PROMPT the same
+    # _without() prohibition-stripping the note and interpret_system get —
+    # do NOT reword the rule to satisfy this assertion. That happened once:
+    # the rule was flattened to an unconditional "do not say which end of a
+    # ranking those rows sit at", which told the final editor to delete "the
+    # largest spender was Public Works" from a complete ORDER BY ... DESC
+    # result, contradicting the prompt's own "lead with the direct answer".
     from analytics_agent import REFINE_SYSTEM_PROMPT
     _assert_no_direction(REFINE_SYSTEM_PROMPT, "refine prompt")
 
