@@ -1096,11 +1096,35 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
     con.close()
     note = [ln for ln in s.splitlines() if ln.startswith("[")][0]
     # the ascending query really does show the smallest rows first
-    assert " Fund 1 " in s.splitlines()[1] or "Fund 1" in s.splitlines()[1]
-    claim = note.split("Do not describe")[0]
-    assert "largest" not in claim and "smallest" not in claim, claim
+    assert "Fund 1" in s.splitlines()[1]
     assert "in the order the query produced them" in note
-    assert "largest" not in TRUNCATION_NOTE.split("Do not describe")[0]
+
+    # Both surfaces, checked the same way: strip the one sentence that is
+    # ALLOWED to say largest/smallest — the prohibition — and neither word may
+    # survive anywhere else.
+    def _without(text, clause):
+        assert clause in text, f"prohibition missing from: {text}"
+        i = text.index(clause)
+        return text[:i] + text[i + len(clause):]
+
+    residue = _without(note, "Do not describe the shown rows as the largest or "
+                             "the smallest unless the query's own ordering says so.")
+    assert "largest" not in residue and "smallest" not in residue, residue
+    assert "largest" not in _without(
+        TRUNCATION_NOTE,
+        "Do not describe the shown rows as the largest or the smallest unless "
+        "the query's own ordering says so.")
+
+    # The regression this test is NAMED for lived in the prompt, not the note.
+    src = _app_source()
+    bullet = src[src.index("- A long result is TRUNCATED"):]
+    bullet = bullet[:bullet.index("\n")]
+    prompt_residue = _without(
+        bullet,
+        "Do not call them the largest or the smallest unless the query's "
+        "ordering actually says so.")
+    assert "largest" not in prompt_residue and "smallest" not in prompt_residue, \
+        f"the prompt characterises the visible rows: {prompt_residue}"
 
 
 def test_the_truncation_note_is_part_of_the_cache_key():
@@ -1113,3 +1137,11 @@ def test_the_truncation_note_is_part_of_the_cache_key():
     call = call[:call.index(").hexdigest()")]
     assert "TRUNCATION_NOTE" in call
     assert "MAX_DISPLAY_ROWS" in call
+    # The counts clause is the sentence the prompt tells the model to quote,
+    # so it is model-visible input too. Matched on word boundaries: a plain
+    # substring check for TRUNCATION_COUNTS is satisfied by
+    # TRUNCATION_COUNTS_WITH_TOTALS alone, so dropping the bare one would slip
+    # through — the "passes for the wrong reason" shape.
+    import re as _re
+    for name in ("TRUNCATION_COUNTS", "TRUNCATION_COUNTS_WITH_TOTALS"):
+        assert _re.search(rf"\b{name}\b", call), f"{name} is not hashed"

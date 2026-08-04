@@ -52,6 +52,8 @@ from analytics_agent import (
     execute_sql_safe,
     generate_sql,
     MAX_DISPLAY_ROWS,
+    TRUNCATION_COUNTS,
+    TRUNCATION_COUNTS_WITH_TOTALS,
     TRUNCATION_NOTE,
     get_active_model,
     get_last_tier_used,
@@ -545,7 +547,8 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
     # fix had failed. A stale answer here misquotes a row count to a reader.
     CACHE_VERSION = hashlib.sha1(
         (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CITY_FACTS)
-         + CITATION_FORMAT + TRUNCATION_NOTE + str(MAX_DISPLAY_ROWS)).encode()
+         + CITATION_FORMAT + TRUNCATION_NOTE + TRUNCATION_COUNTS
+         + TRUNCATION_COUNTS_WITH_TOTALS + str(MAX_DISPLAY_ROWS)).encode()
     ).hexdigest()[:8]
     stale = [k for k in response_cache if not k.startswith(CACHE_VERSION + ":")]
     if stale:

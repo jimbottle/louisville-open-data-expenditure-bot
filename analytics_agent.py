@@ -110,6 +110,17 @@ MAX_DISPLAY_ROWS = 50
 #
 # Hashed into CACHE_VERSION (see app.py): it is model-visible input, so a
 # change here must orphan answers written under the previous wording.
+# The counts clause interpolated into the note. Module-level for the same
+# reason as the note itself: it is the sentence the interpretation prompt tells
+# the model to quote ("using the data row count from the note"), so editing it
+# changes what the model reads and must invalidate cached answers. Kept beside
+# TRUNCATION_NOTE so the pair is hashed together.
+TRUNCATION_COUNTS = "this table has {rows} rows"
+TRUNCATION_COUNTS_WITH_TOTALS = (
+    "this table has {rows} rows, of which {entities} are data rows and the "
+    "rest are totals/subtotals"
+)
+
 TRUNCATION_NOTE = (
     "[TRUNCATED: {counts}. Shown above are the first {half} rows and the last "
     "{half}, in the order the query produced them; the {omitted} rows in "
@@ -677,10 +688,10 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
                     entities = n_real
         except Exception:
             pass
-        counts = (f"this table has {len(result_df):,} rows, of which {entities:,} "
-                  f"are data rows and the rest are totals/subtotals"
+        counts = (TRUNCATION_COUNTS_WITH_TOTALS.format(
+                      rows=f"{len(result_df):,}", entities=f"{entities:,}")
                   if entities is not None else
-                  f"this table has {len(result_df):,} rows")
+                  TRUNCATION_COUNTS.format(rows=f"{len(result_df):,}"))
         half = MAX_DISPLAY_ROWS // 2
         result_str += "\n\n" + TRUNCATION_NOTE.format(
             counts=counts, half=half, omitted=f"{len(result_df) - MAX_DISPLAY_ROWS:,}")
