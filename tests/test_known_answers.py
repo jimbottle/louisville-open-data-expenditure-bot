@@ -1088,7 +1088,9 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
     same reversal the ordering rules were stripped back to prevent, committed
     in prose instead of in the frame."""
     import duckdb
-    from analytics_agent import execute_sql_safe, TRUNCATION_NOTE, MAX_DISPLAY_ROWS
+    from analytics_agent import (execute_sql_safe, TRUNCATION_NOTE,
+                                 TRUNCATION_COUNTS, TRUNCATION_COUNTS_WITH_TOTALS,
+                                 MAX_DISPLAY_ROWS)
     con = duckdb.connect()
     con.execute("CREATE TABLE t AS SELECT 'Fund ' || i AS fund, i * 1.0 AS amt "
                 f"FROM range(1, {MAX_DISPLAY_ROWS + 40}) t(i)")
@@ -1107,24 +1109,35 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
         i = text.index(clause)
         return text[:i] + text[i + len(clause):]
 
-    residue = _without(note, "Do not describe the shown rows as the largest or "
-                             "the smallest unless the query's own ordering says so.")
+    _NOTE_PROHIBITION = ("Do not describe the shown rows as the largest or the "
+                         "smallest unless the query's own ordering says so.")
+    residue = _without(note, _NOTE_PROHIBITION)
     assert "largest" not in residue and "smallest" not in residue, residue
-    assert "largest" not in _without(
-        TRUNCATION_NOTE,
-        "Do not describe the shown rows as the largest or the smallest unless "
-        "the query's own ordering says so.")
+    template_residue = _without(TRUNCATION_NOTE, _NOTE_PROHIBITION)
+    assert "largest" not in template_residue and "smallest" not in template_residue
 
-    # The regression this test is NAMED for lived in the prompt, not the note.
+    # The counts clauses are interpolated INTO the note — including on the
+    # ROLLUP path the grant query actually takes, which this test's own query
+    # does not exercise. Neither may mention direction at all, so no
+    # prohibition needs stripping.
+    for template in (TRUNCATION_COUNTS, TRUNCATION_COUNTS_WITH_TOTALS):
+        assert "largest" not in template and "smallest" not in template, template
+
+    # The regression this test is NAMED for lived in the prompt. Scanned over
+    # the WHOLE interpretation prompt, not one physical line: that bullet is
+    # ~500 characters and reflowing it is a natural edit, after which a claim
+    # on the second line would go unread — and a claim relocated to a sibling
+    # bullet would too. (sql_system uses "largest" legitimately; interpret_system
+    # uses it only here.)
     src = _app_source()
-    bullet = src[src.index("- A long result is TRUNCATED"):]
-    bullet = bullet[:bullet.index("\n")]
+    prompt = src[src.index('interpret_system = f"""'):]
+    prompt = prompt[:prompt.index('\n"""')]
     prompt_residue = _without(
-        bullet,
+        prompt,
         "Do not call them the largest or the smallest unless the query's "
         "ordering actually says so.")
     assert "largest" not in prompt_residue and "smallest" not in prompt_residue, \
-        f"the prompt characterises the visible rows: {prompt_residue}"
+        "the interpretation prompt characterises the visible rows"
 
 
 def test_the_truncation_note_is_part_of_the_cache_key():
