@@ -50,8 +50,18 @@ response body. The body carries table names and raw exception text (`last_error`
 green based on the spelling of the most recent error. `status:"degraded"` counts as
 **up**: `app.py` sets it at >5 upstream errors in an hour, which is routine on a
 free-tier LLM backend and says nothing about reachability. Paging max-priority through
-Do Not Disturb for that would be a false alarm, so it is logged once per episode
-instead. A non-2xx, a timeout, or an unrecognized body withholds the heartbeat.
+Do Not Disturb for that would be a false alarm. A non-2xx, a timeout, or an
+unrecognized body withholds the heartbeat.
+
+**Sustained degradation still surfaces.** After **30 consecutive** degraded probes
+(~30 min) the script sends one `default`-priority ntfy notice — quiet enough not to be
+a page, loud enough not to be invisible. This closes a real hole: probe 2 sends an empty
+question, which `app.py:869` answers *before* reaching the LLM, so a completely dead
+backend still returns 200. That is not hypothetical — it is the documented Cerebras
+model-deprecation case, where live queries all 404 while cached starter answers keep
+working. Without escalation the bot could serve nothing but cache indefinitely with the
+check showing green. The counter resets on the first healthy probe and on any hard
+failure, so a degraded → down → degraded sequence re-arms.
 
 Logs to `~/Library/Logs/louisville-bot-heartbeat.log` (failures and self-heals only —
 successful probes are silent).
@@ -78,6 +88,11 @@ down alert — burying the notification that matters under the noise it was mean
 surface. The counter resets on the first healthy probe. State lives in
 `~/Library/Application Support/louisville-bot-heartbeat/`.
 
+If that state cannot be written (a full disk — exactly the host-pressure condition
+behind the original outage), the script **stands down instead of restarting**. Failing
+open there would silently disable the cooldown and cap and restore the every-60s
+restart-and-push loop; the withheld heartbeat still raises the alarm either way.
+
 ### 3. Check — healthchecks.io `louisville-bot`
 
 - Project: `evan.j.ray@gmail.com` (free tier, 4 of 20 checks used)
@@ -103,6 +118,15 @@ began before the app was listening, marked it unhealthy, and autoheal restart-lo
 roughly every 5–6 minutes from 10:23 to 11:00 UTC. Now **600s**, both on the running
 container and in the `docker run` line in the root `CLAUDE.md` deploy snippet, so a
 redeploy from the runbook cannot silently reinstate the 120s window.
+
+### 5. Tests
+
+`tests/test_heartbeat_script.py` drives the script with stub `curl`/`docker`/`date` on
+`PATH` and `$HOME` pointed at a tmpdir — no network, no Docker, no real waiting. It
+covers the health gate, the degraded escalation, the cooldown, the cap, the stand-down,
+the recovery reset, and the unwritable-state case. Runs as part of `python -m pytest -q`.
+Worth keeping: every failure mode here is silent by construction and only manifests
+during an outage, which is when nobody is reading the script.
 
 ## Deploy / update
 

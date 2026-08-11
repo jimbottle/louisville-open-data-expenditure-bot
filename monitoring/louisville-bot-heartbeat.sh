@@ -15,19 +15,24 @@ CHECK_UUID='e5f9d7ce-478f-49c5-b3c3-f3be7a7442e6'
 BASE_URL='https://louisville.raylytics.io'
 NTFY_TOPIC='air-server-evan-ee4b28dd81'
 CONTAINER='louisville-bot'
-DOCKER='/usr/local/bin/docker'
+# Overridable so the test harness can point at a stub; production leaves it be.
+DOCKER="${DOCKER:-/usr/local/bin/docker}"
 LOG_DIR="$HOME/Library/Logs"
 LOG="$LOG_DIR/louisville-bot-heartbeat.log"
 STATE_DIR="$HOME/Library/Application Support/louisville-bot-heartbeat"
 HEAL_COUNT_FILE="$STATE_DIR/heal_attempts"
 HEAL_TIME_FILE="$STATE_DIR/heal_last_epoch"
-DEGRADED_FILE="$STATE_DIR/degraded"
+DEGRADED_COUNT_FILE="$STATE_DIR/degraded_cycles"
 
 # At most one self-heal per cooldown, and only so many before giving up. A
 # container that keeps exiting is not something restarting will fix, and each
 # attempt costs a push on the same topic as the max-priority down alert.
 HEAL_COOLDOWN=600
 HEAL_MAX_ATTEMPTS=3
+
+# Consecutive degraded probes (~30 min) before a low-priority nudge. Long enough
+# that a routine burst of upstream errors ages out on its own.
+DEGRADED_ALERT_AFTER=30
 
 log() {
     mkdir -p "$LOG_DIR" 2>/dev/null
@@ -43,9 +48,13 @@ read_int() {
     esac
 }
 
+# Returns non-zero if the state could not be persisted. Callers must treat that
+# as fail-safe: an unwritable state dir (a full disk is exactly the host-pressure
+# condition behind the original outage) would otherwise silently disable the
+# cooldown and cap, restoring the once-a-minute restart-and-push loop.
 write_state() {
     mkdir -p "$STATE_DIR" 2>/dev/null
-    echo "$2" >"$1"
+    echo "$2" >"$1" 2>/dev/null
 }
 
 # Probe 1: the app answers on the health endpoint.
@@ -68,7 +77,11 @@ ask_code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 \
 # `degraded` counts as SERVING: app.py sets it at >5 upstream errors in an hour,
 # which on a free-tier LLM backend is routine and says nothing about whether the
 # site is reachable. Paging max-priority through Do Not Disturb for that would
-# be a false alarm; it is logged instead.
+# be a false alarm — but a SUSTAINED degraded state must not be silent either.
+# Probe 2 sends an empty question, which app.py:869 answers before reaching the
+# LLM, so a dead backend (e.g. Cerebras deprecating MODEL, the exact case in
+# CLAUDE.md) still returns 200. Without escalation the bot could serve nothing
+# but cached answers indefinitely while the check stayed green.
 degraded=0
 case "$health" in
     *'"status":"ok"'*) health_ok=1 ;;
@@ -79,14 +92,25 @@ esac
 if [ "$health_ok" = 1 ] && [ "$ask_code" = '200' ]; then
     curl -fsS -m 10 --retry 3 "https://hc-ping.com/$CHECK_UUID" >/dev/null 2>&1
 
-    # Log degraded once per episode rather than every 60s.
+    # Count consecutive degraded probes: log the first, escalate a sustained run
+    # at default priority so it is distinguishable from the max-priority down alert.
     if [ "$degraded" = 1 ]; then
-        if [ ! -f "$DEGRADED_FILE" ]; then
+        degraded_cycles=$(($(read_int "$DEGRADED_COUNT_FILE") + 1))
+        write_state "$DEGRADED_COUNT_FILE" "$degraded_cycles"
+        if [ "$degraded_cycles" -eq 1 ]; then
             log 'app reports status=degraded (>5 upstream errors in the last hour) - still serving, not paging'
-            write_state "$DEGRADED_FILE" 1
+        fi
+        if [ "$degraded_cycles" -eq "$DEGRADED_ALERT_AFTER" ]; then
+            log "app has reported degraded for $degraded_cycles consecutive probes - sending low-priority notice"
+            curl -fsS -m 10 \
+                -H 'Title: louisville-bot degraded' \
+                -H 'Priority: default' \
+                -H 'Tags: warning' \
+                -d "The site is serving, but /api/health has reported degraded for $degraded_cycles minutes straight. Live queries may all be failing (check MODEL against the provider's current model list)." \
+                "https://ntfy.sh/$NTFY_TOPIC" >/dev/null 2>&1
         fi
     else
-        rm -f "$DEGRADED_FILE" 2>/dev/null
+        rm -f "$DEGRADED_COUNT_FILE" 2>/dev/null
     fi
 
     # A healthy probe ends any self-heal episode.
@@ -100,6 +124,10 @@ fi
 # Withholding the ping IS the alert — don't try to notify from a host that may
 # itself be the thing that's broken.
 log "PROBE FAILED health='$health' ask_http='$ask_code' - withholding heartbeat"
+
+# A hard failure ends any degraded episode, so a degraded → down → degraded
+# sequence logs and escalates the second episode too.
+rm -f "$DEGRADED_COUNT_FILE" 2>/dev/null
 
 # Self-heal the one gap autoheal cannot cover: autoheal restarts containers that
 # are running-but-unhealthy, and does nothing for a container that has fully
@@ -124,8 +152,10 @@ if [ "$since" -lt "$HEAL_COOLDOWN" ]; then
 fi
 
 attempts=$((attempts + 1))
-write_state "$HEAL_COUNT_FILE" "$attempts"
-write_state "$HEAL_TIME_FILE" "$now"
+if ! write_state "$HEAL_COUNT_FILE" "$attempts" || ! write_state "$HEAL_TIME_FILE" "$now"; then
+    log "WARN: cannot persist self-heal state under '$STATE_DIR' - standing down rather than restarting without a cooldown"
+    exit 0
+fi
 
 log "container state='$state' - attempting docker start ($attempts/$HEAL_MAX_ATTEMPTS)"
 if "$DOCKER" start "$CONTAINER" >/dev/null 2>&1; then
