@@ -93,11 +93,24 @@ docker run -d --name louisville-bot --restart unless-stopped -p 8000:8000 \
   -e CEREBRAS_API_KEY=... -e CEREBRAS_PAID_API_KEY=... -e MODEL=gpt-oss-120b \
   -e LLM_BASE_URL=https://api.cerebras.ai/v1 -e DATA_DIR=/data -e STATS_DIR=/state -e LOG_DIR=/logs \
   --health-cmd "curl -sf --max-time 5 http://localhost:8000/api/health || exit 1" \
-  --health-interval 30s --health-start-period 120s --health-retries 3 \
+  --health-interval 30s --health-start-period 600s --health-retries 3 \
   louisville-bot:new
 docker tag louisville-bot:new louisville-bot:latest
 # Rollback: docker stop louisville-bot; docker rm louisville-bot; docker rename louisville-bot-prev louisville-bot; docker start louisville-bot
 ```
+
+> ⚠️ **Keep `--health-start-period` at 600s.** Cold start (CSVs → DuckDB → RAG corpus →
+> response cache) can exceed 4 minutes under host load. It was 120s, so health checks
+> began before the app was listening and the `autoheal` container restart-looped it
+> every ~5 minutes — the 2026-08-11 502 outage. See `monitoring/README.md`.
+
+### Uptime alerting
+
+A dead-man's switch pings healthchecks.io every 60s **only if
+https://louisville.raylytics.io actually serves the API**; ~4 minutes of silence fires a
+max-priority ntfy push + email. This is separate from the Air's host-level heartbeat,
+which cannot see a dead container on a healthy machine. Setup, ping UUID, and drill
+procedure: `monitoring/README.md`.
 
 ### Deploy verification (MANDATORY — do not skip)
 

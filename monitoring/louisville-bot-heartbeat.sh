@@ -16,9 +16,11 @@ BASE_URL='https://louisville.raylytics.io'
 NTFY_TOPIC='air-server-evan-ee4b28dd81'
 CONTAINER='louisville-bot'
 DOCKER='/usr/local/bin/docker'
-LOG="$HOME/Library/Logs/louisville-bot-heartbeat.log"
+LOG_DIR="$HOME/Library/Logs"
+LOG="$LOG_DIR/louisville-bot-heartbeat.log"
 
 log() {
+    mkdir -p "$LOG_DIR" 2>/dev/null
     echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >>"$LOG"
 }
 
