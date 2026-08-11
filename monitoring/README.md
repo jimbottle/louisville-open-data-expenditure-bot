@@ -15,7 +15,7 @@ The Air server has a `mac-server` dead-man's-switch check (see
 ```
 Air (launchd, every 60s)                     healthchecks.io "louisville-bot" check
   probe https://louisville.raylytics.io      period 1 min, grace 3 min
-    ├── GET  /api/health   → "ok"?             │ no ping for ~4 min → DOWN
+    ├── GET  /api/health   → serving?          │ no ping for ~4 min → DOWN
     └── POST /api/ask      → HTTP 200?         ├─▶ ntfy.sh push, MAX priority (bypasses DND)
   both pass → curl hc-ping.com/<uuid>  ──────▶ └─▶ email to evan.j.ray@gmail.com
   either fails → no ping (silence = alarm)
@@ -44,6 +44,15 @@ An empty `{"question":""}` POST short-circuits to an SSE error with **no LLM cal
 the once-a-minute probe costs nothing and cannot burn Cerebras quota. At 1 req/min it
 also stays well under the app's 5/min per-IP rate limit.
 
+**What counts as "serving":** the health gate matches the `"status"` *field*, not the
+response body. The body carries table names and raw exception text (`last_error`), and
+`token` / `max_tokens` contain `ok` as a substring — a bare substring match would go
+green based on the spelling of the most recent error. `status:"degraded"` counts as
+**up**: `app.py` sets it at >5 upstream errors in an hour, which is routine on a
+free-tier LLM backend and says nothing about reachability. Paging max-priority through
+Do Not Disturb for that would be a false alarm, so it is logged once per episode
+instead. A non-2xx, a timeout, or an unrecognized body withholds the heartbeat.
+
 Logs to `~/Library/Logs/louisville-bot-heartbeat.log` (failures and self-heals only —
 successful probes are silent).
 
@@ -59,6 +68,15 @@ So when a probe fails, the script checks the container's state and runs `docker 
 only if it is not running. That sends a **high**-priority (not max) ntfy note so a
 silent restart loop can't hide. Alerting does not depend on this working: the missing
 heartbeat fires the max-priority alarm either way.
+
+**Bounded on purpose.** At most one restart per **10 minutes**, and at most **3**
+attempts before the watchdog stands down and lets the withheld heartbeat carry the
+alarm alone. A container that keeps exiting (bad image, missing volume, OOM, bad
+`MODEL`) is not something restarting fixes, and without a cap the once-a-minute retry
+would fire ~60 high-priority pushes an hour onto the *same topic* as the max-priority
+down alert — burying the notification that matters under the noise it was meant to
+surface. The counter resets on the first healthy probe. State lives in
+`~/Library/Application Support/louisville-bot-heartbeat/`.
 
 ### 3. Check — healthchecks.io `louisville-bot`
 
@@ -82,8 +100,9 @@ Contributing cause of the outage, fixed at the same time. The container was crea
 `--health-start-period 120s`, but cold startup (CSV load → DuckDB → RAG corpus →
 response cache) took **over 4 minutes** under host memory/CPU pressure. Health checks
 began before the app was listening, marked it unhealthy, and autoheal restart-looped it
-roughly every 5–6 minutes from 10:23 to 11:00 UTC. Now **600s**, which must be kept in
-the `docker run` line in the root `CLAUDE.md` deploy snippet.
+roughly every 5–6 minutes from 10:23 to 11:00 UTC. Now **600s**, both on the running
+container and in the `docker run` line in the root `CLAUDE.md` deploy snippet, so a
+redeploy from the runbook cannot silently reinstate the 120s window.
 
 ## Deploy / update
 
