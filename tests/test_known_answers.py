@@ -1636,3 +1636,55 @@ def test_the_moved_total_note_takes_no_position_on_order():
     low = TOTALS_MOVED_NOTE.lower()
     hits = [w for w in words if _re.search(rf"\b{w}\b", low)]
     assert not hits, f"totals note takes a position on order {hits}"
+
+
+def test_a_frame_of_nothing_but_totals_is_left_alone():
+    """Two rows labelled "TOTAL - POLICE" and "TOTAL - FIRE" are a ranking, not
+    a table of sums — the label shapes just match. Reordering is a no-op, and
+    saying they are "sums of the rows above" names rows that do not exist."""
+    from data_model import move_totals_to_end, total_row_mask
+    df = pd.DataFrame({"category": ["TOTAL - POLICE", "TOTAL - FIRE"],
+                       "amt": [900.0, 400.0]})
+    assert total_row_mask(df, "category", "amt").all(), "both labels match by design"
+    out, n = move_totals_to_end(df, "category", "amt")
+    assert n == 0, "nothing can be described as moved"
+    assert out["category"].tolist() == ["TOTAL - POLICE", "TOTAL - FIRE"]
+
+
+def test_the_moved_count_comes_from_the_move():
+    """The count and the relocation cannot disagree, which is how a note once
+    claimed a move that the reorder had declined to make."""
+    from data_model import move_totals_to_end
+    mixed = pd.DataFrame({"fund": ["TOTAL", "a", "b"], "amt": [3.0, 2.0, 1.0]})
+    out, n = move_totals_to_end(mixed, "fund", "amt")
+    assert n == 1 and out["fund"].tolist() == ["a", "b", "TOTAL"]
+    none = pd.DataFrame({"fund": ["a", "b"], "amt": [2.0, 1.0]})
+    assert move_totals_to_end(none, "fund", "amt")[1] == 0
+    assert move_totals_to_end(pd.DataFrame({"fund": ["TOTAL"], "amt": [1.0]}), "fund", "amt")[1] == 0
+
+
+def test_an_all_totals_result_gets_no_moved_total_note():
+    import duckdb
+    from analytics_agent import execute_sql_safe
+    con = duckdb.connect()
+    _, s = execute_sql_safe(con, (
+        "SELECT 'TOTAL - POLICE' AS category, 900.0 AS amt "
+        "UNION ALL SELECT 'TOTAL - FIRE', 400.0"))
+    con.close()
+    assert "moved to the end" not in s
+    assert "not entries in the ranking" not in s
+
+
+def test_an_all_totals_truncated_result_does_not_claim_zero_data_rows():
+    """The model is told to quote the data row count, so 0 would be a wrong
+    number for a table that is entirely real rows with total-shaped labels."""
+    import duckdb
+    from analytics_agent import execute_sql_safe, MAX_DISPLAY_ROWS
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t AS SELECT 'TOTAL - Unit ' || i AS category, i * 1.0 AS amt "
+                f"FROM range(1, {MAX_DISPLAY_ROWS + 20}) t(i)")
+    _, s = execute_sql_safe(con, "SELECT category, amt FROM t ORDER BY amt DESC")
+    con.close()
+    note = [ln for ln in s.splitlines() if ln.startswith("[TRUNCATED")][0]
+    assert "0 are data rows" not in note, note
+    assert "moved to the end" not in s

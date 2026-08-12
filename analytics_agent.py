@@ -684,7 +684,7 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
     # text the model interprets all see the same rows in the same order — the
     # summary should lead with the largest figure too.
     from data_model import (order_for_display, infer_chart, drop_total_rows,
-                            totals_last, total_row_mask)
+                            move_totals_to_end)
     result_df = order_for_display(result_df, sql)
 
     # A ROLLUP total holds the largest number, so a DESC ranking hands it row
@@ -696,9 +696,9 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
     try:
         _, lbl, val = infer_chart(result_df, sql)
         if lbl and val:
-            n_totals = int(total_row_mask(result_df, lbl, val).sum())
-            if n_totals:
-                result_df = totals_last(result_df, lbl, val)
+            # The count comes from the move itself, so the note can never claim
+            # a relocation that did not happen.
+            result_df, n_totals = move_totals_to_end(result_df, lbl, val)
     except Exception:
         n_totals = 0
 
@@ -713,7 +713,11 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
         try:
             if lbl and val:
                 n_real = len(drop_total_rows(result_df, lbl, val))
-                if n_real != len(result_df):
+                # A frame with NO real rows left is the detector misreading a
+                # ranking whose labels all begin "TOTAL - ...", not a table of
+                # pure subtotals. Quoting "0 data rows" would be plainly wrong,
+                # and the model is told to quote that number.
+                if 0 < n_real != len(result_df):
                     entities = n_real
         except Exception:
             pass

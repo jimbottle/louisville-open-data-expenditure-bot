@@ -1152,8 +1152,8 @@ def drop_total_rows(df, label_col: str, value_col: str = None):
     return df[~total_row_mask(df, label_col, value_col)]
 
 
-def totals_last(df, label_col: str, value_col: str = None):
-    """``df`` with any grand-total rows moved to the end, order otherwise kept.
+def move_totals_to_end(df, label_col: str, value_col: str = None):
+    """``(frame with any grand-total rows last, how many were moved)``.
 
     A ROLLUP total carries the largest number in the frame, so a query that
     ranks by that measure descending puts it in row one — where it reads as the
@@ -1162,13 +1162,25 @@ def totals_last(df, label_col: str, value_col: str = None):
     ordering the way order_for_display refuses to: a total is not one of the
     ranked rows, it is their sum. Every real row keeps its place relative to
     every other, which is what the ordering actually asserts.
+
+    The count comes back with the frame so a caller cannot describe a move that
+    did not happen. It is 0 when EVERY row matched too: reordering is a no-op
+    then, and there would be no rows above for the totals to be sums of. A frame
+    of nothing but totals is the detector reading labels like "TOTAL - POLICE"
+    and "TOTAL - FIRE" as sums when they are really a two-row ranking.
     """
     if label_col not in df.columns or len(df) < 2:
-        return df
+        return df, 0
     mask = total_row_mask(df, label_col, value_col)
-    if not mask.any() or mask.all():
-        return df
-    return pd.concat([df[~mask], df[mask]]).reset_index(drop=True)
+    n = int(mask.sum())
+    if n == 0 or n == len(df):
+        return df, 0
+    return pd.concat([df[~mask], df[mask]]).reset_index(drop=True), n
+
+
+def totals_last(df, label_col: str, value_col: str = None):
+    """``df`` with any grand-total rows moved to the end, order otherwise kept."""
+    return move_totals_to_end(df, label_col, value_col)[0]
 
 
 def humanize_text(text: str, table: str = "expenditures", prose: bool = False) -> str:
