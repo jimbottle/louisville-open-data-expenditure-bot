@@ -1004,7 +1004,7 @@ async def ask(request: Request):
         if len(result_df) >= 2:
             # Axis/type inference extracted to a pure, unit-tested helper
             # (see data_model.infer_chart and tests/test_known_answers.py).
-            chart_type, label_col, value_col = infer_chart(result_df)
+            chart_type, label_col, value_col = infer_chart(result_df, sql)
 
             if chart_type and label_col and value_col and len(result_df) >= 2:
                 try:

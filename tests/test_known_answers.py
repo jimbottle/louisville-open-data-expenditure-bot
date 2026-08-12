@@ -1195,3 +1195,113 @@ def test_the_truncation_note_is_part_of_the_cache_key():
     import re as _re
     for name in ("TRUNCATION_COUNTS", "TRUNCATION_COUNTS_WITH_TOTALS"):
         assert _re.search(rf"\b{name}\b", call), f"{name} is not hashed"
+
+
+# ── the charted measure is the one the query ranked by ───────────────────────
+
+SALARY_SQL = """
+-- Assuming the most recent complete calendar year is 2025
+SELECT job_title, department,
+       ROUND(max_total_comp, 2) AS max_total_comp,
+       ROUND(avg_total_comp, 2) AS avg_total_comp
+FROM summary_top_salaries
+WHERE calendar_year = 2025 AND job_title IS NOT NULL
+ORDER BY max_total_comp DESC
+LIMIT 10;
+"""
+
+
+def _salary_frame():
+    """The "highest paid positions" result, verbatim from a live answer."""
+    return pd.DataFrame({
+        "job_title": ["Police Officer", "LEDA Administrator", "Police Chief",
+                      "Police Sergeant", "Police Lieutenant", "EMS EMT-Paramedic II",
+                      "Director", "EMS EMT-Paramedic I", "EMS Manager",
+                      "Deputy Police Chief"],
+        "department": ["LMPD", "Economic Development", "LMPD", "LMPD", "LMPD",
+                       "EMS", "Louisville Zoo", "EMS", "EMS", "LMPD"],
+        "max_total_comp": [281740.87, 275961.58, 267811.04, 248976.60, 224800.35,
+                           222476.83, 213466.08, 209481.04, 206751.56, 204679.22],
+        "avg_total_comp": [104823.53, 129985.93, 267811.04, 135765.26, 154062.14,
+                           146656.74, 213466.08, 88373.49, 168691.41, 202891.98],
+    })
+
+
+def test_a_multi_measure_ranking_charts_the_ranked_measure():
+    """The last-float rule drew AVERAGE pay down a MAX-pay-ordered frame, so the
+    bars jumped around on a result that was perfectly sorted."""
+    df = _salary_frame()
+    assert infer_chart(df)[2] == "avg_total_comp", "guard the old behaviour this fixes"
+
+    chart_type, label_col, value_col = infer_chart(df, SALARY_SQL)
+    assert value_col == "max_total_comp"
+    assert label_col == "job_title"
+    assert chart_type == "bar"
+
+
+def test_the_charted_measure_descends_for_a_ranked_result():
+    """What the user sees: bars largest to smallest, without reordering rows."""
+    df = _salary_frame()
+    _, _, value_col = infer_chart(df, SALARY_SQL)
+    assert df[value_col].is_monotonic_decreasing
+
+
+def test_an_ascending_ranking_is_not_flipped_by_the_chart_layer():
+    """A "least" question must stay ascending: charting the ranked measure must
+    never become a licence to re-sort it."""
+    df = pd.DataFrame({"payee": list("abcd"),
+                       "total_paid": [10.0, 20.0, 30.0, 40.0],
+                       "avg_paid": [4.0, 1.0, 3.0, 2.0]})
+    sql = "SELECT payee, SUM(amt) AS total_paid, AVG(amt) AS avg_paid FROM t GROUP BY 1 ORDER BY total_paid ASC LIMIT 4"
+    _, _, value_col = infer_chart(df, sql)
+    assert value_col == "total_paid"
+    assert df[value_col].is_monotonic_increasing, "the frame is untouched"
+
+
+@pytest.mark.parametrize("clause,expected", [
+    ("ORDER BY max_total_comp DESC", "max_total_comp"),
+    ("ORDER BY max_total_comp", "max_total_comp"),
+    ("ORDER BY t.max_total_comp DESC", "max_total_comp"),
+    ('ORDER BY "max_total_comp" DESC', "max_total_comp"),
+    ("ORDER BY MAX_TOTAL_COMP desc", "max_total_comp"),
+    ("ORDER BY 3 DESC", "max_total_comp"),
+    ("ORDER BY max_total_comp DESC NULLS LAST", "max_total_comp"),
+    ("ORDER BY max_total_comp DESC, job_title ASC", "max_total_comp"),
+    ("ORDER BY max_total_comp DESC LIMIT 10", "max_total_comp"),
+    ("ORDER BY job_title", "job_title"),          # resolved, but not a measure
+    ("ORDER BY 99", None),                        # out of range
+    ("ORDER BY nonexistent_col", None),
+    ("", None),
+])
+def test_sql_order_measure_resolves_the_key(clause, expected):
+    from data_model import sql_order_measure
+    sql = f"SELECT job_title, department, max_total_comp, avg_total_comp FROM t {clause}"
+    assert sql_order_measure(sql, _salary_frame()) == expected
+
+
+def test_order_by_inside_a_comment_or_literal_is_not_a_key():
+    from data_model import sql_order_measure
+    df = _salary_frame()
+    assert sql_order_measure("SELECT * FROM t -- ORDER BY max_total_comp\n", df) is None
+    assert sql_order_measure("SELECT 'ORDER BY max_total_comp' FROM t", df) is None
+    # A real ORDER BY after a decoy comment still resolves.
+    assert sql_order_measure(
+        "SELECT * FROM t /* ORDER BY avg_total_comp */ ORDER BY max_total_comp DESC", df
+    ) == "max_total_comp"
+
+
+def test_a_non_measure_order_key_leaves_the_value_choice_alone():
+    """ORDER BY on a name resolves fine but is not chartable, so the existing
+    float heuristic must still pick the measure."""
+    df = _salary_frame()
+    sql = "SELECT job_title, department, max_total_comp, avg_total_comp FROM t ORDER BY job_title"
+    assert infer_chart(df, sql)[2] == "avg_total_comp"
+
+
+def test_time_keyed_ordering_does_not_become_the_measure():
+    """A trend ordered by year must still chart the amount, not the year."""
+    df = pd.DataFrame({"fiscal_year": [2023, 2024, 2025], "amount": [3.0, 1.0, 2.0]})
+    chart_type, label_col, value_col = infer_chart(
+        df, "SELECT fiscal_year, SUM(a) AS amount FROM t GROUP BY 1 ORDER BY fiscal_year")
+    assert value_col == "amount"
+    assert label_col == "fiscal_year"

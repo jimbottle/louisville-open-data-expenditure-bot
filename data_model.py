@@ -465,13 +465,15 @@ def is_chronological(series, require_sorted: bool = True) -> bool:
         return False
 
 
-def infer_chart(df) -> tuple:
+def infer_chart(df, sql: str = None) -> tuple:
     """Pick (chart_type, label_col, value_col) for a result DataFrame.
 
-    Pure function (no DB), so it is unit-testable in isolation.
+    Pure function (no DB), so it is unit-testable in isolation. ``sql`` is
+    optional and read only to see which measure the query ranked by.
 
-    - value (y): a numeric measure that varies and isn't a year/time id. Prefer
-      a float (dollar) measure over an integer count; otherwise the last such
+    - value (y): a numeric measure that varies and isn't a year/time id. The
+      measure the query's ORDER BY keyed on, when there is one; else prefer a
+      float (dollar) measure over an integer count; otherwise the last such
       column (aggregates are conventionally last in the SELECT).
     - label (x): the most-varying categorical/time dimension. A constant column
       (<=1 distinct, e.g. fiscal_year = 2025 for a "top 5 in 2025" result) is
@@ -503,6 +505,19 @@ def infer_chart(df) -> tuple:
     if value_cands:
         floats = [c for c in value_cands if pd.api.types.is_float_dtype(df[c])]
         value_col = floats[-1] if floats else value_cands[-1]
+
+        # When the result carries several measures, chart the one the query
+        # ranked by. "job_title, department, max_total_comp, avg_total_comp
+        # ORDER BY max_total_comp DESC" ends in the AVERAGE, so the last-float
+        # rule drew average pay in max-pay order: a frame that IS sorted,
+        # plotted through a column that isn't, which reads as no sort at all.
+        # The ranked measure is both the ordered one and the one the question
+        # asked about. Restricted to existing candidates, so at worst this
+        # swaps one plausible measure for another.
+        if sql:
+            ranked = sql_order_measure(sql, df)
+            if ranked in value_cands:
+                value_col = ranked
 
     # Label (x): most-varying dimension; skip constants and the value column.
     label_col = None
@@ -583,8 +598,20 @@ def sql_orders_result(sql: str) -> bool:
     for those belongs in the SQL prompt, which asks for an explicit ORDER BY
     on every multi-row result; that is the layer that can tell what the
     question meant."""
+    return bool(_order_by_keys(sql))
+
+
+def _order_by_keys(sql: str) -> list:
+    """Offsets just past each ORDER BY that is real code, in source order.
+
+    One scanner, so "is there an order" and "what was it keyed on" can never
+    disagree about which ORDER BYs exist. Skips string literals, quoted
+    identifiers and comments; understands nothing else about SQL structure, for
+    all the reasons in sql_orders_result.
+    """
     if not sql:
-        return False
+        return []
+    out = []
     i, n = 0, len(sql)
     while i < n:
         c = sql[i]
@@ -613,12 +640,59 @@ def sql_orders_result(sql: str) -> bool:
             j = i
             while j < n and (sql[j].isalnum() or sql[j] == "_"):
                 j += 1
-            if sql[i:j].lower() == "order" and _ORDER_BY_RE.match(sql, i):
-                return True
-            i = j
+            m = _ORDER_BY_RE.match(sql, i) if sql[i:j].lower() == "order" else None
+            if m:
+                out.append(m.end())
+                i = m.end()
+            else:
+                i = j
         else:
             i += 1
-    return False
+    return out
+
+
+def sql_order_measure(sql: str, df):
+    """The result column the query ranked by, or None.
+
+    Answers only "which column", never "in which direction" and never "should
+    these rows move" — nothing here reorders anything. That is the whole reason
+    it is safe to parse ORDER BY here at all: the seven reversed results
+    catalogued in sql_orders_result all came from letting a parse decide row
+    order or direction. The worst a bad parse can do here is chart a different
+    measure than intended, which is exactly what happens today anyway.
+
+    Scoped further by the caller, which accepts the answer only if the column
+    was already an eligible value candidate. So this can re-rank the measures
+    infer_chart was choosing between, and can introduce nothing new.
+    """
+    keys = _order_by_keys(sql)
+    if not keys or df is None or not len(df.columns):
+        return None
+    # The last ORDER BY: in generated SQL the outermost SELECT comes last, so
+    # its ordering is the one the reader sees.
+    # First key only; a secondary key is a tie-break, not the ranking.
+    key = re.split(r"[,;)]", sql[keys[-1]:])[0].strip()
+    if key.startswith('"'):                       # quoted, possibly with spaces
+        end = key.find('"', 1)
+        key = key[1:end] if end != -1 else key[1:]
+    else:
+        # The bare first token, which drops every trailing modifier at once —
+        # DESC, NULLS LAST, USING <op>, a trailing LIMIT — without enumerating
+        # them.
+        key = key.split()[0] if key.split() else ""
+    if not key:
+        return None
+
+    # ORDER BY 3 -> the third selected column.
+    if key.isdigit():
+        idx = int(key) - 1
+        return df.columns[idx] if 0 <= idx < len(df.columns) else None
+
+    key = key.split(".")[-1].strip('"').strip()
+    for col in df.columns:
+        if str(col).lower() == key.lower():
+            return col
+    return None
 
 
 def order_for_display(df, sql: str):
