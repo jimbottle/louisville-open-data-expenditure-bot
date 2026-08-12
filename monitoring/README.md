@@ -94,10 +94,17 @@ open there would silently disable the cooldown and cap and restore the every-60s
 restart-and-push loop; the withheld heartbeat still raises the alarm either way.
 
 The degraded counter lives in the same place, so an unwritable state dir also disables
-the sustained-degradation escalation. Both cases log a `WARN` — exactly once, matched
-against the log itself, since the state needed to dedupe is the thing that is broken.
-The log dir can be writable while the state dir is not (a permissions problem, not just
-a full disk), so an unbounded warning here would be genuine per-minute spam.
+the sustained-degradation escalation — including when the counter file is *readable but
+not writable* (left root-owned by a single `sudo` run), which freezes it at a stale
+value. A frozen counter is never acted on: escalating off a number the script has just
+proved it cannot maintain would re-fire the notice every 60s forever.
+
+Both cases log a `WARN`, deduped against the log itself since the state needed to dedupe
+is the thing that is broken. The dedupe is scoped to **the current day**, not to all
+history: nothing rotates this log, so matching the whole file would silence every
+recurrence after the first — and a silent repeat of the degraded case is the
+green-check-over-a-dead-backend hole all over again. Once a day is visible without being
+per-minute spam.
 
 ### 3. Check — healthchecks.io `louisville-bot`
 

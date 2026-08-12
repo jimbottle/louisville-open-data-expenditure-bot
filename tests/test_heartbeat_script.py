@@ -60,14 +60,17 @@ case "$1" in
 esac
 """
 
-# $FAKE_NOW drives the cooldown arithmetic; the log timestamp is irrelevant here.
+# $FAKE_NOW drives the cooldown arithmetic and $FAKE_DAY the calendar day, which
+# has to stay consistent between the log timestamp and warn_once's date scope.
 DATE_STUB = """#!/bin/sh
+day=${FAKE_DAY:-2026-01-01}
 for a in "$@"; do
   case "$a" in
     +%s) echo "${FAKE_NOW:-1000000}"; exit 0 ;;
+    +%Y-%m-%d) echo "$day"; exit 0 ;;
   esac
 done
-echo 2026-01-01T00:00:00Z
+echo "${day}T00:00:00Z"
 """
 
 
@@ -97,7 +100,7 @@ class Harness:
     def state_dir(self):
         return self.home / "Library" / "Application Support" / "louisville-bot-heartbeat"
 
-    def run(self, health="", ask="000", state="", now=1000000, start_ok=True):
+    def run(self, health="", ask="000", state="", now=1000000, start_ok=True, day="2026-01-01"):
         """One invocation of the script. Returns the list of outbound calls."""
         self.calls.write_text("")
         env = dict(
@@ -110,6 +113,7 @@ class Harness:
             FAKE_ASK=ask,
             FAKE_STATE=state,
             FAKE_NOW=str(now),
+            FAKE_DAY=day,
             FAKE_START_OK="1" if start_ok else "0",
         )
         proc = subprocess.run(
@@ -222,12 +226,19 @@ def test_recovery_resets_self_heal_counter(hb):
     assert "DOCKER_START" in hb.run(health="", ask="000", state="exited", now=now + 1)
 
 
+# Permission bits do not restrain root, so these cases would silently pass.
+requires_nonroot = pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="permission checks are void as root"
+)
+
+
 def _make_state_dir_unwritable(hb):
     hb.state_dir.parent.mkdir(parents=True, exist_ok=True)
     hb.state_dir.mkdir(exist_ok=True)
     hb.state_dir.chmod(0o500)  # readable, not writable
 
 
+@requires_nonroot
 def test_unwritable_state_dir_stands_down_instead_of_looping(hb):
     """Fail safe: without persistable state the cooldown and cap cannot hold, so
     restarting anyway would restore the once-a-minute restart-and-push loop."""
@@ -243,6 +254,7 @@ def test_unwritable_state_dir_stands_down_instead_of_looping(hb):
         hb.state_dir.chmod(0o700)
 
 
+@requires_nonroot
 def test_unwritable_state_dir_disables_degraded_escalation_loudly(tmp_path):
     """The degraded counter cannot advance without persistable state, so the
     escalation silently dies. It has to say so — once — rather than either
@@ -261,6 +273,44 @@ def test_unwritable_state_dir_disables_degraded_escalation_loudly(tmp_path):
         assert hb.log.count("status=degraded") == 0
     finally:
         hb.state_dir.chmod(0o700)
+
+
+@requires_nonroot
+def test_state_warning_repeats_on_a_later_day(tmp_path):
+    """Nothing rotates this log, so deduping against all of history would make
+    every recurrence after the first completely silent — which for the degraded
+    path is the green-check-over-a-dead-backend hole all over again."""
+    hb = Harness(tmp_path, curl_stub=CURL_STUB_WITH_PRIORITY)
+    _make_state_dir_unwritable(hb)
+    try:
+        hb.run(health=DEGRADED_BODY, ask="200", day="2026-01-01")
+        hb.run(health=DEGRADED_BODY, ask="200", day="2026-01-01")
+        assert hb.log.count("escalation disabled") == 1, "same day should warn once"
+
+        hb.run(health=DEGRADED_BODY, ask="200", day="2026-03-14")
+        assert hb.log.count("escalation disabled") == 2, "a later incident must warn again"
+    finally:
+        hb.state_dir.chmod(0o700)
+
+
+@requires_nonroot
+def test_frozen_counter_does_not_re_escalate_every_cycle(tmp_path):
+    """A readable-but-unwritable counter file (left root-owned by one sudo run)
+    freezes the count. Acting on that value would re-fire the escalation every
+    60s forever, on the same topic as the max-priority down alert."""
+    hb = Harness(tmp_path, curl_stub=CURL_STUB_WITH_PRIORITY)
+    hb.state_dir.mkdir(parents=True, exist_ok=True)
+    counter = hb.state_dir / "degraded_cycles"
+    counter.write_text("29\n")  # one short of DEGRADED_ALERT_AFTER
+    counter.chmod(0o444)
+    try:
+        pushes = []
+        for _ in range(10):
+            pushes += [c for c in hb.run(health=DEGRADED_BODY, ask="200") if c.startswith("NTFY")]
+        assert pushes == [], f"stale counter must not escalate, got {pushes}"
+        assert hb.log.count("escalation disabled") == 1
+    finally:
+        counter.chmod(0o644)
 
 
 def test_script_is_posix_sh_clean():

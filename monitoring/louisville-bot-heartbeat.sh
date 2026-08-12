@@ -43,8 +43,14 @@ log() {
 # dir), where the state needed to dedupe is the very thing that is broken. The
 # log is the only durable marker available, so match against it — otherwise the
 # warning repeats every 60s on a host that is likely already short on disk.
+#
+# Scoped to today, not to all history: nothing rotates this log, so matching the
+# whole file would silence every recurrence after the first, and a silent repeat
+# of the degraded case is the "green check over a dead backend" hole again.
+# Once a day is visible without being spam.
 warn_once() {
-    if [ -f "$LOG" ] && grep -qF -- "$1" "$LOG" 2>/dev/null; then
+    _today=$(date -u '+%Y-%m-%d')
+    if [ -f "$LOG" ] && tail -n 2000 "$LOG" 2>/dev/null | grep -F -- "$1" | grep -q "^$_today"; then
         return 0
     fi
     log "$1"
@@ -108,20 +114,24 @@ if [ "$health_ok" = 1 ] && [ "$ask_code" = '200' ]; then
     if [ "$degraded" = 1 ]; then
         degraded_cycles=$(($(read_int "$DEGRADED_COUNT_FILE") + 1))
         if ! write_state "$DEGRADED_COUNT_FILE" "$degraded_cycles"; then
-            # The counter can never advance, so escalation is dead and the
-            # first-cycle line below would repeat every minute. Say it once.
+            # A counter that cannot be maintained cannot be trusted either. A
+            # readable-but-unwritable file (left root-owned by one sudo run)
+            # freezes it at a stale value, so acting on it would re-fire the
+            # escalation every 60s forever. Say so, and do nothing else.
             warn_once "WARN: cannot persist '$DEGRADED_COUNT_FILE' - sustained-degradation escalation disabled"
-        elif [ "$degraded_cycles" -eq 1 ]; then
-            log 'app reports status=degraded (>5 upstream errors in the last hour) - still serving, not paging'
-        fi
-        if [ "$degraded_cycles" -eq "$DEGRADED_ALERT_AFTER" ]; then
-            log "app has reported degraded for $degraded_cycles consecutive probes - sending low-priority notice"
-            curl -fsS -m 10 \
-                -H 'Title: louisville-bot degraded' \
-                -H 'Priority: default' \
-                -H 'Tags: warning' \
-                -d "The site is serving, but /api/health has reported degraded for $degraded_cycles minutes straight. Live queries may all be failing (check MODEL against the provider's current model list)." \
-                "https://ntfy.sh/$NTFY_TOPIC" >/dev/null 2>&1
+        else
+            if [ "$degraded_cycles" -eq 1 ]; then
+                log 'app reports status=degraded (>5 upstream errors in the last hour) - still serving, not paging'
+            fi
+            if [ "$degraded_cycles" -eq "$DEGRADED_ALERT_AFTER" ]; then
+                log "app has reported degraded for $degraded_cycles consecutive probes - sending low-priority notice"
+                curl -fsS -m 10 \
+                    -H 'Title: louisville-bot degraded' \
+                    -H 'Priority: default' \
+                    -H 'Tags: warning' \
+                    -d "The site is serving, but /api/health has reported degraded for $degraded_cycles minutes straight. Live queries may all be failing (check MODEL against the provider's current model list)." \
+                    "https://ntfy.sh/$NTFY_TOPIC" >/dev/null 2>&1
+            fi
         fi
     else
         rm -f "$DEGRADED_COUNT_FILE" 2>/dev/null
