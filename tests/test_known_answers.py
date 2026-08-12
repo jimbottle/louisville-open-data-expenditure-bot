@@ -1435,3 +1435,52 @@ def test_a_rank_column_is_charted_when_it_is_the_only_measure():
     sql = ("WITH ranked AS (SELECT payee, ROW_NUMBER() OVER (ORDER BY amt DESC) AS rn "
            "FROM t) SELECT payee, rn FROM ranked ORDER BY rn")
     assert infer_chart(df, sql)[2] == "rn"
+
+
+def test_a_quoted_rank_alias_is_still_an_ordinal():
+    """`rank` collides with a function name, so `AS "rank"` is exactly the shape
+    a generator produces. The unquoted-only scan captured the literal token "AS"
+    instead, registered junk, missed the real ordinal, and let the ORDER BY
+    override — which does strip quotes — put the staircase on the y-axis."""
+    from data_model import sql_ordinal_columns
+    sql = ('WITH ranked AS (SELECT payee, SUM(amt) AS total_paid, '
+           'ROW_NUMBER() OVER (ORDER BY SUM(amt) DESC) AS "rank" FROM t GROUP BY 1) '
+           'SELECT payee, total_paid, "rank" FROM ranked WHERE "rank" <= 10 ORDER BY "rank"')
+    assert sql_ordinal_columns(sql) == {"rank"}
+    df = pd.DataFrame({"payee": list("abcd"),
+                       "total_paid": [40.0, 30.0, 20.0, 10.0],
+                       "rank": [1, 2, 3, 4]})
+    assert infer_chart(df, sql)[2] == "total_paid"
+
+
+def test_a_named_window_does_not_swallow_the_alias():
+    """OVER w names a window, not the column; the alias is still after it."""
+    from data_model import sql_ordinal_columns
+    sql = ("SELECT payee, SUM(a) AS total_paid, ROW_NUMBER() OVER w AS rn "
+           "FROM t WINDOW w AS (ORDER BY SUM(a) DESC)")
+    assert sql_ordinal_columns(sql) == {"rn"}
+
+
+def test_a_paren_inside_a_literal_does_not_truncate_the_scan():
+    """The scan counts brackets, so a ')' in a string literal would end the OVER
+    clause early and lose the alias."""
+    from data_model import sql_ordinal_columns
+    sql = ("SELECT payee, SUM(a) AS total_paid, "
+           "ROW_NUMBER() OVER (ORDER BY CASE WHEN x = ')' THEN 1 END) AS rn FROM t")
+    assert sql_ordinal_columns(sql) == {"rn"}
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT a, b FROM t -- ROW_NUMBER() OVER () AS rn\n",
+    "SELECT a, b FROM t /* ROW_NUMBER() OVER () AS rn */",
+    "SELECT 'ROW_NUMBER() OVER () AS rn' AS note FROM t",
+])
+def test_a_ranking_function_in_a_comment_or_literal_names_nothing(sql):
+    from data_model import sql_ordinal_columns
+    assert sql_ordinal_columns(sql) == set()
+
+
+def test_a_bare_ranking_call_with_no_alias_names_nothing():
+    from data_model import sql_ordinal_columns
+    assert sql_ordinal_columns("SELECT ROW_NUMBER() OVER () FROM t") == set()
+    assert sql_ordinal_columns("SELECT payee, ROW_NUMBER() OVER () FROM t") == set()

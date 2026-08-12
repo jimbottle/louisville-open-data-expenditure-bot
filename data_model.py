@@ -467,7 +467,76 @@ def is_chronological(series, require_sorted: bool = True) -> bool:
 
 _ORDINAL_FN_RE = re.compile(
     r"\b(?:row_number|rank|dense_rank|percent_rank|ntile)\s*\(", re.I)
-_ALIAS_RE = re.compile(r"(?:as\s+)?([A-Za-z_]\w*)", re.I)
+# A quoted alias is not exotic here: `rank` collides with a function name, so
+# `AS "rank"` is exactly what a generator reaches for.
+_ALIAS_RE = re.compile(r'\s*(?:as\s+)?(?:"([^"]+)"|([A-Za-z_]\w*))', re.I)
+_IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+
+
+def _blank_literals(sql: str) -> str:
+    """``sql`` with string literals and comments replaced by spaces.
+
+    Same length, so offsets still line up. Quoted identifiers are deliberately
+    KEPT — an alias may legitimately be quoted, which is the whole point of
+    reading them — while a stray paren inside a literal would otherwise
+    truncate a scan that counts brackets.
+    """
+    out = list(sql)
+    i, n = 0, len(sql)
+
+    def blank(start, end):
+        for k in range(start, min(end, n)):
+            out[k] = " "
+
+    while i < n:
+        c = sql[i]
+        if c == "'":                                  # string literal
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            blank(i, j)
+            i = j
+        elif c == '"':                                # quoted identifier: keep
+            j = i + 1
+            while j < n and sql[j] != '"':
+                j += 1
+            i = min(j + 1, n)
+        elif sql.startswith("--", i):
+            j = sql.find("\n", i)
+            j = n if j == -1 else j
+            blank(i, j)
+            i = j
+        elif sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            blank(i, j)
+            i = j
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _skip_parens(s: str, i: int) -> int:
+    """Index just past the balanced group starting at ``s[i] == '('``."""
+    n = len(s)
+    if i >= n or s[i] != "(":
+        return i
+    depth = 0
+    while i < n:
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return i
 
 
 def sql_ordinal_columns(sql: str) -> set:
@@ -487,35 +556,31 @@ def sql_ordinal_columns(sql: str) -> set:
     out = set()
     if not sql:
         return out
-    n = len(sql)
-    for m in _ORDINAL_FN_RE.finditer(sql):
-        i = m.end() - 1                       # sitting on the opening paren
-        # Step over the call's arguments, then an OVER (...) clause if present.
-        while i < n and sql[i] == "(":
-            depth = 0
-            while i < n:
-                if sql[i] == "(":
-                    depth += 1
-                elif sql[i] == ")":
-                    depth -= 1
-                    if depth == 0:
-                        i += 1
-                        break
-                i += 1
-            j = i
-            while j < n and sql[j].isspace():
-                j += 1
-            if sql[j:j + 4].lower() != "over":
-                i = j
-                break
+    scrubbed = _blank_literals(sql)
+    n = len(scrubbed)
+    for m in _ORDINAL_FN_RE.finditer(scrubbed):
+        i = _skip_parens(scrubbed, m.end() - 1)      # the call's own arguments
+        j = i
+        while j < n and scrubbed[j].isspace():
+            j += 1
+        if scrubbed[j:j + 4].lower() == "over":
             j += 4
-            while j < n and sql[j].isspace():
+            while j < n and scrubbed[j].isspace():
                 j += 1
+            if j < n and scrubbed[j] == "(":
+                j = _skip_parens(scrubbed, j)        # inline window spec
+            else:
+                w = _IDENT_RE.match(scrubbed, j)     # or a named window
+                j = w.end() if w else j
             i = j
-        alias = _ALIAS_RE.match(sql, i)
-        # No alias at all (bare ROW_NUMBER() in a select list) names no column.
-        if alias and alias.group(1).lower() not in ("from", "over"):
-            out.add(alias.group(1))
+        alias = _ALIAS_RE.match(scrubbed, i)
+        if not alias:
+            continue
+        name = alias.group(1) or alias.group(2) or ""
+        # A bare ROW_NUMBER() with no alias names no column, and what follows it
+        # is the next keyword rather than a name.
+        if name.lower() not in ("", "as", "from", "over", "window"):
+            out.add(name)
     return out
 
 
