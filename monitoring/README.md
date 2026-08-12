@@ -93,6 +93,12 @@ behind the original outage), the script **stands down instead of restarting**. F
 open there would silently disable the cooldown and cap and restore the every-60s
 restart-and-push loop; the withheld heartbeat still raises the alarm either way.
 
+The degraded counter lives in the same place, so an unwritable state dir also disables
+the sustained-degradation escalation. Both cases log a `WARN` — exactly once, matched
+against the log itself, since the state needed to dedupe is the thing that is broken.
+The log dir can be writable while the state dir is not (a permissions problem, not just
+a full disk), so an unbounded warning here would be genuine per-minute spam.
+
 ### 3. Check — healthchecks.io `louisville-bot`
 
 - Project: `evan.j.ray@gmail.com` (free tier, 4 of 20 checks used)

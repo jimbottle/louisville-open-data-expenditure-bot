@@ -222,16 +222,43 @@ def test_recovery_resets_self_heal_counter(hb):
     assert "DOCKER_START" in hb.run(health="", ask="000", state="exited", now=now + 1)
 
 
-def test_unwritable_state_dir_stands_down_instead_of_looping(hb):
-    """Fail safe: without persistable state the cooldown and cap cannot hold, so
-    restarting anyway would restore the once-a-minute restart-and-push loop."""
+def _make_state_dir_unwritable(hb):
     hb.state_dir.parent.mkdir(parents=True, exist_ok=True)
     hb.state_dir.mkdir(exist_ok=True)
     hb.state_dir.chmod(0o500)  # readable, not writable
+
+
+def test_unwritable_state_dir_stands_down_instead_of_looping(hb):
+    """Fail safe: without persistable state the cooldown and cap cannot hold, so
+    restarting anyway would restore the once-a-minute restart-and-push loop."""
+    _make_state_dir_unwritable(hb)
     try:
-        calls = hb.run(health="", ask="000", state="exited")
-        assert calls == [], f"expected no restart or push, got {calls}"
-        assert "cannot persist self-heal state" in hb.log
+        for _ in range(5):
+            calls = hb.run(health="", ask="000", state="exited")
+            assert calls == [], f"expected no restart or push, got {calls}"
+        # Warned, but not once per minute: the log dir stays writable even when
+        # the state dir does not, so an unbounded warning would be real spam.
+        assert hb.log.count("cannot persist self-heal state") == 1
+    finally:
+        hb.state_dir.chmod(0o700)
+
+
+def test_unwritable_state_dir_disables_degraded_escalation_loudly(tmp_path):
+    """The degraded counter cannot advance without persistable state, so the
+    escalation silently dies. It has to say so — once — rather than either
+    pretending nothing is wrong or repeating a line every 60s."""
+    hb = Harness(tmp_path, curl_stub=CURL_STUB_WITH_PRIORITY)
+    _make_state_dir_unwritable(hb)
+    try:
+        pushes = []
+        for _ in range(40):
+            calls = hb.run(health=DEGRADED_BODY, ask="200")
+            assert "PING" in calls, "a degraded app is still serving and must be pinged"
+            pushes += [c for c in calls if c.startswith("NTFY")]
+        assert pushes == [], "counter cannot advance, so escalation must not claim to fire"
+        assert hb.log.count("escalation disabled") == 1
+        # The routine first-cycle line is suppressed rather than repeated 40x.
+        assert hb.log.count("status=degraded") == 0
     finally:
         hb.state_dir.chmod(0o700)
 

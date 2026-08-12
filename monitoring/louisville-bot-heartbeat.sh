@@ -39,6 +39,17 @@ log() {
     echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >>"$LOG"
 }
 
+# For conditions that persist until a human fixes them (an unwritable state
+# dir), where the state needed to dedupe is the very thing that is broken. The
+# log is the only durable marker available, so match against it — otherwise the
+# warning repeats every 60s on a host that is likely already short on disk.
+warn_once() {
+    if [ -f "$LOG" ] && grep -qF -- "$1" "$LOG" 2>/dev/null; then
+        return 0
+    fi
+    log "$1"
+}
+
 # Reads a counter file as an integer, treating missing/corrupt as 0.
 read_int() {
     _v=$(cat "$1" 2>/dev/null)
@@ -96,8 +107,11 @@ if [ "$health_ok" = 1 ] && [ "$ask_code" = '200' ]; then
     # at default priority so it is distinguishable from the max-priority down alert.
     if [ "$degraded" = 1 ]; then
         degraded_cycles=$(($(read_int "$DEGRADED_COUNT_FILE") + 1))
-        write_state "$DEGRADED_COUNT_FILE" "$degraded_cycles"
-        if [ "$degraded_cycles" -eq 1 ]; then
+        if ! write_state "$DEGRADED_COUNT_FILE" "$degraded_cycles"; then
+            # The counter can never advance, so escalation is dead and the
+            # first-cycle line below would repeat every minute. Say it once.
+            warn_once "WARN: cannot persist '$DEGRADED_COUNT_FILE' - sustained-degradation escalation disabled"
+        elif [ "$degraded_cycles" -eq 1 ]; then
             log 'app reports status=degraded (>5 upstream errors in the last hour) - still serving, not paging'
         fi
         if [ "$degraded_cycles" -eq "$DEGRADED_ALERT_AFTER" ]; then
@@ -153,7 +167,7 @@ fi
 
 attempts=$((attempts + 1))
 if ! write_state "$HEAL_COUNT_FILE" "$attempts" || ! write_state "$HEAL_TIME_FILE" "$now"; then
-    log "WARN: cannot persist self-heal state under '$STATE_DIR' - standing down rather than restarting without a cooldown"
+    warn_once "WARN: cannot persist self-heal state under '$STATE_DIR' - standing down rather than restarting without a cooldown"
     exit 0
 fi
 
