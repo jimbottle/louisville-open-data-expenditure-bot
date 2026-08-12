@@ -118,7 +118,21 @@ MAX_DISPLAY_ROWS = 50
 TRUNCATION_COUNTS = "this table has {rows} rows"
 TRUNCATION_COUNTS_WITH_TOTALS = (
     "this table has {rows} rows, of which {entities} are data rows and the "
-    "rest are totals/subtotals moved to the end"
+    "rest are totals/subtotals"
+)
+
+# Emitted whenever a total was relocated, at EVERY table size — not only when
+# the table is also truncated. A moved total sits at the bottom of a descending
+# list, so without this the model reads it as the end of the ranking and reports
+# the range running down to it: the same misreading as before, at the other end
+# of the table. Most ROLLUP results are well under the truncation cap, so
+# gating this on truncation left the common shape unexplained.
+#
+# Says what the rows ARE rather than what they are not, so it stays clear of the
+# position words every model-visible surface here is held to.
+TOTALS_MOVED_NOTE = (
+    "[NOTE: the last {n} row(s) of this table are totals/subtotals, moved to "
+    "the end. They are sums of the rows above, not entries in the ranking.]"
 )
 
 TRUNCATION_NOTE = (
@@ -669,7 +683,8 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
     # Ordered here rather than at render time so the table, the chart and the
     # text the model interprets all see the same rows in the same order — the
     # summary should lead with the largest figure too.
-    from data_model import order_for_display, infer_chart, drop_total_rows, totals_last
+    from data_model import (order_for_display, infer_chart, drop_total_rows,
+                            totals_last, total_row_mask)
     result_df = order_for_display(result_df, sql)
 
     # A ROLLUP total holds the largest number, so a DESC ranking hands it row
@@ -677,12 +692,15 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
     # Moved to the end for every surface at once — the same frame feeds the
     # table, the chart (which drops it) and the text the model interprets.
     lbl = val = None
+    n_totals = 0
     try:
         _, lbl, val = infer_chart(result_df, sql)
         if lbl and val:
-            result_df = totals_last(result_df, lbl, val)
+            n_totals = int(total_row_mask(result_df, lbl, val).sum())
+            if n_totals:
+                result_df = totals_last(result_df, lbl, val)
     except Exception:
-        pass
+        n_totals = 0
 
     result_str = result_df.to_string(index=False, max_rows=MAX_DISPLAY_ROWS)
     if len(result_df) > MAX_DISPLAY_ROWS:
@@ -706,6 +724,11 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
         half = MAX_DISPLAY_ROWS // 2
         result_str += "\n\n" + TRUNCATION_NOTE.format(
             counts=counts, half=half, omitted=f"{len(result_df) - MAX_DISPLAY_ROWS:,}")
+    # Unconditional, because the reorder is: gating this on truncation left the
+    # common ROLLUP shape rearranged with nothing said about it. Appended after
+    # the truncation note so "[TRUNCATED" stays the first bracketed line.
+    if n_totals:
+        result_str += "\n\n" + TOTALS_MOVED_NOTE.format(n=n_totals)
     return result_df, result_str
 
 

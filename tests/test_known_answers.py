@@ -1058,7 +1058,7 @@ def test_the_note_separates_data_rows_from_a_rollup_total():
         "SELECT COALESCE(fund, 'TOTAL - ALL FUNDS') AS fund, SUM(amt) AS amt "
         "FROM t GROUP BY ROLLUP(fund)")
     con.close()
-    note = [ln for ln in s.splitlines() if ln.startswith("[")][0]
+    note = [ln for ln in s.splitlines() if ln.startswith("[TRUNCATED")][0]
     assert f"has {n + 1:,} rows" in note, note
     assert f"{n:,} are data rows" in note, note
 
@@ -1097,7 +1097,7 @@ def test_neither_the_note_nor_the_prompt_claims_the_head_is_the_largest():
                 f"FROM range(1, {MAX_DISPLAY_ROWS + 40}) t(i)")
     _, s = execute_sql_safe(con, "SELECT fund, amt FROM t ORDER BY amt ASC")
     con.close()
-    note = [ln for ln in s.splitlines() if ln.startswith("[")][0]
+    note = [ln for ln in s.splitlines() if ln.startswith("[TRUNCATED")][0]
     # the ascending query really does show the smallest rows first
     assert "Fund 1" in s.splitlines()[1]
     assert "in the order the query produced them" in note
@@ -1549,8 +1549,13 @@ def test_the_served_table_puts_the_rollup_total_at_the_bottom():
     assert df["fund"].iloc[0] != "TOTAL - ALL FUNDS"
     body = [ln for ln in s.splitlines() if ln.strip() and not ln.startswith("[")]
     assert "TOTAL - ALL FUNDS" in body[-1], "and at the end of the rendered table"
-    note = [ln for ln in s.splitlines() if ln.startswith("[")][0]
-    assert "moved to the end" in note, "the model must be told, or it reads it as smallest"
+    note = [ln for ln in s.splitlines() if ln.startswith("[TRUNCATED")][0]
+    assert "are data rows and the rest are totals/subtotals" in note
+    # The model must be told the total moved, or it reads the last row as the end
+    # of the ranking. That explanation lives in its own note so it also reaches
+    # untruncated results, which the truncation note never sees.
+    assert "totals/subtotals, moved to the end" in s
+    assert "not entries in the ranking" in s
 
 
 def test_the_chart_still_excludes_the_total_after_it_moves():
@@ -1564,3 +1569,70 @@ def test_the_chart_still_excludes_the_total_after_it_moves():
     charted = drop_total_rows(moved, "fund", "total_amount")
     assert "TOTAL - ALL GRANT FUNDS" not in charted["fund"].tolist()
     assert len(charted) == 3
+
+
+def test_a_small_rollup_result_also_explains_the_moved_total():
+    """The reorder happens at every size, so its explanation has to as well.
+    Most ROLLUP results are far under the truncation cap, so gating the note on
+    truncation left the common shape silently rearranged — inviting exactly the
+    misreading the reorder was meant to prevent, at the other end of the table."""
+    import duckdb
+    from analytics_agent import execute_sql_safe, MAX_DISPLAY_ROWS
+    con = duckdb.connect()
+    con.execute("CREATE TABLE g AS SELECT 'Fund ' || i AS fund, i * 1000.0 AS amt "
+                "FROM range(1, 13) t(i)")
+    df, s = execute_sql_safe(con, (
+        "SELECT COALESCE(fund, 'TOTAL - ALL FUNDS') AS fund, ROUND(SUM(amt), 2) AS amt "
+        "FROM g GROUP BY ROLLUP(fund) ORDER BY amt DESC NULLS LAST"))
+    con.close()
+    assert len(df) <= MAX_DISPLAY_ROWS, "this case must exercise the untruncated path"
+    assert "[TRUNCATED" not in s, "and must not rely on the truncation note"
+    assert df["fund"].iloc[-1] == "TOTAL - ALL FUNDS"
+    assert "totals/subtotals, moved to the end" in s
+    assert "not entries in the ranking" in s
+
+
+def test_the_moved_total_note_counts_the_rows_it_describes():
+    import duckdb
+    from analytics_agent import execute_sql_safe
+    con = duckdb.connect()
+    con.execute("CREATE TABLE g AS SELECT 'F' || i AS fund, i * 100.0 AS amt FROM range(1, 8) t(i)")
+    _, s = execute_sql_safe(con, (
+        "SELECT COALESCE(fund, 'TOTAL') AS fund, ROUND(SUM(amt), 2) AS amt "
+        "FROM g GROUP BY ROLLUP(fund) ORDER BY amt DESC NULLS LAST"))
+    con.close()
+    assert "the last 1 row(s)" in s
+
+
+def test_no_moved_total_note_when_nothing_moved():
+    """A plain ranking must not gain a sentence about totals it does not have."""
+    import duckdb
+    from analytics_agent import execute_sql_safe
+    con = duckdb.connect()
+    con.execute("CREATE TABLE g AS SELECT 'F' || i AS fund, i * 100.0 AS amt FROM range(1, 8) t(i)")
+    _, s = execute_sql_safe(con, "SELECT fund, amt FROM g ORDER BY amt DESC")
+    con.close()
+    assert "moved to the end" not in s
+    assert "totals/subtotals" not in s
+
+
+def test_the_moved_total_note_is_hashed_into_the_cache_version():
+    """It is model-visible input. Leaving it out of the hash is the bug that
+    once replayed a pre-fix answer and made a fix look like it had failed."""
+    import re as _re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "app.py")) as f:
+        src = f.read()
+    m = _re.search(r"CACHE_VERSION = hashlib\.sha1\(\s*\((.*?)\)\.encode\(\)", src, _re.S)
+    assert m, "could not find the CACHE_VERSION computation"
+    assert "TOTALS_MOVED_NOTE" in m.group(1)
+
+
+def test_the_moved_total_note_takes_no_position_on_order():
+    """Same bar as every other model-visible surface: one word list, one matcher."""
+    import re as _re
+    from analytics_agent import TOTALS_MOVED_NOTE
+    words = ("largest", "smallest", "biggest", "highest", "lowest", "top")
+    low = TOTALS_MOVED_NOTE.lower()
+    hits = [w for w in words if _re.search(rf"\b{w}\b", low)]
+    assert not hits, f"totals note takes a position on order {hits}"
