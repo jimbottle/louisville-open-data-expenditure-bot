@@ -465,6 +465,33 @@ def is_chronological(series, require_sorted: bool = True) -> bool:
         return False
 
 
+def _is_row_ordinal(s) -> bool:
+    """Is this column just the row positions — a ROW_NUMBER() artifact?
+
+    A top-N-per-group query often keeps its rank column, and `ORDER BY rn` then
+    names it as the ranked measure. A row number is not a measure: charting it
+    draws a 1,2,3 staircase and titles the axis after the rank. Detected from
+    the values rather than the name, which catches rn/row_num/seq/rank alike.
+
+    Values alone cannot actually tell the two apart — a real measure can be a
+    contiguous run (spend of 6,5,4,3,2,1 across six categories), and reading
+    this as an ordinal cost that frame its only chart. So the caller discards an
+    ordinal only when a genuine alternative survives; when it is all there is,
+    it gets charted.
+    """
+    try:
+        if not pd.api.types.is_integer_dtype(s) or len(s) < 2:
+            return False
+        vals = [int(v) for v in s.tolist()]
+        lo, hi = min(vals), max(vals)
+        if lo not in (0, 1) or hi - lo != len(vals) - 1:
+            return False                       # not a gapless run from 0 or 1
+        ascending = list(range(lo, hi + 1))
+        return vals == ascending or vals == ascending[::-1]
+    except Exception:
+        return False
+
+
 def infer_chart(df, sql: str = None) -> tuple:
     """Pick (chart_type, label_col, value_col) for a result DataFrame.
 
@@ -500,7 +527,10 @@ def infer_chart(df, sql: str = None) -> tuple:
     # Value (y): varying numeric, not a year/time id. Prefer a float (dollar)
     # measure over an integer count so "SELECT payee, SUM(amt), COUNT(*)" charts
     # dollars, not the invoice count.
-    value_cands = [c for c in cols if is_numeric(c) and ndist(c) > 1 and not is_time_named(c)]
+    numeric_cands = [c for c in cols if is_numeric(c) and ndist(c) > 1 and not is_time_named(c)]
+    # Drop ROW_NUMBER() artifacts, but never the last candidate: an ordinal is
+    # a poor y-axis, and no y-axis at all is worse.
+    value_cands = [c for c in numeric_cands if not _is_row_ordinal(df[c])] or numeric_cands
     value_col = None
     if value_cands:
         floats = [c for c in value_cands if pd.api.types.is_float_dtype(df[c])]
@@ -512,8 +542,9 @@ def infer_chart(df, sql: str = None) -> tuple:
         # rule drew average pay in max-pay order: a frame that IS sorted,
         # plotted through a column that isn't, which reads as no sort at all.
         # The ranked measure is both the ordered one and the one the question
-        # asked about. Restricted to existing candidates, so at worst this
-        # swaps one plausible measure for another.
+        # asked about. Restricted to existing candidates — which exclude row
+        # ordinals, so `ORDER BY rn` on a kept ROW_NUMBER() column cannot
+        # displace the dollars with a staircase.
         if sql:
             ranked = sql_order_measure(sql, df)
             if ranked in value_cands:

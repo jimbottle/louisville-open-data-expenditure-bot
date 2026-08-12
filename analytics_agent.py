@@ -681,7 +681,7 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
         entities = None
         try:
             from data_model import infer_chart, drop_total_rows
-            _, lbl, val = infer_chart(result_df)
+            _, lbl, val = infer_chart(result_df, sql)
             if lbl and val:
                 n_real = len(drop_total_rows(result_df, lbl, val))
                 if n_real != len(result_df):

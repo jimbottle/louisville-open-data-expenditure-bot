@@ -11,6 +11,7 @@ Run: python -m pytest tests/test_known_answers.py -v
 """
 
 import os
+import re
 
 import pandas as pd
 import pytest
@@ -1305,3 +1306,96 @@ def test_time_keyed_ordering_does_not_become_the_measure():
         df, "SELECT fiscal_year, SUM(a) AS amount FROM t GROUP BY 1 ORDER BY fiscal_year")
     assert value_col == "amount"
     assert label_col == "fiscal_year"
+
+
+def test_a_kept_rank_column_never_displaces_the_dollars():
+    """A top-N-per-group query keeps its ROW_NUMBER() column and orders by it.
+    Honouring that key would chart a 1,2,3 staircase titled after the rank."""
+    df = pd.DataFrame({"payee": list("abcd"),
+                       "total_paid": [40.0, 30.0, 20.0, 10.0],
+                       "rn": [1, 2, 3, 4]})
+    sql = "SELECT payee, total_paid, rn FROM ranked WHERE rn <= 10 ORDER BY rn"
+    _, _, value_col = infer_chart(df, sql)
+    assert value_col == "total_paid"
+
+
+@pytest.mark.parametrize("name", ["rn", "row_num", "seq", "rank"])
+def test_row_ordinals_are_not_measures_whatever_they_are_called(name):
+    """Detected from the values, so the name does not matter."""
+    df = pd.DataFrame({"payee": list("abcd"),
+                       "total_paid": [40.0, 30.0, 20.0, 10.0],
+                       name: [1, 2, 3, 4]})
+    assert infer_chart(df, f"SELECT * FROM t ORDER BY {name}")[2] == "total_paid"
+
+
+def test_a_descending_rank_column_is_also_rejected():
+    df = pd.DataFrame({"payee": list("abcd"),
+                       "total_paid": [10.0, 20.0, 30.0, 40.0],
+                       "rn": [4, 3, 2, 1]})
+    assert infer_chart(df, "SELECT * FROM t ORDER BY rn DESC")[2] == "total_paid"
+
+
+def test_a_real_count_that_is_not_a_row_run_stays_a_measure():
+    """The ordinal guard must not eat a genuine COUNT(*)."""
+    df = pd.DataFrame({"agency": list("abcd"), "invoices": [12, 9, 40, 3]})
+    assert infer_chart(df, "SELECT agency, COUNT(*) AS invoices FROM t GROUP BY 1 ORDER BY invoices DESC")[2] == "invoices"
+    # A count whose values happen to be contiguous but do not start at 0/1.
+    df2 = pd.DataFrame({"agency": list("abcd"), "invoices": [7, 8, 9, 10]})
+    assert infer_chart(df2, "SELECT agency, COUNT(*) AS invoices FROM t GROUP BY 1 ORDER BY invoices")[2] == "invoices"
+
+
+def test_the_outer_order_by_wins_over_a_cte_ordering():
+    """"Last ORDER BY wins" is the disambiguation rule; a decoy in a comment
+    passes under any choice of key, so pin it against two real clauses."""
+    from data_model import sql_order_measure
+    df = _salary_frame()
+    sql = ("WITH ranked AS (SELECT * FROM salaries ORDER BY avg_total_comp DESC LIMIT 50) "
+           "SELECT job_title, department, max_total_comp, avg_total_comp FROM ranked "
+           "ORDER BY max_total_comp DESC LIMIT 10")
+    assert sql_order_measure(sql, df) == "max_total_comp"
+    assert infer_chart(df, sql)[2] == "max_total_comp"
+
+
+def test_an_inner_only_order_by_is_still_read():
+    """The mirror case: if the only ordering is in the CTE, that is the key."""
+    from data_model import sql_order_measure
+    df = _salary_frame()
+    sql = ("WITH ranked AS (SELECT * FROM salaries ORDER BY max_total_comp DESC LIMIT 50) "
+           "SELECT job_title, department, max_total_comp, avg_total_comp FROM ranked")
+    assert sql_order_measure(sql, df) == "max_total_comp"
+
+
+def test_every_result_call_site_infers_the_chart_from_the_same_sql():
+    """app.py titles the chart from value_col; analytics_agent counts entities by
+    dropping a total row measured in value_col. If one passes sql and the other
+    does not they can pick different measures, and the note handed to the model
+    says "103 rows, 102 entities" beside a chart titled "top 30 of 103".
+
+    order_for_display's own call is exempt: it runs only when the SQL expressed
+    no order, where sql_order_measure has nothing to read anyway."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for name in ("app.py", "analytics_agent.py"):
+        with open(os.path.join(root, name)) as f:
+            src = f.read()
+        calls = re.findall(r"infer_chart\(([^)]*)\)", src)
+        assert calls, f"{name} no longer calls infer_chart; drop or update this test"
+        for args in calls:
+            assert "sql" in args, f"{name}: infer_chart({args}) must pass the sql"
+
+
+def test_a_lone_measure_that_looks_like_a_run_is_still_charted():
+    """Values cannot distinguish a rank from a small real measure, so the ordinal
+    guard must never take away the only y-axis available. A spend of 6,5,4,3,2,1
+    across six categories reads as a descending run and is still the measure."""
+    df = pd.DataFrame({
+        "category": pd.array(["A", "B", "C", "D", "E", "F"], dtype="string"),
+        "spend": pd.array([6, 5, 4, 3, 2, 1], dtype="Int32"),
+    })
+    assert infer_chart(df)[2] == "spend"
+    assert infer_chart(df, "SELECT category, spend FROM t ORDER BY spend DESC")[2] == "spend"
+
+
+def test_an_int_only_result_still_drops_the_rank_for_the_real_count():
+    """No float to fall back on, but the count is a better axis than the rank."""
+    df = pd.DataFrame({"agency": list("abcd"), "invoices": [12, 9, 40, 3], "rn": [1, 2, 3, 4]})
+    assert infer_chart(df, "SELECT * FROM t ORDER BY rn")[2] == "invoices"
