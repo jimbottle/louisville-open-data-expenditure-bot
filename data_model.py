@@ -465,31 +465,58 @@ def is_chronological(series, require_sorted: bool = True) -> bool:
         return False
 
 
-def _is_row_ordinal(s) -> bool:
-    """Is this column just the row positions — a ROW_NUMBER() artifact?
+_ORDINAL_FN_RE = re.compile(
+    r"\b(?:row_number|rank|dense_rank|percent_rank|ntile)\s*\(", re.I)
+_ALIAS_RE = re.compile(r"(?:as\s+)?([A-Za-z_]\w*)", re.I)
 
-    A top-N-per-group query often keeps its rank column, and `ORDER BY rn` then
-    names it as the ranked measure. A row number is not a measure: charting it
-    draws a 1,2,3 staircase and titles the axis after the rank. Detected from
-    the values rather than the name, which catches rn/row_num/seq/rank alike.
 
-    Values alone cannot actually tell the two apart — a real measure can be a
-    contiguous run (spend of 6,5,4,3,2,1 across six categories), and reading
-    this as an ordinal cost that frame its only chart. So the caller discards an
-    ordinal only when a genuine alternative survives; when it is all there is,
-    it gets charted.
+def sql_ordinal_columns(sql: str) -> set:
+    """Result columns that are window ordinals rather than measures.
+
+    A top-N-per-group query keeps its ROW_NUMBER() column, and `ORDER BY rn`
+    then names it as the ranked measure. A row number is not one: charting it
+    draws a 1,2,3 staircase with the axis titled after the rank.
+
+    Read from the SQL, because the VALUES cannot settle it. Two earlier attempts
+    tried: any gapless run from 0/1 in row order looks like a rank, and so does
+    a genuine measure — a spend of 6,5,4,3,2,1 across six categories, or a
+    top-5-by-count whose counts really are 5,4,3,2,1. Rejecting those cost one
+    frame its only chart and the other its correct axis, both silently. The
+    SELECT list already says which is which, so ask it instead of guessing.
     """
-    try:
-        if not pd.api.types.is_integer_dtype(s) or len(s) < 2:
-            return False
-        vals = [int(v) for v in s.tolist()]
-        lo, hi = min(vals), max(vals)
-        if lo not in (0, 1) or hi - lo != len(vals) - 1:
-            return False                       # not a gapless run from 0 or 1
-        ascending = list(range(lo, hi + 1))
-        return vals == ascending or vals == ascending[::-1]
-    except Exception:
-        return False
+    out = set()
+    if not sql:
+        return out
+    n = len(sql)
+    for m in _ORDINAL_FN_RE.finditer(sql):
+        i = m.end() - 1                       # sitting on the opening paren
+        # Step over the call's arguments, then an OVER (...) clause if present.
+        while i < n and sql[i] == "(":
+            depth = 0
+            while i < n:
+                if sql[i] == "(":
+                    depth += 1
+                elif sql[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        i += 1
+                        break
+                i += 1
+            j = i
+            while j < n and sql[j].isspace():
+                j += 1
+            if sql[j:j + 4].lower() != "over":
+                i = j
+                break
+            j += 4
+            while j < n and sql[j].isspace():
+                j += 1
+            i = j
+        alias = _ALIAS_RE.match(sql, i)
+        # No alias at all (bare ROW_NUMBER() in a select list) names no column.
+        if alias and alias.group(1).lower() not in ("from", "over"):
+            out.add(alias.group(1))
+    return out
 
 
 def infer_chart(df, sql: str = None) -> tuple:
@@ -528,9 +555,10 @@ def infer_chart(df, sql: str = None) -> tuple:
     # measure over an integer count so "SELECT payee, SUM(amt), COUNT(*)" charts
     # dollars, not the invoice count.
     numeric_cands = [c for c in cols if is_numeric(c) and ndist(c) > 1 and not is_time_named(c)]
-    # Drop ROW_NUMBER() artifacts, but never the last candidate: an ordinal is
-    # a poor y-axis, and no y-axis at all is worse.
-    value_cands = [c for c in numeric_cands if not _is_row_ordinal(df[c])] or numeric_cands
+    # Drop ROW_NUMBER()-style columns the SQL identifies as ordinals, but never
+    # the last candidate: an ordinal is a poor y-axis, and no y-axis is worse.
+    ordinals = sql_ordinal_columns(sql)
+    value_cands = [c for c in numeric_cands if c not in ordinals] or numeric_cands
     value_col = None
     if value_cands:
         floats = [c for c in value_cands if pd.api.types.is_float_dtype(df[c])]

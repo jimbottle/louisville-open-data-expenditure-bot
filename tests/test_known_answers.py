@@ -1308,40 +1308,65 @@ def test_time_keyed_ordering_does_not_become_the_measure():
     assert label_col == "fiscal_year"
 
 
+def _ranked_sql(order_key, fn="ROW_NUMBER()", alias="rn"):
+    """A top-N-per-group shape: the rank is computed in a CTE and kept."""
+    return (f"WITH ranked AS (SELECT payee, SUM(amt) AS total_paid, "
+            f"{fn} OVER (PARTITION BY agency ORDER BY SUM(amt) DESC) AS {alias} "
+            f"FROM t GROUP BY 1) "
+            f"SELECT payee, total_paid, {alias} FROM ranked WHERE {alias} <= 10 "
+            f"ORDER BY {order_key}")
+
+
 def test_a_kept_rank_column_never_displaces_the_dollars():
     """A top-N-per-group query keeps its ROW_NUMBER() column and orders by it.
     Honouring that key would chart a 1,2,3 staircase titled after the rank."""
     df = pd.DataFrame({"payee": list("abcd"),
                        "total_paid": [40.0, 30.0, 20.0, 10.0],
                        "rn": [1, 2, 3, 4]})
-    sql = "SELECT payee, total_paid, rn FROM ranked WHERE rn <= 10 ORDER BY rn"
-    _, _, value_col = infer_chart(df, sql)
-    assert value_col == "total_paid"
+    assert infer_chart(df, _ranked_sql("rn"))[2] == "total_paid"
 
 
-@pytest.mark.parametrize("name", ["rn", "row_num", "seq", "rank"])
-def test_row_ordinals_are_not_measures_whatever_they_are_called(name):
-    """Detected from the values, so the name does not matter."""
+@pytest.mark.parametrize("fn", ["ROW_NUMBER()", "RANK()", "DENSE_RANK()", "NTILE(4)"])
+@pytest.mark.parametrize("alias", ["rn", "row_num", "seq", "rank"])
+def test_window_ordinals_are_not_measures(fn, alias):
+    """Identified from the SQL that derives them, so neither the alias nor the
+    particular ranking function matters."""
     df = pd.DataFrame({"payee": list("abcd"),
                        "total_paid": [40.0, 30.0, 20.0, 10.0],
-                       name: [1, 2, 3, 4]})
-    assert infer_chart(df, f"SELECT * FROM t ORDER BY {name}")[2] == "total_paid"
+                       alias: [1, 2, 3, 4]})
+    sql = _ranked_sql(alias, fn=fn, alias=alias)
+    assert infer_chart(df, sql)[2] == "total_paid"
 
 
 def test_a_descending_rank_column_is_also_rejected():
     df = pd.DataFrame({"payee": list("abcd"),
                        "total_paid": [10.0, 20.0, 30.0, 40.0],
                        "rn": [4, 3, 2, 1]})
-    assert infer_chart(df, "SELECT * FROM t ORDER BY rn DESC")[2] == "total_paid"
+    assert infer_chart(df, _ranked_sql("rn DESC"))[2] == "total_paid"
 
 
-def test_a_real_count_that_is_not_a_row_run_stays_a_measure():
-    """The ordinal guard must not eat a genuine COUNT(*)."""
+def test_a_real_count_stays_a_measure():
+    """A COUNT(*) is a measure however its values happen to fall."""
     df = pd.DataFrame({"agency": list("abcd"), "invoices": [12, 9, 40, 3]})
     assert infer_chart(df, "SELECT agency, COUNT(*) AS invoices FROM t GROUP BY 1 ORDER BY invoices DESC")[2] == "invoices"
     # A count whose values happen to be contiguous but do not start at 0/1.
     df2 = pd.DataFrame({"agency": list("abcd"), "invoices": [7, 8, 9, 10]})
     assert infer_chart(df2, "SELECT agency, COUNT(*) AS invoices FROM t GROUP BY 1 ORDER BY invoices")[2] == "invoices"
+
+
+def test_a_ranked_count_that_looks_exactly_like_a_row_number_is_still_charted():
+    """The shape two value-based guards got wrong: "which agencies made the most
+    payments" whose top-5 counts really are 5,4,3,2,1. Indistinguishable from a
+    rank by values, so charting dollars here would answer a different question
+    than the one asked — and silently, since the frame is correctly sorted."""
+    df = pd.DataFrame({"agency": list("abcde"),
+                       "payments": [5, 4, 3, 2, 1],
+                       "total": [10.0, 90.0, 20.0, 80.0, 30.0]})
+    sql = ("SELECT agency, COUNT(*) AS payments, SUM(amount) AS total "
+           "FROM expenditures GROUP BY 1 ORDER BY payments DESC LIMIT 5")
+    chart_type, label_col, value_col = infer_chart(df, sql)
+    assert value_col == "payments"
+    assert label_col == "agency"
 
 
 def test_the_outer_order_by_wins_over_a_cte_ordering():
@@ -1398,4 +1423,15 @@ def test_a_lone_measure_that_looks_like_a_run_is_still_charted():
 def test_an_int_only_result_still_drops_the_rank_for_the_real_count():
     """No float to fall back on, but the count is a better axis than the rank."""
     df = pd.DataFrame({"agency": list("abcd"), "invoices": [12, 9, 40, 3], "rn": [1, 2, 3, 4]})
-    assert infer_chart(df, "SELECT * FROM t ORDER BY rn")[2] == "invoices"
+    sql = ("WITH ranked AS (SELECT agency, COUNT(*) AS invoices, "
+           "ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) AS rn FROM t GROUP BY 1) "
+           "SELECT agency, invoices, rn FROM ranked ORDER BY rn")
+    assert infer_chart(df, sql)[2] == "invoices"
+
+
+def test_a_rank_column_is_charted_when_it_is_the_only_measure():
+    """An ordinal is a poor y-axis; no y-axis at all is worse."""
+    df = pd.DataFrame({"payee": list("abcd"), "rn": [1, 2, 3, 4]})
+    sql = ("WITH ranked AS (SELECT payee, ROW_NUMBER() OVER (ORDER BY amt DESC) AS rn "
+           "FROM t) SELECT payee, rn FROM ranked ORDER BY rn")
+    assert infer_chart(df, sql)[2] == "rn"
