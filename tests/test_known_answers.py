@@ -1484,3 +1484,83 @@ def test_a_bare_ranking_call_with_no_alias_names_nothing():
     from data_model import sql_ordinal_columns
     assert sql_ordinal_columns("SELECT ROW_NUMBER() OVER () FROM t") == set()
     assert sql_ordinal_columns("SELECT payee, ROW_NUMBER() OVER () FROM t") == set()
+
+
+# ── a grand total is not a line item ─────────────────────────────────────────
+
+def test_a_rollup_total_is_listed_last_not_first():
+    """A ROLLUP total holds the largest number, so a DESC ranking hands it row
+    one, where it reads as the biggest source rather than the sum of the rest —
+    "the top grant source is TOTAL - ALL GRANT FUNDS"."""
+    from data_model import totals_last
+    df = pd.DataFrame({
+        "fund": ["TOTAL - ALL GRANT FUNDS", "Grant Fund", "Federally Funded", "CDBG Fund"],
+        "total_amount": [607.0, 437.0, 151.0, 19.0],
+    })
+    out = totals_last(df, "fund", "total_amount")
+    assert out["fund"].tolist() == ["Grant Fund", "Federally Funded", "CDBG Fund",
+                                    "TOTAL - ALL GRANT FUNDS"]
+    # Every real row keeps its place relative to every other; that is what the
+    # query's ordering actually asserts.
+    assert out["total_amount"].head(3).tolist() == [437.0, 151.0, 19.0]
+
+
+def test_totals_last_is_a_no_op_without_a_total():
+    from data_model import totals_last
+    df = pd.DataFrame({"fund": ["a", "b", "c"], "amt": [3.0, 2.0, 1.0]})
+    assert totals_last(df, "fund", "amt")["fund"].tolist() == ["a", "b", "c"]
+
+
+def test_totals_last_leaves_a_real_payee_named_total_alone():
+    """The same detector the chart uses, so TOTAL TOOL SUPPLY INC keeps its place.
+
+    Its value must not equal the sum of the others, because that is precisely
+    what the value rule reads as a grand total — writing this fixture with
+    500 = 300 + 200 built a real total by accident."""
+    from data_model import totals_last
+    df = pd.DataFrame({"payee": ["TOTAL TOOL SUPPLY INC", "ACME", "BETA"],
+                       "amt": [500.0, 300.0, 900.0]})
+    assert totals_last(df, "payee", "amt")["payee"].tolist() == [
+        "TOTAL TOOL SUPPLY INC", "ACME", "BETA"]
+
+
+def test_totals_last_survives_degenerate_frames():
+    from data_model import totals_last
+    one = pd.DataFrame({"fund": ["TOTAL"], "amt": [1.0]})
+    assert totals_last(one, "fund", "amt")["fund"].tolist() == ["TOTAL"]
+    all_totals = pd.DataFrame({"fund": ["TOTAL", "GRAND TOTAL"], "amt": [1.0, 1.0]})
+    assert len(totals_last(all_totals, "fund", "amt")) == 2
+    assert totals_last(pd.DataFrame({"amt": [1.0, 2.0]}), "fund", "amt").shape[0] == 2
+
+
+def test_the_served_table_puts_the_rollup_total_at_the_bottom():
+    """End to end through execute_sql_safe: the frame the table, the chart and
+    the interpreting model all read."""
+    import duckdb
+    from analytics_agent import execute_sql_safe, MAX_DISPLAY_ROWS
+    con = duckdb.connect()
+    con.execute("CREATE TABLE g AS SELECT 'Fund ' || i AS fund, i * 1000.0 AS amt "
+                f"FROM range(1, {MAX_DISPLAY_ROWS + 20}) t(i)")
+    df, s = execute_sql_safe(con, (
+        "SELECT COALESCE(fund, 'TOTAL - ALL FUNDS') AS fund, ROUND(SUM(amt), 2) AS amt "
+        "FROM g GROUP BY ROLLUP(fund) ORDER BY amt DESC NULLS LAST"))
+    con.close()
+    assert df["fund"].iloc[-1] == "TOTAL - ALL FUNDS", "the total belongs at the end"
+    assert df["fund"].iloc[0] != "TOTAL - ALL FUNDS"
+    body = [ln for ln in s.splitlines() if ln.strip() and not ln.startswith("[")]
+    assert "TOTAL - ALL FUNDS" in body[-1], "and at the end of the rendered table"
+    note = [ln for ln in s.splitlines() if ln.startswith("[")][0]
+    assert "moved to the end" in note, "the model must be told, or it reads it as smallest"
+
+
+def test_the_chart_still_excludes_the_total_after_it_moves():
+    """Moving the total must not smuggle it onto the axis at the other end."""
+    from data_model import totals_last, drop_total_rows
+    df = pd.DataFrame({
+        "fund": ["TOTAL - ALL GRANT FUNDS", "Grant Fund", "Federally Funded", "CDBG Fund"],
+        "total_amount": [607.0, 437.0, 151.0, 19.0],
+    })
+    moved = totals_last(df, "fund", "total_amount")
+    charted = drop_total_rows(moved, "fund", "total_amount")
+    assert "TOTAL - ALL GRANT FUNDS" not in charted["fund"].tolist()
+    assert len(charted) == 3

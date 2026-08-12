@@ -1103,22 +1103,23 @@ _TOTAL_LABEL_SHAPES = re.compile(
 )
 
 
-def drop_total_rows(df, label_col: str, value_col: str = None):
-    """Remove grand-total rows (e.g. a GROUP BY ROLLUP row) from chart data.
+def total_row_mask(df, label_col: str, value_col: str = None):
+    """Boolean mask of grand-total rows (e.g. a GROUP BY ROLLUP row).
 
-    A total bar equals the sum of every other bar, so charting it doubles the
-    axis and flattens the real values. Two complementary rules, both needed:
+    One detector, so every surface agrees on what a total is: the chart drops
+    them, the row/entity count subtracts them, and the displayed table moves
+    them to the end. Two complementary rules, both needed:
 
     - unambiguous total label shapes ("TOTAL", "TOTAL - ALL GRANT FUNDS",
-      "GRAND TOTAL", "TOTAL ALL YEARS") are always dropped;
-    - any label merely *containing* "total" is dropped only when its value
-      also equals the sum of the remaining rows — so real payees such as
-      TOTAL TOOL SUPPLY INC and TOTAL ACCESS GROUP INC keep their bars.
+      "GRAND TOTAL", "TOTAL ALL YEARS") always match;
+    - any label merely *containing* "total" matches only when its value also
+      equals the sum of the remaining rows — so real payees such as TOTAL TOOL
+      SUPPLY INC and TOTAL ACCESS GROUP INC are left alone.
 
     Pure function (no DB), unit-tested alongside infer_chart.
     """
     if label_col not in df.columns or df.empty:
-        return df
+        return pd.Series(False, index=df.index)
     labels = df[label_col].astype(str).str.strip().str.upper()
     drop = labels.str.match(_TOTAL_LABEL_SHAPES)
 
@@ -1140,7 +1141,34 @@ def drop_total_rows(df, label_col: str, value_col: str = None):
             if v * others > 0 and abs(abs(v) - abs(others)) <= max(1.0, abs(others) * 0.005):
                 drop.loc[idx] = True
 
-    return df[~drop]
+    return drop
+
+
+def drop_total_rows(df, label_col: str, value_col: str = None):
+    """``df`` without its grand-total rows. A total bar equals the sum of every
+    other bar, so charting it doubles the axis and flattens the real values."""
+    if label_col not in df.columns or df.empty:
+        return df
+    return df[~total_row_mask(df, label_col, value_col)]
+
+
+def totals_last(df, label_col: str, value_col: str = None):
+    """``df`` with any grand-total rows moved to the end, order otherwise kept.
+
+    A ROLLUP total carries the largest number in the frame, so a query that
+    ranks by that measure descending puts it in row one — where it reads as the
+    biggest item rather than the sum of the others ("the top funding source is
+    TOTAL - ALL GRANT FUNDS"). Relocating it is not second-guessing the query's
+    ordering the way order_for_display refuses to: a total is not one of the
+    ranked rows, it is their sum. Every real row keeps its place relative to
+    every other, which is what the ordering actually asserts.
+    """
+    if label_col not in df.columns or len(df) < 2:
+        return df
+    mask = total_row_mask(df, label_col, value_col)
+    if not mask.any() or mask.all():
+        return df
+    return pd.concat([df[~mask], df[mask]]).reset_index(drop=True)
 
 
 def humanize_text(text: str, table: str = "expenditures", prose: bool = False) -> str:

@@ -118,7 +118,7 @@ MAX_DISPLAY_ROWS = 50
 TRUNCATION_COUNTS = "this table has {rows} rows"
 TRUNCATION_COUNTS_WITH_TOTALS = (
     "this table has {rows} rows, of which {entities} are data rows and the "
-    "rest are totals/subtotals"
+    "rest are totals/subtotals moved to the end"
 )
 
 TRUNCATION_NOTE = (
@@ -669,8 +669,21 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
     # Ordered here rather than at render time so the table, the chart and the
     # text the model interprets all see the same rows in the same order — the
     # summary should lead with the largest figure too.
-    from data_model import order_for_display
+    from data_model import order_for_display, infer_chart, drop_total_rows, totals_last
     result_df = order_for_display(result_df, sql)
+
+    # A ROLLUP total holds the largest number, so a DESC ranking hands it row
+    # one, where it reads as the biggest item rather than the sum of the rest.
+    # Moved to the end for every surface at once — the same frame feeds the
+    # table, the chart (which drops it) and the text the model interprets.
+    lbl = val = None
+    try:
+        _, lbl, val = infer_chart(result_df, sql)
+        if lbl and val:
+            result_df = totals_last(result_df, lbl, val)
+    except Exception:
+        pass
+
     result_str = result_df.to_string(index=False, max_rows=MAX_DISPLAY_ROWS)
     if len(result_df) > MAX_DISPLAY_ROWS:
         # How many rows are actual entities, excluding a ROLLUP grand total —
@@ -680,8 +693,6 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
         # avoid re-creating.
         entities = None
         try:
-            from data_model import infer_chart, drop_total_rows
-            _, lbl, val = infer_chart(result_df, sql)
             if lbl and val:
                 n_real = len(drop_total_rows(result_df, lbl, val))
                 if n_real != len(result_df):
