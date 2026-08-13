@@ -1868,6 +1868,36 @@ def test_contract_splitting_bullet_statistics_match_the_data(con):
 
 # ── Citations and legislative linkage ────────────────────────────────────────
 
+def _prompt_block(name: str) -> str:
+    """The text of one f-string prompt in app.py, not the whole file.
+
+    Both prompts live in the same module, so a substring check on the source
+    cannot tell which one carries a rule — and the reader-facing half of the
+    legislation rule landing in the SQL prompt, which is forbidden to emit
+    prose at all, is exactly how it reached nobody."""
+    src = _app_source()
+    start = src.index(f'{name} = f"""')
+    body = src[start + len(f'{name} = f"""'):]
+    return body[:body.index('"""')]
+
+
+def test_the_reader_facing_legislation_rule_is_in_the_prose_prompt():
+    """sql_system is told to return only SQL, so a rule about what to SAY has
+    no effect there. The answer the reader sees comes from interpret_system and
+    then the refiner."""
+    interp = _prompt_block("interpret_system")
+    sql_prompt = _prompt_block("sql_system")
+    assert "carry no legislative identifier" in interp, (
+        "the rule about what to tell the reader must be in the prose prompt")
+    assert "never suggest a question that searches for one" in interp.lower()
+    # The SQL prompt keeps only the half it can act on.
+    assert "Never filter on one" in sql_prompt
+    assert "carry no legislative identifier" not in sql_prompt
+    from analytics_agent import REFINE_SYSTEM_PROMPT
+    assert "cannot be linked to council" in REFINE_SYSTEM_PROMPT, (
+        "the refiner deletes unsupported claims, so it needs the allowance")
+
+
 def test_no_table_carries_a_legislation_identifier(con):
     """The prompt tells the model that expenditure rows have no link to council
     legislation. That claim has to stay true: asked how a resolution related to
@@ -1921,8 +1951,20 @@ def test_an_incidental_word_still_retrieves_an_unrelated_resolution(con):
         pytest.skip("no document corpus in this checkout")
     hits = rag.retrieve("what about the massive increase in 2025?", k=3,
                         db_path=db, min_score=3.0)
-    assert hits, "if this stops retrieving, the prompt's worked example is stale"
+    assert hits, "if this stops retrieving, the rule below is guarding nothing"
     top = hits[0]
-    assert "MASSIVE MILITARY ATTACK" in top["text"].upper()
-    assert 'a question about a "massive increase" retrieves a resolution about a '\
-           '"massive military attack"' in _app_source()
+    # The worked example lives HERE and in the commit message, never in the
+    # prompt: tests/test_prompt_lint.py exists because quoted failure text
+    # reads as a template, and this phrase would sit in the instructions
+    # beside the very document that supplies it.
+    assert top["file_no"] == "R-053-22"
+    assert "MILITARY ATTACK" in top["text"].upper()
+    # One shared adjective, nothing else, and it clears the floor on its own.
+    assert rag.retrieve("massive", k=1, db_path=db, min_score=3.0), (
+        "the single incidental token is what carries this above the floor")
+    assert not rag.retrieve("increase", k=1, db_path=db, min_score=3.0), (
+        "the on-topic word does not clear it")
+    # The rule is stated positively, without naming the phrase.
+    src = _app_source()
+    assert "a single adjective in common" in src
+    assert "is not a relationship" in src

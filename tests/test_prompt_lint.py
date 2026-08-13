@@ -16,6 +16,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PAST_OFFENDERS = [
     '"plus benefits"',
     "agency_canonical = 'Louisville Metro'",
+    # Not a leak yet — caught in review. A citation rule quoted the unrelated
+    # resolution title it was warning against, which is the same shape as the
+    # two above and sits in the prompt alongside the very document that
+    # supplies the phrase, so the model would have had both.
+    "massive military attack",
 ]
 
 # Everything whose text reaches a system prompt: the two prompt-building

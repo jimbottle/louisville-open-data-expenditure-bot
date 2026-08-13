@@ -539,6 +539,9 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       still come only from the results, and the bullet above still deletes
       them. Never introduce a citation the draft did not make, and never let a
       document change, explain away, or override a figure.
+    - KEEP a draft saying spending records cannot be linked to council
+      legislation; never cut it as jargon or swap it for the name of a
+      field that would hold the link.
     - NEVER total or net a long list yourself: arithmetic is only allowed
       over a handful of values you can verify digit by digit. If the results
       have no total row, do not state an overall total — describe individual
