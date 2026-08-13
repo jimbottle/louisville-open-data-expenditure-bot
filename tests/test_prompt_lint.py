@@ -31,11 +31,16 @@ PROMPT_SOURCES = ["app.py", "analytics_agent.py"] + sorted(
 
 
 def test_no_quoted_model_voice_anti_phrases_in_prompt_sources():
+    """Case-insensitive: the code-shaped entries have fixed casing, but a phrase
+    quoted out of a document does not. R-053-22's title is stored in the corpus
+    in capitals, so the likeliest reintroduction is a paste of
+    "RUSSIA'S MASSIVE MILITARY ATTACK" or a title-cased retelling — forms an
+    exact match would wave through while catching only the lowercase one."""
     assert any("city.yaml" in s for s in PROMPT_SOURCES)
     for fname in PROMPT_SOURCES:
-        src = open(os.path.join(REPO, fname)).read()
+        src = open(os.path.join(REPO, fname)).read().lower()
         for offender in PAST_OFFENDERS:
-            assert offender not in src, (
+            assert offender.lower() not in src, (
                 f"{fname} contains the quoted anti-phrase {offender!r} — state the "
                 "prohibition positively instead; models imitate quoted failure text"
             )
