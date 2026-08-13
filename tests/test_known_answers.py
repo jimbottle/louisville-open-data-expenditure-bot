@@ -1848,11 +1848,19 @@ def test_contract_splitting_bullet_statistics_match_the_data(con):
     assert over == 1241, f"prompt tells the model 1,241 invoices just over; got {over:,}"
 
     # The anti-pattern the bullet warns against, quoted with its own numbers.
-    assert "26,033 LG&E bills averaging $193 in one agency" in src
+    # The year has to be IN the sentence: unlabelled, it reads as a standing
+    # fact, and the all-time count for that payee and agency is 272,517 — an
+    # order of magnitude off what the model would be repeating.
+    assert "FY2025 has 26,033 LG&E bills averaging $193 in one agency" in src, (
+        "the LG&E figure must name its year, or the model states a one-year "
+        "count as though it were unbounded")
+    # Same filters the warned-against screen would use — is_data_artifact only.
+    # Adding is_offsetting/positive filters measures a different population than
+    # the claim describes, so the two could diverge with this test still green.
     n, avg = con.execute(
         "SELECT COUNT(*), ROUND(AVG(extended_amount), 2) FROM expenditures "
-        "WHERE fiscal_year = 2025 AND is_data_artifact = FALSE AND is_offsetting = FALSE "
-        "AND extended_amount > 0 AND payee_canonical = 'Louisville Gas & Electric Company' "
+        "WHERE fiscal_year = 2025 AND is_data_artifact = FALSE "
+        "AND payee_canonical = 'Louisville Gas & Electric Company' "
         "AND agency_canonical = 'Community Services & Revitalization'").fetchone()
     assert n == 26033, f"prompt tells the model 26,033 LG&E bills; got {n:,}"
     assert round(avg) == 193, f"prompt tells the model they average $193; got ${avg}"
