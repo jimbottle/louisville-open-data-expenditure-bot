@@ -1688,3 +1688,110 @@ def test_an_all_totals_truncated_result_does_not_claim_zero_data_rows():
     note = [ln for ln in s.splitlines() if ln.startswith("[TRUNCATED")][0]
     assert "0 are data rows" not in note, note
     assert "moved to the end" not in s
+
+
+# ── Starter-question queries the prompt prescribes verbatim ──────────────────
+#
+# Same contract as GRANT_ROLLUP_QUERY and the tech pair: pin the string in
+# app.py AND execute it. A prescribed query that stops matching the schema does
+# not fail loudly — the model faithfully reproduces broken SQL, and the
+# determinism these bullets exist to provide silently reverts.
+
+TOP_POSITIONS_QUERY = (
+    "SELECT job_title, department, ROUND(avg_total_comp, 2) AS avg_total_comp, "
+    "ROUND(max_total_comp, 2) AS max_total_comp, employee_count "
+    "FROM summary_top_salaries WHERE calendar_year = "
+    "(SELECT MAX(calendar_year) FROM summary_top_salaries) AND job_title IS NOT NULL "
+    "ORDER BY avg_total_comp DESC LIMIT 10"
+)
+
+VENDOR_BREADTH_QUERY = (
+    "SELECT payee_canonical, COUNT(DISTINCT agency_canonical) AS agency_count, "
+    "ROUND(SUM(extended_amount), 2) AS total_spend FROM expenditures "
+    "WHERE is_data_artifact = FALSE AND payee_canonical IS NOT NULL "
+    "GROUP BY payee_canonical ORDER BY agency_count DESC, total_spend DESC LIMIT 10"
+)
+
+SPLIT_SCREEN_QUERY = (
+    "SELECT payee_canonical, agency_canonical, COUNT(*) AS payments_just_under, "
+    "ROUND(SUM(invoice_amount), 2) AS total, ROUND(AVG(invoice_amount), 2) AS avg_invoice "
+    "FROM expenditures WHERE fiscal_year = {yr} AND is_data_artifact = FALSE "
+    "AND invoice_amount BETWEEN 4000 AND 4999.99 "
+    "GROUP BY payee_canonical, agency_canonical HAVING COUNT(*) >= 5 "
+    "ORDER BY payments_just_under DESC, total DESC LIMIT 25"
+)
+
+
+def test_top_positions_prompt_query_stays_valid(con):
+    """Ranked by AVERAGE, not max: max is one person's overtime, which reported
+    Police Officer — a title averaging ~$105k — as the highest paid position."""
+    assert TOP_POSITIONS_QUERY in _app_source(), (
+        "the prompt's copy-exact highest-paid-positions query no longer matches this test"
+    )
+    df = con.execute(TOP_POSITIONS_QUERY).fetchdf()
+    assert len(df) == 10, "the prescribed LIMIT keeps this chartable and untruncated"
+    assert df["avg_total_comp"].is_monotonic_decreasing
+    # max is per-title, so it can never sit below the average of the same title
+    assert (df["max_total_comp"] >= df["avg_total_comp"]).all()
+    assert df["avg_total_comp"].iloc[0] > 150_000
+    # ranking by max instead would return a materially different list
+    by_max = con.execute(
+        "SELECT job_title FROM summary_top_salaries WHERE calendar_year = "
+        "(SELECT MAX(calendar_year) FROM summary_top_salaries) AND job_title IS NOT NULL "
+        "ORDER BY max_total_comp DESC LIMIT 10").fetchdf()
+    assert df["job_title"].iloc[0] != by_max["job_title"].iloc[0], (
+        "if the two rankings ever agree this test has stopped proving anything")
+
+
+def test_vendor_breadth_prompt_query_beats_the_contractor_table(con):
+    """The bullet exists because summary_top_contractors keeps only vendors that
+    HAVE a registered agent, so answering breadth from it undercounts."""
+    assert VENDOR_BREADTH_QUERY in _app_source(), (
+        "the prompt's copy-exact vendor-breadth query no longer matches this test"
+    )
+    df = con.execute(VENDOR_BREADTH_QUERY).fetchdf()
+    assert len(df) == 10
+    assert df["agency_count"].is_monotonic_decreasing
+    assert df["agency_count"].iloc[0] > 10
+    filtered = con.execute(
+        "SELECT payee, agencies_served FROM summary_top_contractors "
+        "ORDER BY agencies_served DESC LIMIT 10").fetchdf()
+    # The undercount is the point: the filtered table misses vendors the full
+    # universe ranks above its own runner-up.
+    assert set(df["payee_canonical"]) - set(filtered["payee"]), (
+        "the agent-filtered table no longer omits anyone, so the bullet is moot")
+
+
+def test_contract_splitting_screen_stays_valid(con):
+    """A fixed screen so the same question does not return a different answer
+    each time. Bounded to the band just under the apparent $5,000 threshold."""
+    year = con.execute("SELECT MAX(fiscal_year) - 1 FROM expenditures").fetchone()[0]
+    assert SPLIT_SCREEN_QUERY.replace("{yr}", "{last_complete_year}") in _app_source(), (
+        "the prompt's copy-exact contract-splitting screen no longer matches this test"
+    )
+    df = con.execute(SPLIT_SCREEN_QUERY.format(yr=year)).fetchdf()
+    assert 0 < len(df) <= 25
+    assert (df["payments_just_under"] >= 5).all(), "the HAVING floor"
+    assert df["payments_just_under"].is_monotonic_decreasing
+    assert (df["avg_invoice"] >= 4000).all() and (df["avg_invoice"] < 5000).all(), (
+        "every row must sit in the band the screen claims to examine")
+    # The band is what makes this about procurement rather than utility billing.
+    over = con.execute(
+        "SELECT COUNT(*) FROM expenditures WHERE fiscal_year = ? AND is_data_artifact = FALSE "
+        "AND invoice_amount BETWEEN 5000 AND 5999.99", [year]).fetchone()[0]
+    under = con.execute(
+        "SELECT COUNT(*) FROM expenditures WHERE fiscal_year = ? AND is_data_artifact = FALSE "
+        "AND invoice_amount BETWEEN 4000 AND 4999.99", [year]).fetchone()[0]
+    assert under > over, (
+        "the prompt tells the model this band is busier than the one above the "
+        f"threshold; got {under} under vs {over} over")
+
+
+def test_prompt_job_title_literals_exist_in_the_data(con):
+    """`jobTitle = 'Mayor'` returning nothing after a data refresh would be
+    silent: the exact-match rule would just answer with an empty table."""
+    for title in ("Mayor", "Police Chief"):
+        n = con.execute(
+            "SELECT COUNT(*) FROM salary_data WHERE jobTitle = ? AND CalYear = "
+            "(SELECT MAX(CalYear) - 1 FROM salary_data)", [title]).fetchone()[0]
+        assert n > 0, f"prompt matches jobTitle {title!r} exactly, which has no rows"
