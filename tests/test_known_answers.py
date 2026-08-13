@@ -1864,3 +1864,65 @@ def test_contract_splitting_bullet_statistics_match_the_data(con):
         "AND agency_canonical = 'Community Services & Revitalization'").fetchone()
     assert n == 26033, f"prompt tells the model 26,033 LG&E bills; got {n:,}"
     assert round(avg) == 193, f"prompt tells the model they average $193; got ${avg}"
+
+
+# ── Citations and legislative linkage ────────────────────────────────────────
+
+def test_no_table_carries_a_legislation_identifier(con):
+    """The prompt tells the model that expenditure rows have no link to council
+    legislation. That claim has to stay true: asked how a resolution related to
+    LMPD spending, the model once answered that the identifiers live in a
+    "Resolution Number or Legislation Id" column and suggested two follow-up
+    queries against it. No such column exists in any table."""
+    src = _app_source()
+    assert "No table has a resolution, ordinance, legislation-id or matter column" in src
+    tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
+    banned = ("resolution", "legislat", "ordinance", "matter")
+    for table in tables:
+        cols = [r[0] for r in con.execute(f"DESCRIBE {table}").fetchall()]
+        hits = [c for c in cols if any(b in c.lower() for b in banned)]
+        assert not hits, (
+            f"{table} now has {hits} — the prompt tells the model no such column "
+            "exists, so either the rule or the data is wrong")
+
+
+def test_the_citation_rule_does_not_rest_on_the_retrieval_score(con):
+    """Retrieval score is a noise cutoff, not a relevance signal: measured,
+    off-topic questions outscore on-topic ones. The prompt must say so, or a
+    reader raises min_score to buy precision and loses real citations first."""
+    import rag
+    src = _app_source()
+    assert "The retrieval score carries NO relevance information" in src
+    assert "same agency, program or appropriation" in src, "the subject-matter test"
+
+    db = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "data", "rag_documents.duckdb")
+    if not os.path.exists(db):
+        pytest.skip("no document corpus in this checkout")
+    off = rag.retrieve("Which agencies have spent the most money across all fiscal years?",
+                       k=3, db_path=db, min_score=0.0)
+    on = rag.retrieve("What did the council fund with Neighborhood Development Funds?",
+                      k=3, db_path=db, min_score=0.0)
+    assert off and on
+    assert off[0]["score"] > on[0]["score"], (
+        "the premise of the prompt rule and the pack comment is that score does "
+        f"not track relevance; got off-topic {off[0]['score']:.2f} vs "
+        f"on-topic {on[0]['score']:.2f}")
+
+
+def test_an_incidental_word_still_retrieves_an_unrelated_resolution(con):
+    """The failure the citation rule is written against, pinned so the example in
+    the prompt stays real: 'massive increase' pulls a resolution about a
+    'massive military attack' on one shared word, above the noise floor."""
+    import rag
+    db = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                      "data", "rag_documents.duckdb")
+    if not os.path.exists(db):
+        pytest.skip("no document corpus in this checkout")
+    hits = rag.retrieve("what about the massive increase in 2025?", k=3,
+                        db_path=db, min_score=3.0)
+    assert hits, "if this stops retrieving, the prompt's worked example is stale"
+    top = hits[0]
+    assert "MASSIVE MILITARY ATTACK" in top["text"].upper()
+    assert 'a question about a "massive increase" retrieves a resolution about a '\
+           '"massive military attack"' in _app_source()

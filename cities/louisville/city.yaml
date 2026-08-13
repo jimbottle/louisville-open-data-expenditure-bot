@@ -79,9 +79,16 @@ rag:
   # Bare filename: resolved against DATA_DIR so the same pack works in a dev
   # checkout (./data) and in the container (/data).
   db: rag_documents.duckdb
-  # BM25 scores are poorly calibrated in absolute terms: real hits land ~5+,
-  # nonsense queries still reach ~2.5-2.9 on stray tokens. 3.0 is the measured
-  # junk floor for this corpus (docs/rag-spike.md §3).
+  # BM25 score is a cutoff for noise, NOT a relevance signal, and raising it
+  # will not buy precision. Measured 2026-08-13 across on- and off-topic
+  # questions: "which agencies have spent the most" scores 4.92 and "highest
+  # paid positions" 4.56 against legislation that explains neither, while a
+  # genuinely on-topic Neighborhood Development Fund question scores 3.07. The
+  # off-topic questions score HIGHER, so a higher floor drops real hits first.
+  # (An earlier note here claimed real hits land ~5+; that is not what the
+  # corpus does.) Relevance is decided downstream: the interpret prompt tells
+  # the model to judge each document on subject matter, and _cited_documents
+  # surfaces only the ones it actually named.
   min_score: 3.0
   k: 3
 
