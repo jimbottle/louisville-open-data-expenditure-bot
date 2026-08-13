@@ -1753,19 +1753,33 @@ def test_vendor_breadth_prompt_query_beats_the_contractor_table(con):
     assert len(df) == 10
     assert df["agency_count"].is_monotonic_decreasing
     assert df["agency_count"].iloc[0] > 10
-    filtered = con.execute(
-        "SELECT payee, agencies_served FROM summary_top_contractors "
-        "ORDER BY agencies_served DESC LIMIT 10").fetchdf()
-    # The undercount is the point: the filtered table misses vendors the full
-    # universe ranks above its own runner-up.
-    assert set(df["payee_canonical"]) - set(filtered["payee"]), (
+    # Compare against the table's ENTIRE payee set. Against its top 10 the set
+    # difference proves nothing: agencies_served is precomputed from
+    # contractor_profiles while agency_count is COUNT(DISTINCT agency_canonical)
+    # over artifact-filtered expenditures, so the two rankings would disagree
+    # even if the table covered every vendor.
+    filtered = set(con.execute(
+        "SELECT payee FROM summary_top_contractors").fetchdf()["payee"])
+    assert set(df["payee_canonical"]) - filtered, (
         "the agent-filtered table no longer omits anyone, so the bullet is moot")
+    # The bullet quotes these two to the model by name and agency count, so the
+    # claim has to keep being true.
+    for vendor, agencies in (("CINCINNATI COPIERS INC", 44), ("OFFICE DEPOT INC", 39)):
+        assert vendor not in filtered, f"prompt says {vendor} is missing from the table"
+        n = con.execute(
+            "SELECT COUNT(DISTINCT agency_canonical) FROM expenditures "
+            "WHERE payee_canonical = ? AND is_data_artifact = FALSE", [vendor]).fetchone()[0]
+        assert n == agencies, f"prompt tells the model {vendor} spans {agencies} agencies, got {n}"
 
 
 def test_contract_splitting_screen_stays_valid(con):
     """A fixed screen so the same question does not return a different answer
     each time. Bounded to the band just under the apparent $5,000 threshold."""
-    year = con.execute("SELECT MAX(fiscal_year) - 1 FROM expenditures").fetchone()[0]
+    # The year the prompt interpolates, not a recomputed one: last_complete_year
+    # is MAX-1 only while the newest year is partial, so a bare MAX-1 would
+    # diverge the moment a full year finishes loading.
+    from data_model import year_context
+    year = year_context(con, fy_start_month=7)["values"]["last_complete_year"]
     assert SPLIT_SCREEN_QUERY.replace("{yr}", "{last_complete_year}") in _app_source(), (
         "the prompt's copy-exact contract-splitting screen no longer matches this test"
     )
@@ -1789,9 +1803,20 @@ def test_contract_splitting_screen_stays_valid(con):
 
 def test_prompt_job_title_literals_exist_in_the_data(con):
     """`jobTitle = 'Mayor'` returning nothing after a data refresh would be
-    silent: the exact-match rule would just answer with an empty table."""
+    silent: the exact-match rule would just answer with an empty table.
+
+    Checked against the year the PROMPT names, read from year_context rather
+    than recomputed. A MAX-1 here would name a missing year the moment the
+    loaded CalYears gap, and then fail claiming the office was retitled."""
+    from data_model import year_context
+    yc = year_context(con, fy_start_month=7)
+    assert yc["salary"] is not None, "Louisville data should yield salary guidance"
+    year = yc["salary"]["last_complete_year"]
+    assert year is not None
     for title in ("Mayor", "Police Chief"):
         n = con.execute(
-            "SELECT COUNT(*) FROM salary_data WHERE jobTitle = ? AND CalYear = "
-            "(SELECT MAX(CalYear) - 1 FROM salary_data)", [title]).fetchone()[0]
-        assert n > 0, f"prompt matches jobTitle {title!r} exactly, which has no rows"
+            "SELECT COUNT(*) FROM salary_data WHERE jobTitle = ? AND CalYear = ?",
+            [title, year]).fetchone()[0]
+        assert n > 0, (
+            f"prompt matches jobTitle {title!r} exactly, which has no rows in "
+            f"CalYear {year}")
