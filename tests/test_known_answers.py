@@ -1820,3 +1820,39 @@ def test_prompt_job_title_literals_exist_in_the_data(con):
         assert n > 0, (
             f"prompt matches jobTitle {title!r} exactly, which has no rows in "
             f"CalYear {year}")
+
+
+def test_contract_splitting_bullet_statistics_match_the_data(con):
+    """The bullet quotes three figures to the model as its justification for the
+    band it prescribes. They are hard-coded and year-pinned, so they are checked
+    at the year the PROMPT names — the screen test's floating-year invariant
+    stops touching FY2025 the moment a later year completes, and these numbers
+    would then drift unnoticed while the model kept repeating them.
+
+    A data reload that moves any of these must edit app.py's bullet, not this
+    test's expectations."""
+    src = _app_source()
+    band = "The $4,000-$4,999.99 band sits just below an apparent $5,000 approval threshold"
+    assert band in src, "the contract-splitting rationale changed; re-check these figures"
+
+    def count(lo, hi):
+        return con.execute(
+            "SELECT COUNT(*) FROM expenditures WHERE fiscal_year = 2025 "
+            "AND is_data_artifact = FALSE AND invoice_amount BETWEEN ? AND ?",
+            [lo, hi]).fetchone()[0]
+
+    under, over = count(4000, 4999.99), count(5000, 5999.99)
+    assert "FY2025 has 1,838 invoices in that band against 1,241" in src, (
+        f"prompt quotes band counts that must match the data (now {under:,} / {over:,})")
+    assert under == 1838, f"prompt tells the model 1,838 invoices just under; got {under:,}"
+    assert over == 1241, f"prompt tells the model 1,241 invoices just over; got {over:,}"
+
+    # The anti-pattern the bullet warns against, quoted with its own numbers.
+    assert "26,033 LG&E bills averaging $193 in one agency" in src
+    n, avg = con.execute(
+        "SELECT COUNT(*), ROUND(AVG(extended_amount), 2) FROM expenditures "
+        "WHERE fiscal_year = 2025 AND is_data_artifact = FALSE AND is_offsetting = FALSE "
+        "AND extended_amount > 0 AND payee_canonical = 'Louisville Gas & Electric Company' "
+        "AND agency_canonical = 'Community Services & Revitalization'").fetchone()
+    assert n == 26033, f"prompt tells the model 26,033 LG&E bills; got {n:,}"
+    assert round(avg) == 193, f"prompt tells the model they average $193; got ${avg}"
