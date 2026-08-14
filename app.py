@@ -6,6 +6,7 @@ executes them against DuckDB, and streams interpreted results via SSE.
 """
 
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -45,7 +46,7 @@ except Exception as e:
     print(f"Warning: could not set up file logging: {e}")
 
 log = logging.getLogger("app")
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from analytics_agent import (
@@ -105,6 +106,26 @@ db_lock = threading.Lock()
 
 ip_requests: dict[str, list[float]] = {}
 IP_RPM_LIMIT = 5  # max requests per minute per IP
+
+
+def _client_ip(request: Request) -> str:
+    """The real client IP for rate limiting.
+
+    In production the path is Cloudflare -> cloudflared -> the container, so
+    request.client.host is always the Docker bridge gateway — bucketing EVERY
+    user under one key and turning the per-IP limit into a site-wide 5/min.
+    Cloudflare sets CF-Connecting-IP to the true client; trust it first, then a
+    forwarded header, then the peer. Dev/LAN requests (no proxy in front) carry
+    neither header and correctly fall back to the peer address.
+    """
+    cf = request.headers.get("cf-connecting-ip")
+    if cf:
+        return cf.strip()
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        # First hop is the origin client; the rest are proxies.
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def check_ip_rate_limit(ip: str) -> bool:
@@ -661,9 +682,33 @@ async def get_usage():
     return get_usage_summary()
 
 
+# The cache endpoints expose (GET) and mutate (DELETE) verbatim user questions.
+# They are operator-only (warm_cache.py / refresh_data.py), never called by the
+# frontend, so they require an admin token supplied via the X-Admin-Token
+# header. FAIL CLOSED: with no ADMIN_TOKEN configured the endpoints are
+# disabled entirely, so a deploy that forgets the secret cannot leave an open
+# door (the previous state — anyone could enumerate questions or wipe the
+# cache on a loop).
+ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
+
+
+def _require_admin(request: Request) -> JSONResponse | None:
+    """None if the request is an authorized admin, else a JSONResponse to return."""
+    if not ADMIN_TOKEN:
+        return JSONResponse({"error": "Admin endpoints are disabled (no ADMIN_TOKEN configured)."},
+                            status_code=503)
+    presented = request.headers.get("x-admin-token", "")
+    if not hmac.compare_digest(presented, ADMIN_TOKEN):
+        return JSONResponse({"error": "Unauthorized."}, status_code=401)
+    return None
+
+
 @app.get("/api/cache")
-async def get_cache_status():
-    """Show cached questions and whether they have valid responses."""
+async def get_cache_status(request: Request):
+    """Show cached questions and whether they have valid responses (admin only)."""
+    denied = _require_admin(request)
+    if denied is not None:
+        return denied
     status = {}
     for key, events in response_cache.items():
         has_interp = any('"type": "interpretation"' in e for e in events)
@@ -676,7 +721,10 @@ async def get_cache_status():
 
 @app.delete("/api/cache")
 async def clear_cache(request: Request):
-    """Clear specific or all cached responses. Pass {"question": "..."} to clear one, or no body to clear all."""
+    """Clear specific or all cached responses (admin only). Pass {"question": "..."} to clear one, or no body to clear all."""
+    denied = _require_admin(request)
+    if denied is not None:
+        return denied
     body = await request.json() if request.headers.get("content-type") == "application/json" else {}
     question = body.get("question", "").strip().lower()
     if question:
@@ -876,7 +924,7 @@ async def ask(request: Request):
     if not question:
         return _sse_message("error", "Please enter a question.")
 
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = _client_ip(request)
     if not check_ip_rate_limit(client_ip):
         log.warning("IP rate limited: %s", client_ip)
         return _sse_message("error", "That's a lot of questions in a short time. Please wait a few seconds, then ask again.")

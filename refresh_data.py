@@ -265,8 +265,13 @@ def main():
     # Also try to clear via API if the bot is running
     try:
         import requests
+        # /api/cache is admin-gated; send the operator token from the env.
+        headers = {}
+        token = os.environ.get("ADMIN_TOKEN", "")
+        if token:
+            headers["X-Admin-Token"] = token
         resp = requests.delete("http://localhost:8000/api/cache",
-                               json={}, timeout=5)
+                               json={}, timeout=5, headers=headers)
         if resp.status_code == 200:
             print("  Live bot cache also cleared via API")
     except Exception:

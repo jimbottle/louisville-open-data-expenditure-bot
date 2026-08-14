@@ -191,6 +191,31 @@ def test_per_ip_rate_limit_blocks_after_the_cap(client, monkeypatch):
     assert "lot of questions" in blocked[0]["content"].lower()
 
 
+def test_distinct_cf_connecting_ips_get_separate_buckets(client, monkeypatch):
+    """The per-IP limit must key on the real client (CF-Connecting-IP behind the
+    tunnel), not the shared peer address — otherwise it acts site-wide."""
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("x"))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("x"))
+
+    limit = app.IP_RPM_LIMIT
+    # Exhaust the peer bucket (no forwarded header) entirely.
+    for i in range(limit):
+        _post(client, f"a{i}", dev_mode=True)
+    # A forwarded client IP must still be served, not collateral-damaged.
+    b_ok = client.post("/api/ask", json={"question": "b first", "dev_mode": True},
+                       headers={"CF-Connecting-IP": "203.0.113.2"})
+    assert "error" not in _types(_events(b_ok))
+    # And user A (by header) is independently limited from user B.
+    for i in range(limit):
+        client.post("/api/ask", json={"question": f"aa{i}", "dev_mode": True},
+                    headers={"CF-Connecting-IP": "203.0.113.1"})
+    a_hdr_blocked = client.post("/api/ask", json={"question": "a hdr over", "dev_mode": True},
+                                headers={"CF-Connecting-IP": "203.0.113.1"})
+    assert _events(a_hdr_blocked)[0]["type"] == "error"
+
+
 # ── Cache write + replay ─────────────────────────────────────────────────────
 
 def test_answer_is_cached_and_replayed_without_a_second_llm_call(client, monkeypatch):
@@ -231,3 +256,30 @@ def test_dev_mode_answers_are_not_cached(client, monkeypatch):
     _events(_post(client, q, dev_mode=True))
     _events(_post(client, q, dev_mode=True))
     assert calls["n"] == 2, "dev_mode responses must never be cached"
+
+
+# ── Admin gate on the cache endpoints (5i8 / 1ls) ────────────────────────────
+
+def test_cache_endpoints_are_disabled_without_a_configured_token(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "ADMIN_TOKEN", "")
+    assert client.get("/api/cache").status_code == 503
+    assert client.delete("/api/cache").status_code == 503
+
+
+def test_cache_endpoints_reject_a_missing_or_wrong_token(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "ADMIN_TOKEN", "s3cret")
+    assert client.get("/api/cache").status_code == 401
+    assert client.get("/api/cache", headers={"X-Admin-Token": "nope"}).status_code == 401
+    assert client.delete("/api/cache", headers={"X-Admin-Token": "nope"}).status_code == 401
+
+
+def test_cache_endpoints_accept_the_correct_token(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "ADMIN_TOKEN", "s3cret")
+    ok = client.get("/api/cache", headers={"X-Admin-Token": "s3cret"})
+    assert ok.status_code == 200
+    assert "cache_version" in ok.json()
+    wiped = client.delete("/api/cache", headers={"X-Admin-Token": "s3cret"})
+    assert wiped.status_code == 200

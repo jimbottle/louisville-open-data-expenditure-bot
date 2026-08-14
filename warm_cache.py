@@ -8,6 +8,7 @@ Usage:
 """
 
 import argparse
+import os
 import requests
 import time
 
@@ -35,7 +36,13 @@ def fetch_entries(host: str) -> dict:
     cache while the live one is cold. Falls back to prefix-stripping only for
     servers too old to report cache_version.
     """
-    resp = requests.get(f"{host}/api/cache", timeout=10)
+    # /api/cache is admin-gated (it lists verbatim user questions); send the
+    # operator token from the environment.
+    headers = {}
+    token = os.environ.get("ADMIN_TOKEN", "")
+    if token:
+        headers["X-Admin-Token"] = token
+    resp = requests.get(f"{host}/api/cache", timeout=10, headers=headers)
     resp.raise_for_status()
     payload = resp.json()
     entries = payload.get("entries", {})
