@@ -226,15 +226,17 @@ summaries:
   - active_contractors
   sql: |-
     CREATE TABLE summary_agency_contractors AS
-    SELECT e.agency_canonical AS agency, COUNT(DISTINCT ac.FULLNAME) AS contractor_count,
+    SELECT e.agency_canonical AS agency, COUNT(DISTINCT ac.fullname) AS contractor_count,
            ROUND(SUM(e.extended_amount), 2) AS total_contractor_spend
     -- Dedupe to one row per business: active_contractors carries multiple
     -- license-category rows per FULLNAME, and joining the raw table fans each
     -- expenditure row out once per license, inflating total_contractor_spend
     -- (~$6.8M phantom spend measured FY22-24). contractor_count was already
-    -- COUNT(DISTINCT), so only the dollar sum was wrong.
-    FROM (SELECT DISTINCT FULLNAME FROM active_contractors WHERE FULLNAME IS NOT NULL) ac
-    JOIN expenditures e ON LOWER(e.payee) = LOWER(ac.FULLNAME)
+    -- COUNT(DISTINCT), so only the dollar sum was wrong. Dedupe on LOWER(FULLNAME)
+    -- — the SAME key the join uses — so two casings of one business (ACME INC /
+    -- Acme Inc) collapse to one row and cannot re-introduce the fan-out.
+    FROM (SELECT DISTINCT LOWER(FULLNAME) AS fullname FROM active_contractors WHERE FULLNAME IS NOT NULL) ac
+    JOIN expenditures e ON LOWER(e.payee) = ac.fullname
     WHERE e.is_data_artifact = FALSE
     GROUP BY e.agency_canonical
     ORDER BY contractor_count DESC

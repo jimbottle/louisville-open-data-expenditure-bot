@@ -1976,20 +1976,28 @@ def test_agency_contractor_spend_has_no_license_fanout(con):
     """total_contractor_spend must not multiply an expenditure by a business's
     number of license-category rows. active_contractors has duplicate FULLNAME
     rows; joining the raw table once inflated the sum (~$37M across all years).
-    The summary must equal a join against DISTINCT contractor names."""
+
+    The reference is a semi-join (EXISTS), which counts each expenditure row AT
+    MOST ONCE by construction — so it is immune to ANY join multiplicity,
+    including a case-variant duplicate the summary's own dedupe might miss. It
+    does NOT mirror the summary's query shape, so it can actually catch a
+    regression (the earlier version reused the same DISTINCT join and would have
+    fanned out in lockstep, hiding the bug)."""
     summary = con.execute(
         "SELECT ROUND(SUM(total_contractor_spend), 2) FROM summary_agency_contractors"
     ).fetchone()[0]
-    deduped = con.execute(
-        "SELECT ROUND(SUM(e.extended_amount), 2) "
-        "FROM (SELECT DISTINCT FULLNAME FROM active_contractors WHERE FULLNAME IS NOT NULL) ac "
-        "JOIN expenditures e ON LOWER(e.payee) = LOWER(ac.FULLNAME) "
-        "WHERE e.is_data_artifact = FALSE"
+    # Each contractor-matched expenditure row summed exactly once, whatever the
+    # contractor table's row multiplicity.
+    semijoin = con.execute(
+        "SELECT ROUND(SUM(e.extended_amount), 2) FROM expenditures e "
+        "WHERE e.is_data_artifact = FALSE AND e.agency_canonical IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM active_contractors ac "
+        "            WHERE ac.FULLNAME IS NOT NULL AND LOWER(ac.FULLNAME) = LOWER(e.payee))"
     ).fetchone()[0]
-    assert summary == pytest.approx(deduped, abs=1.0)
+    assert summary == pytest.approx(semijoin, abs=1.0)
 
-    # And the fix must actually differ from the buggy fan-out join, so this
-    # test cannot silently pass if the DISTINCT is dropped.
+    # And the fix must actually differ from the buggy raw-table join, so this
+    # test cannot silently pass if the dedupe is dropped.
     fanout = con.execute(
         "SELECT ROUND(SUM(e.extended_amount), 2) "
         "FROM active_contractors ac "
@@ -2017,11 +2025,23 @@ def test_sql_prompt_never_advertises_columns_the_loader_dropped(con):
     # and the prompt must explicitly mark those fields as absent.
     assert "are NOT columns in this table" in src
 
-    # Every column the prompt's unified/2018+ lists name must actually exist,
-    # so this catches a future edit that advertises a non-existent column.
-    for c in ["cost_center", "project", "program", "grant_", "financing_source",
-              "region", "fiscal_year", "extended_amount", "spend_category", "fund"]:
-        assert c in cols, f"prompt advertises {c} but it is not in the loaded table"
+    # Parse the columns the prompt actually ADVERTISES as existing — the
+    # "Every row has these columns: ..." list and the "additionally populates
+    # ..." list — straight out of the prompt text, and assert each exists in
+    # the loaded table. Driven by the prompt (not a frozen copy), so a future
+    # edit that adds a non-existent or misspelled column name to either list
+    # fails here — the exact drift this contract is meant to catch.
+    every = re.search(r"Every row has these columns:\s*([^.]+)\.", src)
+    populates = re.search(r"additionally populates\s+([^;]+);", src)
+    assert every and populates, "prompt no longer states its column lists in the expected form"
+    advertised = [c.strip() for grp in (every.group(1), populates.group(1))
+                  for c in grp.split(",") if c.strip()]
+    assert len(advertised) >= 15, "column-list parse looks wrong (too few names)"
+    for c in advertised:
+        assert c.lower() in cols, f"prompt advertises {c!r} but it is not a column in the loaded table"
+    # ...and none of the dropped names leaked back into those positive lists.
+    for c in dropped:
+        assert c not in advertised, f"dropped column {c!r} is advertised as existing again"
 
 
 # ── domain scoping against instruction injection (louisville-open-data-prk) ───

@@ -108,24 +108,31 @@ ip_requests: dict[str, list[float]] = {}
 IP_RPM_LIMIT = 5  # max requests per minute per IP
 
 
-def _client_ip(request: Request) -> str:
-    """The real client IP for rate limiting.
+# Peers whose forwarded client-IP headers we trust. In production the container
+# sits behind cloudflared on the same host, so the tunnel's peer address (the
+# Docker bridge gateway / loopback) is set here via TRUSTED_PROXY_IPS. A
+# forwarded header is honored ONLY when the immediate peer is in this set;
+# otherwise a client reaching the origin directly (the documented LAN dev port
+# 192.168.0.218:8000) could spoof CF-Connecting-IP per request to bypass the
+# limit and balloon ip_requests. Empty by default: with none configured we key
+# on the true peer, which is safe (never spoofable) though it buckets all
+# tunnel traffic together — so production MUST set TRUSTED_PROXY_IPS.
+TRUSTED_PROXY_IPS = {ip.strip() for ip in os.environ.get("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()}
 
-    In production the path is Cloudflare -> cloudflared -> the container, so
-    request.client.host is always the Docker bridge gateway — bucketing EVERY
-    user under one key and turning the per-IP limit into a site-wide 5/min.
-    Cloudflare sets CF-Connecting-IP to the true client; trust it first, then a
-    forwarded header, then the peer. Dev/LAN requests (no proxy in front) carry
-    neither header and correctly fall back to the peer address.
-    """
-    cf = request.headers.get("cf-connecting-ip")
-    if cf:
-        return cf.strip()
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        # First hop is the origin client; the rest are proxies.
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+
+def _client_ip(request: Request) -> str:
+    """The client IP for rate limiting: the forwarded client only when the
+    immediate peer is a trusted proxy, else the peer address itself."""
+    peer = request.client.host if request.client else "unknown"
+    if peer in TRUSTED_PROXY_IPS:
+        cf = request.headers.get("cf-connecting-ip")
+        if cf:
+            return cf.strip()
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            # First hop is the origin client; the rest are proxies.
+            return xff.split(",")[0].strip()
+    return peer
 
 
 def check_ip_rate_limit(ip: str) -> bool:
@@ -137,6 +144,13 @@ def check_ip_rate_limit(ip: str) -> bool:
     if len(ip_requests[ip]) >= IP_RPM_LIMIT:
         return False
     ip_requests[ip].append(now)
+    # Sweep buckets that have fully aged out so a header-rotating client (or
+    # simply many distinct visitors over time) cannot grow ip_requests without
+    # bound — the per-bucket pruning above only trims timestamps, never keys.
+    if len(ip_requests) > IP_RPM_LIMIT * 64:
+        for stale in [k for k, v in ip_requests.items()
+                      if k != ip and (not v or now - v[-1] >= 60)]:
+            del ip_requests[stale]
     return True
 
 # ── Persistent Stats ─────────────────────────────────────────────────────────
@@ -769,18 +783,32 @@ def _cache_key(question: str) -> str:
 
 # Cap the on-disk/in-memory response cache. Without a bound every unique
 # question is cached forever, growing the louisville-state volume and the
-# (admin-only) key listing unboundedly. dicts preserve insertion order, so
-# evicting the oldest key is FIFO — adequate here since the warm starter
-# answers are re-warmed after each deploy and never age out in practice.
+# (admin-only) key listing unboundedly. Eviction is LRU, NOT FIFO: the warm
+# starter answers are the highest-value entries but they are never re-inserted
+# between prompt changes (warm_cache skips already-cached keys, and the cache
+# volume survives deploys), so plain FIFO would evict exactly them first. LRU
+# keeps a key alive as long as it is being served (see _cache_touch on the hit
+# path). dicts preserve insertion order, so "oldest" == least-recently-inserted
+# -or-touched.
 MAX_CACHE_ENTRIES = int(os.environ.get("MAX_CACHE_ENTRIES", "500"))
 
 
-def _cache_put(key: str, events: list[str]) -> None:
-    """Insert into the response cache, evicting oldest entries past the cap."""
-    response_cache[key] = events
+def _evict_to_cap() -> None:
     while len(response_cache) > MAX_CACHE_ENTRIES:
-        oldest = next(iter(response_cache))
-        del response_cache[oldest]
+        del response_cache[next(iter(response_cache))]
+
+
+def _cache_put(key: str, events: list[str]) -> None:
+    """Insert (or refresh) a cache entry, evicting the least-recent past the cap."""
+    response_cache.pop(key, None)  # re-inserting moves the key to the end (MRU)
+    response_cache[key] = events
+    _evict_to_cap()
+
+
+def _cache_touch(key: str) -> None:
+    """Mark a cache hit as most-recently-used so replay protects it from eviction."""
+    if key in response_cache:
+        response_cache[key] = response_cache.pop(key)
 
 
 def _load_cache() -> dict[str, list[str]]:
@@ -802,6 +830,14 @@ def _load_cache() -> dict[str, list[str]]:
         del cache[k]
     if dead:
         log.info("Dropped %d cached answer(s) carrying dead citation links", len(dead))
+    # Enforce the cap from process start, not just on the first new insert: an
+    # already-oversized file (or a lowered MAX_CACHE_ENTRIES) must not stay over
+    # the bound until organic traffic happens to call _cache_put. Keep the
+    # newest entries (dict preserves insertion order).
+    if len(cache) > MAX_CACHE_ENTRIES:
+        trimmed = dict(list(cache.items())[-MAX_CACHE_ENTRIES:])
+        log.info("Trimmed cache on load: %d -> %d entries", len(cache), len(trimmed))
+        cache = trimmed
     return cache
 
 
@@ -950,8 +986,10 @@ async def ask(request: Request):
     cache_key = _cache_key(question)
     if cache_key in response_cache:
         log.info("Cache hit: %s", question[:50])
+        events = response_cache[cache_key]
+        _cache_touch(cache_key)  # LRU: a served answer must not age out
         def cached_stream():
-            for event in response_cache[cache_key]:
+            for event in events:
                 yield event
         return StreamingResponse(cached_stream(), media_type="text/event-stream")
 

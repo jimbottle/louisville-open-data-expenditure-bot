@@ -13,7 +13,8 @@ COPY analytics_agent.py app.py data_model.py city_config.py rag.py ./
 COPY cities/ cities/
 COPY static/ static/
 EXPOSE 8000
-# --proxy-headers + --forwarded-allow-ips: the container is reachable only via
-# the cloudflared tunnel, so trust the forwarded client address. The app also
-# reads CF-Connecting-IP directly (see _client_ip) for the per-IP rate limit.
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "30", "--timeout-graceful-shutdown", "30", "--proxy-headers", "--forwarded-allow-ips", "*"]
+# No --proxy-headers: request.client.host must stay the TRUE peer so _client_ip
+# can decide whether to trust a forwarded header (see TRUSTED_PROXY_IPS). Set
+# -e TRUSTED_PROXY_IPS=<tunnel peer / gateway> on the container so the per-IP
+# limit keys on CF-Connecting-IP for real tunnel traffic.
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "30", "--timeout-graceful-shutdown", "30"]

@@ -67,10 +67,17 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _fast_and_isolated(monkeypatch):
-    """No real sleeps; fresh rate-limit + cache state per test."""
+def _fast_and_isolated(monkeypatch, tmp_path):
+    """No real sleeps; fresh rate-limit + cache state per test; and — critically
+    — redirect the cache/stats persistence to a throwaway dir so `pytest` never
+    rewrites the developer's (or a configured STATS_DIR's) real on-disk
+    .response_cache.json / .stats.json with test fixtures. CACHE_FILE and
+    STATS_FILE are read at call time in _save_cache/_save_stats, so patching the
+    module globals is enough."""
     import app
     monkeypatch.setattr(app.time, "sleep", lambda *a, **k: None)
+    monkeypatch.setattr(app, "CACHE_FILE", str(tmp_path / "cache.json"))
+    monkeypatch.setattr(app, "STATS_FILE", str(tmp_path / "stats.json"))
     app.ip_requests.clear()
     app.response_cache.clear()
     yield
@@ -191,29 +198,49 @@ def test_per_ip_rate_limit_blocks_after_the_cap(client, monkeypatch):
     assert "lot of questions" in blocked[0]["content"].lower()
 
 
-def test_distinct_cf_connecting_ips_get_separate_buckets(client, monkeypatch):
-    """The per-IP limit must key on the real client (CF-Connecting-IP behind the
-    tunnel), not the shared peer address — otherwise it acts site-wide."""
+def test_distinct_cf_connecting_ips_get_separate_buckets_when_peer_is_trusted(client, monkeypatch):
+    """Behind a TRUSTED proxy, the limit keys on the real client (CF-Connecting-IP),
+    so distinct clients get independent buckets instead of one site-wide one."""
     import app
     monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
     monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("x"))
     monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("x"))
+    # TestClient's peer address is "testclient"; trust it so forwarded headers
+    # are honored (as the tunnel peer would be in production).
+    monkeypatch.setattr(app, "TRUSTED_PROXY_IPS", {"testclient"})
 
     limit = app.IP_RPM_LIMIT
-    # Exhaust the peer bucket (no forwarded header) entirely.
-    for i in range(limit):
-        _post(client, f"a{i}", dev_mode=True)
-    # A forwarded client IP must still be served, not collateral-damaged.
-    b_ok = client.post("/api/ask", json={"question": "b first", "dev_mode": True},
-                       headers={"CF-Connecting-IP": "203.0.113.2"})
-    assert "error" not in _types(_events(b_ok))
-    # And user A (by header) is independently limited from user B.
+    # Exhaust client A entirely (by forwarded IP).
     for i in range(limit):
         client.post("/api/ask", json={"question": f"aa{i}", "dev_mode": True},
                     headers={"CF-Connecting-IP": "203.0.113.1"})
-    a_hdr_blocked = client.post("/api/ask", json={"question": "a hdr over", "dev_mode": True},
-                                headers={"CF-Connecting-IP": "203.0.113.1"})
-    assert _events(a_hdr_blocked)[0]["type"] == "error"
+    a_blocked = client.post("/api/ask", json={"question": "a over", "dev_mode": True},
+                            headers={"CF-Connecting-IP": "203.0.113.1"})
+    assert _events(a_blocked)[0]["type"] == "error"
+    # A different forwarded client IP is unaffected.
+    b_ok = client.post("/api/ask", json={"question": "b first", "dev_mode": True},
+                       headers={"CF-Connecting-IP": "203.0.113.2"})
+    assert "error" not in _types(_events(b_ok))
+
+
+def test_forwarded_ip_headers_are_ignored_from_an_untrusted_peer(client, monkeypatch):
+    """A direct-to-origin client (peer not trusted) must NOT be able to spoof
+    CF-Connecting-IP to dodge the limit — all its requests key on the real peer."""
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("x"))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("x"))
+    monkeypatch.setattr(app, "TRUSTED_PROXY_IPS", set())  # nothing trusted
+
+    limit = app.IP_RPM_LIMIT
+    # Rotate a fresh fake IP every request; without trust they all share the
+    # peer bucket, so the cap still bites.
+    for i in range(limit):
+        client.post("/api/ask", json={"question": f"s{i}", "dev_mode": True},
+                    headers={"CF-Connecting-IP": f"198.51.100.{i}"})
+    spoofed = client.post("/api/ask", json={"question": "spoof over", "dev_mode": True},
+                          headers={"CF-Connecting-IP": "198.51.100.254"})
+    assert _events(spoofed)[0]["type"] == "error", "header rotation bypassed the limit"
 
 
 # ── Cache write + replay ─────────────────────────────────────────────────────

@@ -262,18 +262,26 @@ def main():
     else:
         print("\n  No response cache to clear")
 
-    # Also try to clear via API if the bot is running
+    # Also try to clear via API if the bot is running.
     try:
         import requests
         # /api/cache is admin-gated; send the operator token from the env.
-        headers = {}
         token = os.environ.get("ADMIN_TOKEN", "")
-        if token:
-            headers["X-Admin-Token"] = token
-        resp = requests.delete("http://localhost:8000/api/cache",
-                               json={}, timeout=5, headers=headers)
-        if resp.status_code == 200:
-            print("  Live bot cache also cleared via API")
+        if not token:
+            # Fail LOUD: the endpoint now rejects an un-tokened DELETE, so a
+            # silent skip here would leave the live bot serving answers from the
+            # OLD data with no warning.
+            print("  ⚠️  ADMIN_TOKEN not set — live bot cache NOT cleared via API. "
+                  "The running bot will keep serving stale answers until you set "
+                  "ADMIN_TOKEN and re-run, or restart the container.")
+        else:
+            resp = requests.delete("http://localhost:8000/api/cache",
+                                   json={}, timeout=5, headers={"X-Admin-Token": token})
+            if resp.status_code == 200:
+                print("  Live bot cache also cleared via API")
+            else:
+                print(f"  ⚠️  Live bot cache NOT cleared — API returned "
+                      f"{resp.status_code} (check ADMIN_TOKEN). Stale answers may persist.")
     except Exception:
         print("  Bot not running — cache file cleared, will take effect on next start")
 
