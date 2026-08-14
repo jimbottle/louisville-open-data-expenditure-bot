@@ -150,7 +150,11 @@ data_quality:
   table: expenditures
   amount_column: extended_amount
   offsetting:
-    group_key: invoice_number
+    # Composite key: invoice_number is not unique across payees, so a single
+    # column could net one vendor's payment against another's refund by
+    # coincidence. Group by payee too so only a true same-vendor reversal pair
+    # is flagged.
+    group_key: [payee, invoice_number]
     tolerance: 0.01
   artifact:
     group_key: invoice_number
@@ -186,7 +190,10 @@ summaries:
     SELECT payee_canonical AS payee, agency_canonical AS agency, invoice_amount, invoice_number,
            invoice_date, fiscal_year, expenditure_type, fund
     FROM expenditures
-    WHERE invoice_amount IS NOT NULL AND invoice_amount > 0 AND is_data_artifact = FALSE
+    -- Exclude offsetting rows too, not just artifacts: the positive half of a
+    -- net-zero reversal pair is not a genuine largest payment.
+    WHERE invoice_amount IS NOT NULL AND invoice_amount > 0
+      AND is_data_artifact = FALSE AND is_offsetting = FALSE
     ORDER BY invoice_amount DESC
 - table: summary_top_salaries
   question: What are the highest-paid job titles?

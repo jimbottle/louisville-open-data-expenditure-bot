@@ -37,6 +37,16 @@ def _sql_quote(s: str) -> str:
     return s.replace("'", "''")
 
 
+def _like_escape(s: str) -> str:
+    """Escape LIKE metacharacters so a prefix map key is matched literally.
+
+    A curated prefix key can legitimately contain % or _ (e.g. a vendor code);
+    without escaping, '%' is 'any run' and '_' is 'any char', so a prefix like
+    'A_B ' would match 'AXB ...' and silently merge unrelated payees. Use with
+    ESCAPE '\\'. Backslash is escaped first so it doesn't double-escape."""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _ident_quote(s: str) -> str:
     """Quote a SQL identifier (column name), escaping embedded double quotes."""
     return '"' + s.replace('"', '""') + '"'
@@ -52,6 +62,15 @@ def _source_files(source: dict, data_dir: str) -> list:
     import glob as _glob
     pattern = source["files"]
     if "years" in source:
+        # A years range with a {year}-less pattern would .format() to the SAME
+        # path every iteration and load one file once per year — N-fold totals,
+        # silently. That is a config error, not a load to attempt.
+        if "{year}" not in pattern:
+            raise ValueError(
+                f"source {source.get('id', pattern)!r} has a 'years' range but its "
+                f"'files' pattern {pattern!r} contains no '{{year}}' placeholder — "
+                "it would load the same file once per year and multiply the data."
+            )
         lo, hi = source["years"]
         files = []
         for year in range(lo, hi + 1):
@@ -157,9 +176,12 @@ def _apply_canonicalization(con, cfg: CityConfig) -> None:
             cases.append(f"WHEN {lhs} = '{key}' THEN '{_sql_quote(v)}'")
         prefix = cfg.load_map(spec["prefix_map"]) if spec.get("prefix_map") else {}
         for p, v in prefix.items():
-            key = _sql_quote(p.upper() if upper else p)
+            raw = p.upper() if upper else p
+            # LIKE-escape THEN quote: the literal prefix must match as text, with
+            # only the trailing % acting as a wildcard.
+            key = _sql_quote(_like_escape(raw))
             lhs = f"UPPER({src})" if upper else src
-            cases.append(f"WHEN {lhs} LIKE '{key}%' THEN '{_sql_quote(v)}'")
+            cases.append(f"WHEN {lhs} LIKE '{key}%' ESCAPE '\\' THEN '{_sql_quote(v)}'")
 
         # An unseeded (empty) map is a valid onboarding state: the canonical
         # column just mirrors the source column until curation fills the map.
@@ -184,32 +206,42 @@ def _apply_data_quality(con, cfg: CityConfig) -> None:
     table = dq.get("table", "expenditures")
     amount = dq["amount_column"]
 
+    # group_key may be a single column or a LIST of columns. A composite key
+    # (e.g. [payee, invoice_number]) is safer than invoice_number alone, which
+    # is not unique across payees: one vendor's payment could coincidentally
+    # match another vendor's refund by number and amount and wrongly net to zero.
+    def _key_sql(key):
+        cols = key if isinstance(key, list) else [key]
+        sel = ", ".join(cols)                       # for SELECT / GROUP BY
+        lhs = sel if len(cols) == 1 else f"({sel})"  # row-value for WHERE ... IN
+        return sel, lhs
+
     off = dq.get("offsetting")
     if off:
-        key = off["group_key"]
+        sel, lhs = _key_sql(off["group_key"])
         tol = off.get("tolerance", 0.01)
         con.execute(f"""
             ALTER TABLE {table} ADD COLUMN IF NOT EXISTS is_offsetting BOOLEAN DEFAULT FALSE;
             UPDATE {table} SET is_offsetting = TRUE
-            WHERE {key} IN (
-                SELECT {key} FROM {table}
+            WHERE {lhs} IN (
+                SELECT {sel} FROM {table}
                 WHERE {amount} IS NOT NULL
-                GROUP BY {key}
+                GROUP BY {sel}
                 HAVING ABS(SUM({amount})) < {tol} AND COUNT(*) > 1
             );
         """)
 
     art = dq.get("artifact")
     if art:
-        key = art["group_key"]
+        sel, lhs = _key_sql(art["group_key"])
         threshold = art["threshold"]
         con.execute(f"""
             ALTER TABLE {table} ADD COLUMN IF NOT EXISTS is_data_artifact BOOLEAN DEFAULT FALSE;
             UPDATE {table} SET is_data_artifact = TRUE
             WHERE ABS({amount}) > {threshold}
-            AND {key} IN (
-                SELECT {key} FROM {table}
-                GROUP BY {key}
+            AND {lhs} IN (
+                SELECT {sel} FROM {table}
+                GROUP BY {sel}
                 HAVING ABS(SUM({amount})) < ABS(MAX({amount}))
             );
         """)
@@ -313,17 +345,21 @@ def get_full_schema_description(con: duckdb.DuckDBPyConnection) -> str:
             if doc:
                 line += f": {doc}"
 
-            # Add sample values for string columns
+            # Add sample values for string columns. Column names are quoted
+            # (_ident_quote): a Socrata/CSV export column with a space or a
+            # reserved word would otherwise throw here, get swallowed by the bare
+            # except, and silently lose that column's enrichment with no log.
+            qcol = _ident_quote(col_name)
             if "VARCHAR" in col_type.upper():
                 try:
                     distincts = con.execute(
-                        f"SELECT DISTINCT {col_name} FROM {table} "
-                        f"WHERE {col_name} IS NOT NULL ORDER BY 1 LIMIT 5"
+                        f"SELECT DISTINCT {qcol} FROM {table} "
+                        f"WHERE {qcol} IS NOT NULL ORDER BY 1 LIMIT 5"
                     ).fetchall()
                     vals = [str(r[0]) for r in distincts]
                     if vals:
                         total_distinct = con.execute(
-                            f"SELECT COUNT(DISTINCT {col_name}) FROM {table}"
+                            f"SELECT COUNT(DISTINCT {qcol}) FROM {table}"
                         ).fetchone()[0]
                         line += f"  e.g. {', '.join(repr(v) for v in vals[:4])} [{total_distinct} distinct]"
                 except Exception:
@@ -331,7 +367,7 @@ def get_full_schema_description(con: duckdb.DuckDBPyConnection) -> str:
             elif "INT" in col_type.upper() or "DOUBLE" in col_type.upper():
                 try:
                     stats = con.execute(
-                        f"SELECT MIN({col_name}), MAX({col_name}) FROM {table}"
+                        f"SELECT MIN({qcol}), MAX({qcol}) FROM {table}"
                     ).fetchone()
                     line += f"  range: {stats[0]} to {stats[1]}"
                 except Exception:
@@ -378,10 +414,11 @@ def get_compact_schema_description(con: duckdb.DuckDBPyConnection) -> str:
         for col_name, col_type, *_ in columns:
             short_type = col_type.split("(")[0].lower()
             line = f"- {col_name} {short_type}"
+            qcol = _ident_quote(col_name)  # tolerate spaced/reserved column names
             if "VARCHAR" in col_type.upper():
                 try:
                     n_distinct = con.execute(
-                        f"SELECT COUNT(DISTINCT {col_name}) FROM {table}"
+                        f"SELECT COUNT(DISTINCT {qcol}) FROM {table}"
                     ).fetchone()[0]
                     # Enumerate only genuinely categorical columns the model
                     # filters on; high-cardinality ones (payees, etc.) are handled
@@ -394,8 +431,8 @@ def get_compact_schema_description(con: duckdb.DuckDBPyConnection) -> str:
                         # prompt-hash cache version) would differ per process.
                         vals = [
                             str(r[0]) for r in con.execute(
-                                f"SELECT DISTINCT {col_name} FROM {table} "
-                                f"WHERE {col_name} IS NOT NULL ORDER BY 1 LIMIT 12"
+                                f"SELECT DISTINCT {qcol} FROM {table} "
+                                f"WHERE {qcol} IS NOT NULL ORDER BY 1 LIMIT 12"
                             ).fetchall()
                         ]
                         if vals:

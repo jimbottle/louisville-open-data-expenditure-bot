@@ -2082,3 +2082,48 @@ def test_measure_kind_classifies_currency_vs_count():
     assert measure_kind("cnt", pd.Series([1, 2, 3])) == "count"
     # An unnamed float measure defaults to currency.
     assert measure_kind("x", pd.Series([1.5, 2.5])) == "currency"
+
+
+# ── latent data-integrity hardening (louisville-open-data-wyv) ────────────────
+
+def test_like_escape_neutralizes_wildcards():
+    from data_model import _like_escape
+    assert _like_escape("A_B") == r"A\_B"
+    assert _like_escape("50%") == r"50\%"
+    assert _like_escape("a\\b") == "a\\\\b"
+    assert _like_escape("plain") == "plain"  # untouched when no metacharacters
+
+
+def test_source_files_rejects_years_range_without_year_placeholder():
+    import pytest
+    from data_model import _source_files
+    # A years range with a {year}-less pattern would multiply the data N-fold.
+    with pytest.raises(ValueError, match="year"):
+        _source_files({"id": "bad", "files": "static.csv", "years": [2020, 2022]}, ".")
+
+
+def test_offsetting_groups_are_same_payee_net_zero(con):
+    """The composite offsetting key ([payee, invoice_number]) must only flag true
+    same-vendor reversal pairs: every flagged group shares one payee+invoice,
+    has >1 row, and nets to ~0. A single-column key could net one vendor's
+    payment against another's refund by coincidence."""
+    violations = con.execute(
+        "SELECT COUNT(*) FROM ("
+        "  SELECT payee, invoice_number FROM expenditures WHERE is_offsetting "
+        "  GROUP BY payee, invoice_number "
+        "  HAVING ABS(SUM(extended_amount)) >= 0.01 OR COUNT(*) <= 1"
+        ")"
+    ).fetchone()[0]
+    assert violations == 0
+
+
+def test_largest_payments_excludes_offsetting_rows(con):
+    """summary_largest_payments must exclude offsetting rows, not just artifacts:
+    the positive half of a net-zero reversal is not a genuine largest payment."""
+    leaked = con.execute(
+        "SELECT COUNT(*) FROM summary_largest_payments lp "
+        "WHERE EXISTS (SELECT 1 FROM expenditures e "
+        "  WHERE e.is_offsetting AND e.invoice_number = lp.invoice_number "
+        "  AND e.invoice_amount = lp.invoice_amount)"
+    ).fetchone()[0]
+    assert leaked == 0
