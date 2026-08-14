@@ -195,6 +195,43 @@ def reload_graph(neo4j_uri, neo4j_password, data_dir):
     )
 
 
+def clear_response_cache(data_dir):
+    """Invalidate cached answers after a refresh — the data changed underneath
+    them. Runs on EVERY successful pull path, including --pull-only: a pull-only
+    refresh changes the data just as much, so skipping this leaves the bot
+    replaying answers computed from the old CSVs."""
+    stats_dir = os.environ.get("STATS_DIR", data_dir)
+    cache_file = os.path.join(stats_dir, ".response_cache.json")
+    if os.path.exists(cache_file):
+        os.remove(cache_file)
+        print("\n  Response cache cleared (data changed, cached answers invalidated)")
+    else:
+        print("\n  No response cache to clear")
+
+    # Also try to clear via API if the bot is running.
+    try:
+        import requests
+        # /api/cache is admin-gated; send the operator token from the env.
+        token = os.environ.get("ADMIN_TOKEN", "")
+        if not token:
+            # Fail LOUD: the endpoint now rejects an un-tokened DELETE, so a
+            # silent skip here would leave the live bot serving answers from the
+            # OLD data with no warning.
+            print("  ⚠️  ADMIN_TOKEN not set — live bot cache NOT cleared via API. "
+                  "The running bot will keep serving stale answers until you set "
+                  "ADMIN_TOKEN and re-run, or restart the container.")
+        else:
+            resp = requests.delete("http://localhost:8000/api/cache",
+                                   json={}, timeout=5, headers={"X-Admin-Token": token})
+            if resp.status_code == 200:
+                print("  Live bot cache also cleared via API")
+            else:
+                print(f"  ⚠️  Live bot cache NOT cleared — API returned "
+                      f"{resp.status_code} (check ADMIN_TOKEN). Stale answers may persist.")
+    except Exception:
+        print("  Bot not running — cache file cleared, will take effect on next start")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Refresh all Louisville Open Data datasets and rebuild derived data.",
@@ -226,6 +263,9 @@ def main():
             success = pull_datasets(args.data_dir) and success
 
         if args.pull_only:
+            # The data changed, so the cache is stale even though we skip the
+            # downstream rebuild steps — invalidate it before returning.
+            clear_response_cache(args.data_dir)
             elapsed = time.time() - start
             print(f"\nData pull complete in {elapsed / 60:.1f} minutes.")
             return
@@ -253,37 +293,8 @@ def main():
         print(f"  REFRESH COMPLETED WITH ERRORS in {elapsed / 60:.1f} minutes")
     print(f"{'=' * 60}")
 
-    # Clear response cache — data changed, cached answers are stale
-    stats_dir = os.environ.get("STATS_DIR", args.data_dir)
-    cache_file = os.path.join(stats_dir, ".response_cache.json")
-    if os.path.exists(cache_file):
-        os.remove(cache_file)
-        print("\n  Response cache cleared (data changed, cached answers invalidated)")
-    else:
-        print("\n  No response cache to clear")
-
-    # Also try to clear via API if the bot is running.
-    try:
-        import requests
-        # /api/cache is admin-gated; send the operator token from the env.
-        token = os.environ.get("ADMIN_TOKEN", "")
-        if not token:
-            # Fail LOUD: the endpoint now rejects an un-tokened DELETE, so a
-            # silent skip here would leave the live bot serving answers from the
-            # OLD data with no warning.
-            print("  ⚠️  ADMIN_TOKEN not set — live bot cache NOT cleared via API. "
-                  "The running bot will keep serving stale answers until you set "
-                  "ADMIN_TOKEN and re-run, or restart the container.")
-        else:
-            resp = requests.delete("http://localhost:8000/api/cache",
-                                   json={}, timeout=5, headers={"X-Admin-Token": token})
-            if resp.status_code == 200:
-                print("  Live bot cache also cleared via API")
-            else:
-                print(f"  ⚠️  Live bot cache NOT cleared — API returned "
-                      f"{resp.status_code} (check ADMIN_TOKEN). Stale answers may persist.")
-    except Exception:
-        print("  Bot not running — cache file cleared, will take effect on next start")
+    # Clear response cache — data changed, cached answers are stale.
+    clear_response_cache(args.data_dir)
 
     # Print summary of data files
     csv_count = len([f for f in os.listdir(args.data_dir) if f.endswith(".csv")])
