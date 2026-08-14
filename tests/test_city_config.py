@@ -265,3 +265,21 @@ def test_the_processing_indicator_survives_the_first_content():
     clear_waiting = html[html.index("const clearWaiting = () => {"):]
     assert "clearProcessing" not in clear_waiting[:clear_waiting.index("};")], \
         "clearWaiting runs when the first content arrives — too early"
+
+
+# ── chart failures must not abort the answer (louisville-open-data-06t) ───────
+
+def test_chart_rendering_is_isolated_from_the_stream_loop():
+    """A chart-render throw (Chart.js blocked by an ad/privacy blocker, offline
+    CDN, or a render error) must NOT bubble to the SSE loop's outer catch, which
+    would abort the read and drop the interpretation the backend sends after the
+    chart. The chart block must guard for Chart being undefined and wrap
+    rendering in its own try/catch."""
+    html = open(os.path.join(REPO, "static", "index.html")).read()
+    chart_block = html[html.index("event.type === 'chart'"):html.index("event.type === 'interpretation'")]
+    # Guards Chart.js being unavailable and contains its own try + catch.
+    assert "typeof Chart === 'undefined'" in chart_block
+    assert "try {" in chart_block
+    assert "catch (chartErr)" in chart_block
+    # The new Chart(...) call sits inside that try, before the catch.
+    assert chart_block.index("new Chart(") < chart_block.index("catch (chartErr)")

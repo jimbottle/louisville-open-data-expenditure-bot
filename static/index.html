@@ -1323,7 +1323,15 @@ async function streamAnswer(question, opts = {}) {
         }
 
         else if (event.type === 'chart') {
-          const chartDiv = document.createElement('div');
+          // Isolate chart rendering. A failure here — Chart.js blocked by an
+          // ad/privacy blocker (so `Chart` is undefined), an offline CDN, or a
+          // render throw — must NOT bubble to the stream's outer catch, which
+          // would abort the read loop and drop the interpretation the backend
+          // streams AFTER the chart. A missing chart is fine; a lost answer is not.
+          let chartDiv = null;
+          try {
+          if (typeof Chart === 'undefined') throw new Error('Chart.js unavailable');
+          chartDiv = document.createElement('div');
           chartDiv.className = 'chart-block';
           const canvas = document.createElement('canvas');
           // Text alternative for screen readers (the canvas itself is opaque to
@@ -1379,6 +1387,12 @@ async function streamAnswer(question, opts = {}) {
               },
             }
           });
+          } catch (chartErr) {
+            // Degrade to a chartless answer: drop any half-built chart box and
+            // keep processing the rest of the stream (interpretation, sources).
+            console.warn('Chart render skipped:', chartErr && chartErr.message ? chartErr.message : chartErr);
+            if (chartDiv && chartDiv.parentNode) chartDiv.parentNode.removeChild(chartDiv);
+          }
         }
 
         else if (event.type === 'interpretation') {
