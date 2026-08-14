@@ -1987,10 +1987,14 @@ def test_agency_contractor_spend_has_no_license_fanout(con):
         "SELECT ROUND(SUM(total_contractor_spend), 2) FROM summary_agency_contractors"
     ).fetchone()[0]
     # Each contractor-matched expenditure row summed exactly once, whatever the
-    # contractor table's row multiplicity.
+    # contractor table's row multiplicity. NO agency_canonical filter here: the
+    # summary GROUP BY agency_canonical keeps a NULL-agency group, so its spend
+    # IS in SUM(total_contractor_spend); filtering NULL agencies out of the
+    # reference would make it disagree with a correct summary the moment a
+    # NULL-agency contractor row ships.
     semijoin = con.execute(
         "SELECT ROUND(SUM(e.extended_amount), 2) FROM expenditures e "
-        "WHERE e.is_data_artifact = FALSE AND e.agency_canonical IS NOT NULL "
+        "WHERE e.is_data_artifact = FALSE "
         "AND EXISTS (SELECT 1 FROM active_contractors ac "
         "            WHERE ac.FULLNAME IS NOT NULL AND LOWER(ac.FULLNAME) = LOWER(e.payee))"
     ).fetchone()[0]

@@ -88,16 +88,28 @@ docker build -t louisville-bot:new /Users/macserver/projects/louisville-open-dat
 # 3. Swap reversibly (keep the old container for rollback)
 docker rename louisville-bot louisville-bot-prev
 docker stop louisville-bot-prev
+# TRUSTED_PROXY_IPS: the bridge-gateway IP the tunnel's requests arrive from.
+# REQUIRED — without it the per-IP rate limit keys on that single peer and acts
+# site-wide (5/min for ALL users). Find it: docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'  (usually 172.17.0.1).
+# ADMIN_TOKEN: any long random secret; gates /api/cache (warm_cache.py and
+# refresh_data.py must be run with the same ADMIN_TOKEN in their env).
 docker run -d --name louisville-bot --restart unless-stopped -p 8000:8000 \
   -v louisville-data:/data:ro -v louisville-state:/state -v louisville-logs:/logs \
   -e CEREBRAS_API_KEY=... -e CEREBRAS_PAID_API_KEY=... -e MODEL=gpt-oss-120b \
   -e LLM_BASE_URL=https://api.cerebras.ai/v1 -e DATA_DIR=/data -e STATS_DIR=/state -e LOG_DIR=/logs \
+  -e TRUSTED_PROXY_IPS=172.17.0.1 -e ADMIN_TOKEN=... \
   --health-cmd "curl -sf --max-time 5 http://localhost:8000/api/health || exit 1" \
   --health-interval 30s --health-start-period 600s --health-retries 3 \
   louisville-bot:new
 docker tag louisville-bot:new louisville-bot:latest
 # Rollback: docker stop louisville-bot; docker rm louisville-bot; docker rename louisville-bot-prev louisville-bot; docker start louisville-bot
 ```
+
+> ⚠️ **Set `TRUSTED_PROXY_IPS`** to the Docker bridge gateway (the peer the
+> cloudflared tunnel reaches the container from). It is unset by default and the
+> app logs a warning at startup when missing; without it the per-IP rate limit
+> collapses to a single site-wide bucket. Verify the gateway with
+> `docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'`.
 
 > ⚠️ **Keep `--health-start-period` at 600s.** Cold start (CSVs → DuckDB → RAG corpus →
 > response cache) can exceed 4 minutes under host load. It was 120s, so health checks

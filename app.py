@@ -608,6 +608,18 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
         log.info("Model: %s (free tier only)", MODEL)
     log.info("Logs writing to: %s", LOG_DIR)
 
+    # A deploy that forgets TRUSTED_PROXY_IPS silently collapses the per-IP rate
+    # limit to one site-wide bucket behind the tunnel (every request shares the
+    # bridge-gateway peer). Make that misconfiguration loud, not silent.
+    if not TRUSTED_PROXY_IPS:
+        log.warning("TRUSTED_PROXY_IPS is unset — forwarded client-IP headers "
+                    "are not trusted, so ALL proxied traffic shares ONE rate-limit "
+                    "bucket (the per-IP %d/min limit acts site-wide). Set "
+                    "-e TRUSTED_PROXY_IPS=<bridge gateway IP> in production.",
+                    IP_RPM_LIMIT)
+    else:
+        log.info("Trusted proxy peers for rate limiting: %s", ", ".join(sorted(TRUSTED_PROXY_IPS)))
+
 
 # ── Routes ───────────────────────────────────────────────────────────────────
 
