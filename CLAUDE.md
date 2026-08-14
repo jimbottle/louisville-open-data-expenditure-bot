@@ -134,7 +134,7 @@ A deploy is not "done" until it is tested **end-to-end through the production UR
 
 Persistent state lives in Docker named volumes, not the image: `louisville-data` (CSVs, read-only at `/data`), `louisville-state` (`.stats.json`, response cache), `louisville-logs` (rotating logs). Env (incl. the Cerebras keys) is set on the container, sourced from the gitignored `.env` locally; the keys are not in git.
 
-The repo's `docker-compose.yml` and `deploy.sh` describe an **older** flow (bind-mounted `./data`, `DATA_DIR=/app/data`, SSH rsync) that does **not** match the current production container (named volumes at `/data`,`/state`,`/logs`; deployed via the MCP Docker flow above). Trust the running container's config over those files.
+The old `docker-compose.yml` and `deploy.sh` were **removed** (they described a superseded SSH-rsync flow that leaked `.env` and carried the 45s health `start_period` that caused the 2026-08-11 outage). The authoritative deploy is the MCP Docker flow above; there is no compose/rsync path.
 
 ### LLM model (`MODEL` env)
 
@@ -163,7 +163,7 @@ uvicorn app:app --host 127.0.0.1 --port 8000
 - **`app.py`** — FastAPI backend. Serves the static frontend AND the `/api/ask` SSE endpoint (same origin). Translates NL → SQL via an OpenAI-compatible client (Cerebras), runs it on DuckDB, streams an interpretation. Per-IP rate limit (5/min), persistent stats + response cache, structured SSE events (`status`, `reasoning`, `sql`, `results`, `chart`, `interpretation`, `log`, `debug`, `usage`, `error`, `info`, `done`).
 - **`analytics_agent.py`** — LLM calls (reason → generate SQL → interpret), retry/fallback (free → paid Cerebras), SQL safety guard.
 - **`data_model.py`** — generic city data engine: loads CSVs into DuckDB, builds `*_canonical` columns + summary tables, flags offsetting/artifact rows — all driven by a city config pack. Nothing city-specific lives here.
-- **`city_config.py`** + **`cities/<city>/city.yaml`** — city config packs (sources/era mappings, canonical map CSVs, data-quality params, summary SQL, data dictionary). `CITY_CONFIG` env var selects the pack (default: Louisville). Format documented in `docs/canonical-model.md`; `cities/cincinnati/` and `cities/kansas_city/` are paper configs (not yet runnable).
+- **`city_config.py`** + **`cities/<city>/city.yaml`** — city config packs (sources/era mappings, canonical map CSVs, data-quality params, summary SQL, data dictionary). `CITY_CONFIG` env var selects the pack (default: Louisville). Format documented in `docs/canonical-model.md`. `cities/cincinnati/` is a **runnable** second-city pack (loads with `CITY_CONFIG=cities/cincinnati/city.yaml DATA_DIR=data_cincinnati`); `cities/kansas_city/` is still a paper config (not yet runnable).
 - **`static/index.html`** — single-page chat UI (vanilla JS, inline CSS, Chart.js). Self-contained; talks to `/api/ask`.
 - **`tests/test_known_answers.py`** — known-answer + invariant suite.
 

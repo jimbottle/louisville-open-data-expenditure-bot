@@ -305,3 +305,23 @@ def test_retry_supersedes_the_active_stream_no_concurrent_streams():
     # Teardown is guarded by controller identity so a superseded stream is inert.
     assert "ownsLifecycle = (activeController === controller)" in fn
     assert "if (!ownsLifecycle) return;" in fn
+
+
+def test_frontend_has_no_external_cdn_and_ships_a_csp():
+    """Chart.js is self-hosted and a CSP forbids external origins (e8d):
+    a compromised CDN can no longer inject or exfiltrate."""
+    html = open(os.path.join(REPO, "static", "index.html")).read()
+    assert "cdn.jsdelivr.net" not in html, "still loading Chart.js from a third-party CDN"
+    assert "/static/vendor/chart.umd.min.js" in html, "Chart.js is not self-hosted"
+    assert "Content-Security-Policy" in html
+    assert "default-src 'self'" in html
+    # The vendored file must actually exist.
+    assert os.path.exists(os.path.join(REPO, "static", "vendor", "chart.umd.min.js"))
+
+
+def test_vendored_chartjs_is_served(monkeypatch):
+    from fastapi.testclient import TestClient
+    import app
+    r = TestClient(app.app).get("/static/vendor/chart.umd.min.js")
+    assert r.status_code == 200
+    assert "Chart" in r.text[:5000] or "chart" in r.text[:5000].lower()

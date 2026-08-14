@@ -3,9 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Content Security Policy: no external origins. Chart.js is self-hosted (see
+     below), the API is same-origin, and inline script/style are the app's own,
+     so a compromised third-party CDN can no longer inject or exfiltrate. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
 <title>Lou · Louisville Metro open data</title>
-<!-- defer: charts aren't needed for first paint and new Chart() only runs on a chart event -->
-<script defer src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<!-- defer: charts aren't needed for first paint and new Chart() only runs on a
+     chart event. Self-hosted (not a CDN) so an ad/privacy blocker or a jsdelivr
+     compromise can't break or tamper with charts. -->
+<script defer src="/static/vendor/chart.umd.min.js"></script>
 <style>
   :root {
     /* Neutrals are tinted very slightly toward the civic-blue hue rather than pure gray. */
