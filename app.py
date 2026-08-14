@@ -767,6 +767,22 @@ def _cache_key(question: str) -> str:
     return f"{CACHE_VERSION}:{question.lower().strip()}"
 
 
+# Cap the on-disk/in-memory response cache. Without a bound every unique
+# question is cached forever, growing the louisville-state volume and the
+# (admin-only) key listing unboundedly. dicts preserve insertion order, so
+# evicting the oldest key is FIFO — adequate here since the warm starter
+# answers are re-warmed after each deploy and never age out in practice.
+MAX_CACHE_ENTRIES = int(os.environ.get("MAX_CACHE_ENTRIES", "500"))
+
+
+def _cache_put(key: str, events: list[str]) -> None:
+    """Insert into the response cache, evicting oldest entries past the cap."""
+    response_cache[key] = events
+    while len(response_cache) > MAX_CACHE_ENTRIES:
+        oldest = next(iter(response_cache))
+        del response_cache[oldest]
+
+
 def _load_cache() -> dict[str, list[str]]:
     """Load cache from disk, dropping entries that would replay a dead link.
 
@@ -1275,7 +1291,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
             has_error = any('"type": "error"' in e for e in cache_events)
             has_truncation = any("Response truncated" in e for e in cache_events)
             if has_interpretation and not has_error and not has_truncation:
-                response_cache[cache_key] = cache_events
+                _cache_put(cache_key, cache_events)
                 _save_cache()
                 log.info("Cached response for: %s", question[:50])
             else:

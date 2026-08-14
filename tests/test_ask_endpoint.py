@@ -283,3 +283,21 @@ def test_cache_endpoints_accept_the_correct_token(client, monkeypatch):
     assert "cache_version" in ok.json()
     wiped = client.delete("/api/cache", headers={"X-Admin-Token": "s3cret"})
     assert wiped.status_code == 200
+
+
+# ── Response cache is bounded (louisville-open-data-vbv) ──────────────────────
+
+def test_response_cache_evicts_oldest_past_the_cap(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("body"))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("body"))
+    monkeypatch.setattr(app, "MAX_CACHE_ENTRIES", 3)
+    # Rate limit would block after IP_RPM_LIMIT, so drive _cache_put directly
+    # with the same event shape the ask path produces.
+    frames = ['data: {"type": "interpretation", "content": "x"}\n\n']
+    for i in range(5):
+        app._cache_put(f"{app.CACHE_VERSION}:q{i}", list(frames))
+    assert len(app.response_cache) == 3, "cache must not grow past MAX_CACHE_ENTRIES"
+    # FIFO: the three most-recently inserted survive.
+    assert set(app.response_cache) == {f"{app.CACHE_VERSION}:q{i}" for i in (2, 3, 4)}
