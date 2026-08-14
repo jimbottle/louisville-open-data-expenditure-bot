@@ -283,3 +283,13 @@ def test_chart_rendering_is_isolated_from_the_stream_loop():
     assert "catch (chartErr)" in chart_block
     # The new Chart(...) call sits inside that try, before the catch.
     assert chart_block.index("new Chart(") < chart_block.index("catch (chartErr)")
+
+
+def test_chart_y_axis_respects_value_kind():
+    """The y-axis must not prefix $ on count measures (louisville-open-data-jin):
+    a 'how many employees' chart shows 1,500, not $1.5K."""
+    html = open(os.path.join(REPO, "static", "index.html")).read()
+    assert "event.value_kind" in html, "y-axis formatter ignores the value_kind flag"
+    # The $ prefix is conditional on the measure being currency, not hardcoded.
+    axis = html[html.index("value_kind !== 'count'"):]
+    assert "money ?" in axis[:400]

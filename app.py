@@ -76,6 +76,7 @@ from data_model import (
     get_full_schema_description,
     humanize_text,
     infer_chart,
+    measure_kind,
     chart_window,
     load_all_data,
     year_context,
@@ -1154,12 +1155,17 @@ async def ask(request: Request):
                     labels = chart_df[label_col].astype(str).tolist()
                     values = chart_df[value_col].tolist()
                     label_axis = humanize_text(label_col)
+                    # Currency vs count, so the y-axis renders "1,500" (employees)
+                    # rather than "$1.5K". Computed from the value column, not
+                    # assumed to be dollars.
+                    value_kind = measure_kind(value_col, chart_df[value_col])
                     yield send("chart", {
                         "chart_type": chart_type,
                         "labels": labels,
                         "values": [float(v) if v == v else 0 for v in values],
                         "title": title,
                         "label_axis": label_axis,
+                        "value_kind": value_kind,
                     })
                 except Exception as e:
                     log.warning("Chart generation failed: %s", e)

@@ -424,6 +424,33 @@ CHART_MAX_ROWS = 300
 CHART_TIME_KEYWORDS = ("year", "fiscal", "month", "date")
 CHART_LABEL_KEYWORDS = CHART_TIME_KEYWORDS + ("name", "agency", "payee", "type", "category", "fund")
 
+# Whether a chart's y-values are dollars or a plain count, so the frontend axis
+# formats "1,500 employees" as 1,500 rather than "$1.5K". Count keywords win
+# over money keywords (an "agency_count" is a count, not currency); an integer
+# measure with no money word defaults to a count (dollar sums are ROUND()ed
+# floats in this schema, counts are COUNT(*) integers).
+CHART_COUNT_KEYWORDS = ("count", "number", "num_", "_num", "n_distinct", "distinct",
+                        "transactions", "payments_just_under", "employees", "_count")
+CHART_MONEY_KEYWORDS = ("spend", "amount", "total", "cost", "pay", "salary", "comp",
+                        "invoice", "extended", "revenue", "funding", "fund", "budget",
+                        "price", "paid", "rate", "allowance", "dollar")
+
+
+def measure_kind(col_name, series=None) -> str:
+    """Classify a chart's value column as 'currency' or 'count' for axis formatting."""
+    name = (col_name or "").lower()
+    if any(k in name for k in CHART_COUNT_KEYWORDS):
+        return "count"
+    if any(k in name for k in CHART_MONEY_KEYWORDS):
+        return "currency"
+    try:
+        if series is not None and pd.api.types.is_integer_dtype(series) \
+                and not pd.api.types.is_bool_dtype(series):
+            return "count"
+    except Exception:
+        pass
+    return "currency"
+
 
 # YYYY, YYYY-MM, YYYY-MM-DD. Zero-padded ISO parts sort lexicographically in
 # chronological order, so a string column of these is a legitimate time axis.

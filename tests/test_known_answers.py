@@ -2061,3 +2061,24 @@ def test_interpret_and_refine_prompts_scope_to_the_domain():
     import analytics_agent as aa
     flat = re.sub(r"\s+", " ", aa.REFINE_SYSTEM_PROMPT)
     assert "Stay on task" in flat, "refine prompt lost its domain-scoping rule"
+
+
+# ── chart measure classification (louisville-open-data-jin) ───────────────────
+
+def test_measure_kind_classifies_currency_vs_count():
+    import pandas as pd
+    from data_model import measure_kind
+    # Money-named or float measures → currency.
+    assert measure_kind("total_spend", pd.Series([1.0, 2.0])) == "currency"
+    assert measure_kind("avg_total_comp", pd.Series([1.0])) == "currency"
+    assert measure_kind("YTD_Total", pd.Series([1.0])) == "currency"
+    # Count-named or integer measures → count.
+    assert measure_kind("employee_count", pd.Series([3, 4])) == "count"
+    assert measure_kind("agency_count", pd.Series([5])) == "count"
+    assert measure_kind("payments_just_under", pd.Series([9, 8])) == "count"
+    # Count keyword beats the money-ish dtype default.
+    assert measure_kind("number_of_agencies", pd.Series([1, 2])) == "count"
+    # An unnamed integer measure defaults to count (dollar sums are floats here).
+    assert measure_kind("cnt", pd.Series([1, 2, 3])) == "count"
+    # An unnamed float measure defaults to currency.
+    assert measure_kind("x", pd.Series([1.5, 2.5])) == "currency"
