@@ -677,8 +677,7 @@ def infer_chart(df, sql: str = None) -> tuple:
     def is_numeric(c):
         return pd.api.types.is_numeric_dtype(df[c]) and not pd.api.types.is_bool_dtype(df[c])
 
-    def is_time_named(c):
-        return any(k in c.lower() for k in CHART_TIME_KEYWORDS)
+    # is_time_named is the module-level helper (same definition); no local copy.
 
     # Value (y): varying numeric, not a year/time id. Prefer a float (dollar)
     # measure over an integer count so "SELECT payee, SUM(amt), COUNT(*)" charts
@@ -1264,9 +1263,9 @@ def humanize_text(text: str, table: str = "expenditures", prose: bool = False) -
     single-case single words (`fund`, `Other`) are left alone; camelCase,
     ALL-CAPS and underscored names are still substituted. Result tables keep
     the full mapping — there a bare `Other` IS the column."""
-    import re
-    labels = ALL_LABELS.get(table, EXPENDITURE_LABELS)
-    # Also include all labels from all tables for cross-table results
+    # All tables' labels are merged (cross-table results reference several), so
+    # `table` selects nothing here today; it is kept only for call-site
+    # compatibility. `re` is the module-level import.
     all_flat = {}
     for tbl_labels in ALL_LABELS.values():
         all_flat.update(tbl_labels)

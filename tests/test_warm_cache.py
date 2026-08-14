@@ -55,3 +55,16 @@ def test_falls_back_to_prefix_strip_for_old_servers(monkeypatch):
 def test_empty_cache(monkeypatch):
     _patch(monkeypatch, {"cache_version": "v2", "entries": {}})
     assert warm_cache.fetch_entries("http://x") == {}
+
+
+def test_starter_questions_cover_every_pack_chip():
+    """warm_cache must warm every starter chip the pack defines, so a chip edit
+    in city.yaml can't leave a starter question cold (louisville-open-data-a23)."""
+    from city_config import load_city_config
+    groups = (load_city_config().branding or {}).get("starter_groups", [])
+    chip_qs = {c[1].strip().lower() for g in groups for c in g.get("chips", []) if len(c) == 2}
+    warmed = {q.strip().lower() for q in warm_cache.STARTER_QUESTIONS}
+    missing = chip_qs - warmed
+    assert not missing, f"warm_cache does not warm these pack chips: {missing}"
+    # No duplicates in the warm list.
+    assert len(warm_cache.STARTER_QUESTIONS) == len(warmed)

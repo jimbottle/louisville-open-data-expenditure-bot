@@ -12,19 +12,40 @@ import os
 import requests
 import time
 
-STARTER_QUESTIONS = [
-    "Which agencies have spent the most money across all fiscal years?",
-    "How has total annual spending changed from 2008 to 2026?",
-    "Give me a year-over-year breakdown of LMPD spending",
-    "How much does the mayor make? What about the police chief?",
-    "What are the highest paid positions in Louisville Metro government?",
-    "Who are the registered agents for the top 10 contractors by total spend?",
+# Questions warmed BEYOND the active city pack's starter chips — asked often
+# but not shown as chips. The chip questions themselves are read from the pack
+# (below) so a chip edit in city.yaml auto-warms without touching this file;
+# duplicating them here was the drift risk. Keep this list to whatever extra
+# questions are worth pre-warming.
+EXTRA_QUESTIONS = [
     "Which vendors receive payments from the most different agencies?",
     "Are there any patterns that suggest potential contract splitting?",
     "What does Louisville Metro spend on technology and cybersecurity?",
-    "What are the largest capital projects and how much was allocated to each?",
-    "How much grant funding has Louisville received and from which sources?",
 ]
+
+
+def _pack_chip_questions() -> list:
+    """The active city pack's starter-chip questions, in pack order."""
+    try:
+        from city_config import load_city_config
+        groups = (load_city_config().branding or {}).get("starter_groups", [])
+        return [c[1] for g in groups for c in g.get("chips", []) if len(c) == 2]
+    except Exception as e:
+        print(f"Warning: could not read starter chips from the city pack: {e}")
+        return []
+
+
+def _starter_questions() -> list:
+    seen, out = set(), []
+    for q in _pack_chip_questions() + EXTRA_QUESTIONS:
+        k = (q or "").strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(q)
+    return out
+
+
+STARTER_QUESTIONS = _starter_questions()
 
 
 def fetch_entries(host: str) -> dict:
