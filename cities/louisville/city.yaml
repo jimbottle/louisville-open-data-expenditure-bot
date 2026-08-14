@@ -442,16 +442,16 @@ dictionary:
       payee: Vendor or recipient name.
       payment_date: Date payment was issued.
       payment_number: Unique identifier for the payment/check.
-      payment_amount: Total check amount (2008-2017 data only).
-      payment_void_date: Date payment was voided, if applicable (2008-2017 data only).
+      payment_amount: Total check amount (present only in raw source files; NOT a column in the queryable expenditures table).
+      payment_void_date: Date payment was voided, if applicable (present only in raw source files; NOT a column in the queryable expenditures table).
       agency: Metro government agency responsible for the expenditure.
-      sub_agency: Sub-agency detail (2008-2017 data only).
-      department: Department within the agency (2008-2017 data only).
-      sub_department: Sub-department detail (2008-2017 data only).
+      sub_agency: Sub-agency detail (present only in raw source files; NOT a column in the queryable expenditures table).
+      department: Department within the agency (present only in raw source files; NOT a column in the queryable expenditures table).
+      sub_department: Sub-department detail (present only in raw source files; NOT a column in the queryable expenditures table).
       expenditure_type: 'High-level type: Operating or Capital.'
       expenditure_category: Category of expenditure.
       spend_category: Detailed spend classification.
-      stimulus_type: Federal stimulus funding type, if applicable (2008-2017 data only).
+      stimulus_type: Federal stimulus funding type, if applicable (present only in raw source files; NOT a column in the queryable expenditures table).
       cost_center: Organizational cost center code and name (2018+ data only).
       project: Project name or code (2018+ data only).
       program: Program name or code (2018+ data only).

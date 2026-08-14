@@ -1997,3 +1997,28 @@ def test_agency_contractor_spend_has_no_license_fanout(con):
         "WHERE e.is_data_artifact = FALSE"
     ).fetchone()[0]
     assert fanout > summary, "fixture has no duplicate licenses; test no longer guards the bug"
+
+
+# ── prompt<->schema contract (louisville-open-data-dmm) ───────────────────────
+
+def test_sql_prompt_never_advertises_columns_the_loader_dropped(con):
+    """The loader builds expenditures from the unified 2018+ schema, so the six
+    old-era-only source fields are NOT columns in the queryable table. The SQL
+    prompt must not tell the model they exist, or it emits binder-error SQL."""
+    dropped = ["sub_agency", "department", "sub_department",
+               "stimulus_type", "payment_amount", "payment_void_date"]
+    cols = {c[0].lower() for c in con.execute("DESCRIBE expenditures").fetchall()}
+    for c in dropped:
+        assert c not in cols, f"{c} unexpectedly present — the prompt fix may be moot now"
+
+    src = _app_source()
+    # The old positive claim ("2008-2017: has sub_agency, ...") must be gone,
+    assert "has sub_agency" not in src
+    # and the prompt must explicitly mark those fields as absent.
+    assert "are NOT columns in this table" in src
+
+    # Every column the prompt's unified/2018+ lists name must actually exist,
+    # so this catches a future edit that advertises a non-existent column.
+    for c in ["cost_center", "project", "program", "grant_", "financing_source",
+              "region", "fiscal_year", "extended_amount", "spend_category", "fund"]:
+        assert c in cols, f"prompt advertises {c} but it is not in the loaded table"

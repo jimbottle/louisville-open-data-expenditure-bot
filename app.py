@@ -495,10 +495,9 @@ Users ask in everyday terms that rarely appear verbatim in the data. Filter only
 - ARPA / ARP / American Rescue Plan: the fund value is the bare string 'ARP'. COVID relief money more broadly also includes fund = 'CARES Coronavirus Relief Fund (CRF)'. Filtering on fund ILIKE '%American Rescue Plan%' or '%ARPA%' matches nothing and wrongly reports $0 — match fund = 'ARP' (optionally OR fund = 'CARES Coronavirus Relief Fund (CRF)' when the question is about pandemic relief generally), always with AND is_data_artifact = FALSE, across ALL fiscal years unless the question names one.
 - An empty result from a topical filter means the filter was wrong, not that the city spends nothing. Re-query using the department (agency_canonical) or a broader category pattern before drawing any conclusion about spending levels.
 
-- The `expenditures` table spans FY{first_year}-FY{newest_year}. Columns available vary by era:
-  - 2008-2017: has sub_agency, department, sub_department, stimulus_type, payment_amount, payment_void_date
-  - 2018+: has cost_center, project, program, grant_, financing_source, region
-  - Common columns: fiscal_year, invoice_date, invoice_number, invoice_amount, payee, payment_date, payment_number, agency, expenditure_type, expenditure_category, spend_category, fund, extended_amount
+- The `expenditures` table spans FY{first_year}-FY{newest_year} under ONE unified schema. Every row has these columns: fiscal_year, invoice_date, invoice_number, invoice_amount, payee, payment_date, payment_number, agency, expenditure_type, expenditure_category, spend_category, fund, extended_amount.
+  - The 2018+ era additionally populates cost_center, project, program, grant_, financing_source, region; for 2008-2017 rows those columns are NULL (not a separate schema — the columns still exist).
+  - The older-era-only source fields (sub_agency, department, sub_department, stimulus_type, payment_amount, payment_void_date) are NOT columns in this table. The loader builds the table from the unified 2018+ schema, so those fields were dropped. NEVER reference them in SQL — a query using them fails with a binder error. Only the columns in the Schema block below exist.
 
 ## Schema
 {schema_desc}
