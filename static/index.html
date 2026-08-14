@@ -1089,6 +1089,12 @@ function buildReport(report, interpText) {
 
 async function streamAnswer(question, opts = {}) {
   const isRetry = !!opts.isRetry;
+  // A retry / "ask again" click can fire while a previous stream is still open
+  // (an error event renders "Try again" mid-stream). Supersede it: cancel the
+  // old request so two streams never run at once. The old stream's teardown is
+  // guarded by controller identity below, so it won't null activeController or
+  // reset the Ask button out from under this new stream.
+  if (activeController) activeController.abort('superseded');
   lastQuestion = question;
   isStreaming = true;
   submitBtn.textContent = 'Stop';
@@ -1139,6 +1145,9 @@ async function streamAnswer(question, opts = {}) {
   };
   activeController = controller;
   let receivedAnyEvent = false;
+  // Whether THIS invocation still owns the shared UI/state at teardown. A newer
+  // stream that supersedes us flips this false, so our unwind stays hands-off.
+  let ownsLifecycle = true;
 
   // "Lou is processing" — shown from submit until the stream ends, in BOTH
   // modes. Deliberately independent of statusLine/typing, which are torn down
@@ -1500,7 +1509,10 @@ async function streamAnswer(question, opts = {}) {
     // abort(reason) rejects fetch/read with `reason` itself (a plain string
     // here), not a DOMException named 'AbortError' — so branch on signal.reason.
     const reason = controller.signal.reason;
-    if (reason === 'user') {
+    if (reason === 'superseded') {
+      // A newer request replaced this one — unwind quietly, no error UI. The
+      // ownsLifecycle guard below keeps us from touching shared state.
+    } else if (reason === 'user') {
       // User pressed Stop: a quiet note, no alarming error, plus a way back in.
       clearWaiting();
       const note = document.createElement('div');
@@ -1521,11 +1533,16 @@ async function streamAnswer(question, opts = {}) {
     }
   } finally {
     clearTimeout(stallTimer);
-    activeController = null;
-    // Every exit path — done, error, timeout, abort — passes through here, so
-    // the indicator can never outlive the request that created it.
-    clearProcessing();
+    // Only tear down shared state if THIS stream is still active (a newer
+    // retry/ask-again stream may have superseded us). Every non-superseded exit
+    // path passes through here, so the indicator can't outlive its request.
+    ownsLifecycle = (activeController === controller);
+    if (ownsLifecycle) { activeController = null; clearProcessing(); }
   }
+
+  // A superseded stream stops here: the stream that replaced it owns all
+  // further teardown, history, and the Ask button.
+  if (!ownsLifecycle) return;
 
   // Safety net: if the stream ended without producing any renderable content,
   // remove the spinner and surface a fallback so the UI never hangs silently.

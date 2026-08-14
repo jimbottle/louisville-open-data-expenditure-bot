@@ -293,3 +293,15 @@ def test_chart_y_axis_respects_value_kind():
     # The $ prefix is conditional on the measure being currency, not hardcoded.
     axis = html[html.index("value_kind !== 'count'"):]
     assert "money ?" in axis[:400]
+
+
+def test_retry_supersedes_the_active_stream_no_concurrent_streams():
+    """A retry / ask-again click must cancel the in-flight stream and the old
+    stream must not reset shared state mid-flight (louisville-open-data-5hp)."""
+    html = open(os.path.join(REPO, "static", "index.html")).read()
+    fn = html[html.index("async function streamAnswer"):]
+    # Supersede any active request at the top of a new stream.
+    assert "abort('superseded')" in fn
+    # Teardown is guarded by controller identity so a superseded stream is inert.
+    assert "ownsLifecycle = (activeController === controller)" in fn
+    assert "if (!ownsLifecycle) return;" in fn
