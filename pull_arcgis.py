@@ -26,7 +26,6 @@ Usage:
 
 import argparse
 import json
-import math
 import os
 import re
 import sys
@@ -105,10 +104,17 @@ def pull_records(
 
     query_url = f"{base_url}/query"
     all_records = []
-    pages = math.ceil(total / batch_size)
+    offset = 0
+    page = 0
 
-    for page in range(pages):
-        offset = page * batch_size
+    # Advance the offset by the number of records ACTUALLY returned, not by the
+    # requested batch_size. Hosted layers cap page size at their own
+    # maxRecordCount (often 1000-2000), so a --batch-size larger than that gets
+    # a short page every time; the old `offset = page * batch_size` with a
+    # precomputed page count then stepped over the un-returned rows and stopped
+    # early, silently writing a partial CSV. Loop until the server says there is
+    # no more (exceededTransferLimit) or hands back an empty page.
+    while True:
         params = {
             "where": where,
             "outFields": out_fields,
@@ -119,13 +125,25 @@ def pull_records(
         }
         data = fetch_json(query_url, params)
         features = data.get("features", [])
+        if not features:
+            break
         batch = [f["attributes"] for f in features]
         all_records.extend(batch)
-        print(f"  Page {page + 1}/{pages} — fetched {len(batch)} records ({len(all_records):,} total)")
+        offset += len(features)
+        page += 1
+        print(f"  Page {page} — fetched {len(batch)} records ({len(all_records):,} of {total:,})")
 
-        if not data.get("exceededTransferLimit", False) and len(features) < batch_size:
+        # The transfer-limit flag is the authoritative "more to come" signal and
+        # is the one that survives a server whose page cap is below batch_size.
+        if not data.get("exceededTransferLimit", False):
             break
 
+    if total and len(all_records) < total:
+        # total is a pre-count snapshot; a smaller final tally usually means the
+        # source changed mid-pull, but it can also mean a truncated pull — say so
+        # loudly rather than writing a short file that reads as complete.
+        print(f"  ⚠️  Pulled {len(all_records):,} of {total:,} expected records — "
+              "source may have changed, or the pull was truncated.")
     print(f"Done. {len(all_records):,} records pulled.")
     return all_records
 
@@ -170,18 +188,26 @@ def save_metadata(meta: dict, output_dir: str, name: str) -> str:
 
 
 def save_data(records: list[dict], output_dir: str, name: str, fmt: str) -> str:
-    """Save records to CSV or newline-delimited JSON."""
+    """Save records to CSV or newline-delimited JSON.
+
+    Written atomically (to a .part file, then os.replace) like pull_socrata: a
+    kill mid-write must not leave a truncated file that read_csv_auto later
+    ingests as a complete year with no error.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     if fmt == "json":
         out_path = os.path.join(output_dir, f"{name}.ndjson")
-        with open(out_path, "w") as f:
+        tmp_path = out_path + ".part"
+        with open(tmp_path, "w") as f:
             for rec in records:
                 f.write(json.dumps(rec) + "\n")
     else:
         out_path = os.path.join(output_dir, f"{name}.csv")
-        pd.DataFrame(records).to_csv(out_path, index=False)
+        tmp_path = out_path + ".part"
+        pd.DataFrame(records).to_csv(tmp_path, index=False)
 
+    os.replace(tmp_path, out_path)
     print(f"Data saved to: {out_path} ({len(records):,} records)")
     return out_path
 
