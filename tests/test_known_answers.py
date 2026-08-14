@@ -24,7 +24,7 @@ from data_model import (
 
 
 @pytest.fixture(scope="module")
-def con():
+def con(require_data):
     return load_all_data("data")
 
 

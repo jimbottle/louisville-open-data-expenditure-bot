@@ -55,11 +55,12 @@ def _fake_refine_stream(*chunks):
 
 
 @pytest.fixture(scope="module")
-def client():
+def client(require_data):
     """One TestClient for the module: startup loads `data/` once (~seconds).
 
     The context-manager form runs the startup event so con/sql_system/etc. are
-    populated exactly as in production.
+    populated exactly as in production. Skips when the golden data is absent
+    (clean clone / CI) — see tests/conftest.py.
     """
     import app
     with TestClient(app.app) as c:
