@@ -1968,3 +1968,32 @@ def test_an_incidental_word_still_retrieves_an_unrelated_resolution(con):
     src = _app_source()
     assert "a single adjective in common" in src
     assert "is not a relationship" in src
+
+
+# ── summary_agency_contractors: no license fan-out (louisville-open-data-4jw) ──
+
+def test_agency_contractor_spend_has_no_license_fanout(con):
+    """total_contractor_spend must not multiply an expenditure by a business's
+    number of license-category rows. active_contractors has duplicate FULLNAME
+    rows; joining the raw table once inflated the sum (~$37M across all years).
+    The summary must equal a join against DISTINCT contractor names."""
+    summary = con.execute(
+        "SELECT ROUND(SUM(total_contractor_spend), 2) FROM summary_agency_contractors"
+    ).fetchone()[0]
+    deduped = con.execute(
+        "SELECT ROUND(SUM(e.extended_amount), 2) "
+        "FROM (SELECT DISTINCT FULLNAME FROM active_contractors WHERE FULLNAME IS NOT NULL) ac "
+        "JOIN expenditures e ON LOWER(e.payee) = LOWER(ac.FULLNAME) "
+        "WHERE e.is_data_artifact = FALSE"
+    ).fetchone()[0]
+    assert summary == pytest.approx(deduped, abs=1.0)
+
+    # And the fix must actually differ from the buggy fan-out join, so this
+    # test cannot silently pass if the DISTINCT is dropped.
+    fanout = con.execute(
+        "SELECT ROUND(SUM(e.extended_amount), 2) "
+        "FROM active_contractors ac "
+        "JOIN expenditures e ON LOWER(e.payee) = LOWER(ac.FULLNAME) "
+        "WHERE e.is_data_artifact = FALSE"
+    ).fetchone()[0]
+    assert fanout > summary, "fixture has no duplicate licenses; test no longer guards the bug"
