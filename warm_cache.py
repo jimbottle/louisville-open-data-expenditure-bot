@@ -9,6 +9,7 @@ Usage:
 
 import argparse
 import os
+import sys
 import requests
 import time
 
@@ -80,6 +81,17 @@ def main():
     parser.add_argument("--delay", type=int, default=10, help="Seconds between questions")
     parser.add_argument("--check-only", action="store_true", help="Only check cache status")
     args = parser.parse_args()
+
+    # Fail HARD if the pack yielded no starter chips: STARTER_QUESTIONS would
+    # have silently collapsed to the few EXTRA_QUESTIONS, and warming/reporting
+    # "all cached" over that short list leaves every real chip cold — the exact
+    # cold-but-looks-warm state that masked the Cerebras model-404 outage. Refuse
+    # rather than warm a degraded list.
+    if not _pack_chip_questions():
+        print("ERROR: no starter-chip questions could be read from the city pack — "
+              "refusing to run (would warm only the extras and leave every chip cold). "
+              "Check CITY_CONFIG and cities/*/city.yaml.")
+        sys.exit(1)
 
     # Check current cache status
     try:

@@ -1,8 +1,9 @@
-# Upper bounds pin the major (and, for 0.x, the minor) so a server rebuild
-# can't silently adopt a breaking release between deploys. Raise a ceiling
-# deliberately after testing the new version.
-fastapi>=0.115,<0.200
-uvicorn[standard]>=0.34,<0.40
+# Upper bounds so a server rebuild can't silently adopt a breaking release.
+# For 0.x packages (fastapi, uvicorn) breaking changes ship in MINOR releases,
+# so those are pinned to a single minor; the rest are capped at the next major.
+# Raise a ceiling deliberately after testing the new version.
+fastapi>=0.115,<0.116
+uvicorn[standard]>=0.34,<0.35
 openai>=1.82,<3
 duckdb>=1.2,<2
 pandas>=2.2,<3

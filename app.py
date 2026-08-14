@@ -99,6 +99,21 @@ RATE_LIMIT_MSG = "Evan was too cheap to use anything other than a free tier and 
 # ── State ────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Louisville Open Data Explorer")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Anti-framing headers the page can't set itself: frame-ancestors and
+    X-Frame-Options are ignored in a <meta> CSP and only take effect as HTTP
+    response headers. Sent on every response (including /static and the SSE
+    stream) so the app can't be embedded for clickjacking."""
+    response = await call_next(request)
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    return response
+
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 db_lock = threading.Lock()

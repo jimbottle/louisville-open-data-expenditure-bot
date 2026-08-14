@@ -6,7 +6,10 @@
 <!-- Content Security Policy: no external origins. Chart.js is self-hosted (see
      below), the API is same-origin, and inline script/style are the app's own,
      so a compromised third-party CDN can no longer inject or exfiltrate. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'">
+<!-- frame-ancestors is intentionally NOT here: it (like sandbox / report-uri)
+     is ignored in a <meta> CSP and only works as an HTTP header, which the
+     server sends (see the security_headers middleware in app.py). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'">
 <title>Lou · Louisville Metro open data</title>
 <!-- defer: charts aren't needed for first paint and new Chart() only runs on a
      chart event. Self-hosted (not a CDN) so an ad/privacy blocker or a jsdelivr
@@ -1231,17 +1234,21 @@ async function streamAnswer(question, opts = {}) {
     // leave the spinner running indefinitely.
     const contentType = resp.headers.get('content-type') || '';
     if (!resp.ok || !contentType.includes('text/event-stream')) {
+      // Superseded by a newer stream (before or during the body read)? Bail
+      // quietly and let the new stream own all shared state — never null
+      // activeController or re-arm the Ask button out from under it.
+      if (controller.signal.reason === 'superseded') return;
       let msg = `The server returned an unexpected response (HTTP ${resp.status}). Please try again.`;
       try {
         const data = await resp.json();
         if (data && data.error) msg = data.error;
       } catch { /* body wasn't JSON, keep the generic message */ }
-      clearTimeout(stallTimer);
-      activeController = null;
+      if (controller.signal.reason === 'superseded') return;
       showError(msg, { retry: true });
-      resetAskButton();
-      isStreaming = false;
-      questionEl.focus();
+      // Teardown (clearProcessing/clearWaiting + the identity-guarded shared
+      // state) is owned by the finally + epilogue below, exactly as the SSE
+      // path is — so this early return can't skip the processing-indicator
+      // cleanup or clobber a superseding stream.
       return;
     }
 
@@ -1539,20 +1546,25 @@ async function streamAnswer(question, opts = {}) {
     }
   } finally {
     clearTimeout(stallTimer);
-    // Only tear down shared state if THIS stream is still active (a newer
-    // retry/ask-again stream may have superseded us). Every non-superseded exit
-    // path passes through here, so the indicator can't outlive its request.
+    // clearProcessing touches only THIS invocation's element, so it runs
+    // unconditionally — otherwise a superseded turn's "Lou is processing…" line
+    // is orphaned in the transcript. Only the SHARED state (activeController) is
+    // gated on still being the active stream.
+    clearProcessing();
     ownsLifecycle = (activeController === controller);
-    if (ownsLifecycle) { activeController = null; clearProcessing(); }
+    if (ownsLifecycle) activeController = null;
   }
 
-  // A superseded stream stops here: the stream that replaced it owns all
-  // further teardown, history, and the Ask button.
+  // clearWaiting is also invocation-local (this turn's typing dots / status
+  // line) — clean it regardless of supersede.
+  clearWaiting();
+
+  // A superseded stream stops here: the stream that replaced it owns the
+  // SHARED teardown — history, the Ask button, isStreaming.
   if (!ownsLifecycle) return;
 
   // Safety net: if the stream ended without producing any renderable content,
-  // remove the spinner and surface a fallback so the UI never hangs silently.
-  clearWaiting();
+  // surface a fallback so the UI never hangs silently.
   if (!receivedAnyEvent && !agentDiv.querySelector('.error, .info, .status-line:not(.fading)')) {
     showError("No response received from the server. Please try again.", { retry: true });
   }

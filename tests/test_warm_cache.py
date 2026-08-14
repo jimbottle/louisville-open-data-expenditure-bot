@@ -66,5 +66,17 @@ def test_starter_questions_cover_every_pack_chip():
     warmed = {q.strip().lower() for q in warm_cache.STARTER_QUESTIONS}
     missing = chip_qs - warmed
     assert not missing, f"warm_cache does not warm these pack chips: {missing}"
-    # No duplicates in the warm list.
-    assert len(warm_cache.STARTER_QUESTIONS) == len(warmed)
+
+
+def test_extra_questions_do_not_duplicate_pack_chips():
+    """EXTRA_QUESTIONS must be disjoint from the pack chips — the one drift an
+    editor can actually introduce (dedupe in _starter_questions would hide it,
+    so the assertion in the coverage test above would be tautological). Checks
+    the inputs, not the deduped output."""
+    from city_config import load_city_config
+    groups = (load_city_config().branding or {}).get("starter_groups", [])
+    chip_qs = {c[1].strip().lower() for g in groups for c in g.get("chips", []) if len(c) == 2}
+    extras = {q.strip().lower() for q in warm_cache.EXTRA_QUESTIONS}
+    assert not (chip_qs & extras), (
+        f"EXTRA_QUESTIONS duplicates pack chips: {chip_qs & extras}"
+    )

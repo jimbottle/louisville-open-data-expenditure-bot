@@ -20,6 +20,18 @@ def expenditure_data_present(data_dir: str | None = None) -> bool:
 
 @pytest.fixture(scope="session")
 def require_data():
-    """Skip the requesting test when the golden dataset isn't available."""
-    if not expenditure_data_present():
+    """For tests that go through the app, which loads DATA_DIR (default 'data').
+    Skips when that directory has no expenditure CSVs."""
+    if not expenditure_data_present(os.environ.get("DATA_DIR", "data")):
         pytest.skip("real expenditure CSVs not present (gitignored) — data-bound test skipped")
+
+
+@pytest.fixture(scope="session")
+def require_louisville_data():
+    """For the known-answer suite, whose `con` hardcodes load_all_data('data')
+    and whose golden answers are Louisville-specific. Gates on 'data'
+    EXPLICITLY (not DATA_DIR), so a lingering DATA_DIR=data_cincinnati can
+    neither skip these tests while Louisville data sits in ./data, nor let them
+    run and then error inside load_all_data('data')."""
+    if not expenditure_data_present("data"):
+        pytest.skip("Louisville expenditure CSVs not present in ./data (gitignored) — skipped")

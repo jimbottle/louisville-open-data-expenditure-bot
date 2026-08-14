@@ -329,3 +329,16 @@ def test_response_cache_evicts_oldest_past_the_cap(client, monkeypatch):
     assert len(app.response_cache) == 3, "cache must not grow past MAX_CACHE_ENTRIES"
     # FIFO: the three most-recently inserted survive.
     assert set(app.response_cache) == {f"{app.CACHE_VERSION}:q{i}" for i in (2, 3, 4)}
+
+
+# ── security headers (louisville-open-data-e8d / 3691) ───────────────────────
+
+def test_anti_framing_headers_are_sent(client):
+    """frame-ancestors is ignored in a <meta> CSP, so the server must send the
+    anti-clickjacking headers itself."""
+    r = client.get("/")
+    assert r.headers.get("X-Frame-Options") == "DENY"
+    assert "frame-ancestors 'none'" in r.headers.get("Content-Security-Policy", "")
+    assert r.headers.get("X-Content-Type-Options") == "nosniff"
+    # And the SSE stream still works with the middleware in place.
+    assert client.post("/api/ask", json={"question": ""}).status_code == 200

@@ -24,7 +24,7 @@ from data_model import (
 
 
 @pytest.fixture(scope="module")
-def con(require_data):
+def con(require_louisville_data):
     return load_all_data("data")
 
 
@@ -2082,6 +2082,15 @@ def test_measure_kind_classifies_currency_vs_count():
     assert measure_kind("cnt", pd.Series([1, 2, 3])) == "count"
     # An unnamed float measure defaults to currency.
     assert measure_kind("x", pd.Series([1.5, 2.5])) == "currency"
+    # Integer COUNT columns whose LLM alias contains a WEAK money substring must
+    # NOT be mislabeled currency — the integer-dtype signal wins over weak words
+    # (total/paid/fund/comp), which were dropped from the money list.
+    assert measure_kind("total_vendors", pd.Series([3, 4])) == "count"
+    assert measure_kind("vendors_paid", pd.Series([3, 4])) == "count"
+    assert measure_kind("funded_projects", pd.Series([3, 4])) == "count"
+    assert measure_kind("companies", pd.Series([3, 4])) == "count"
+    # A strong, unambiguous money word still marks currency even on an integer.
+    assert measure_kind("invoice_amount", pd.Series([100, 200])) == "currency"
 
 
 # ── latent data-integrity hardening (louisville-open-data-wyv) ────────────────
@@ -2120,10 +2129,15 @@ def test_offsetting_groups_are_same_payee_net_zero(con):
 def test_largest_payments_excludes_offsetting_rows(con):
     """summary_largest_payments must exclude offsetting rows, not just artifacts:
     the positive half of a net-zero reversal is not a genuine largest payment."""
+    # Match on the payee too (summary selects payee_canonical AS payee): invoice
+    # numbers are not unique across payees — the whole reason for the composite
+    # offsetting key — so omitting payee would false-fail on a legitimate,
+    # non-offsetting payment from another payee that shares the number+amount.
     leaked = con.execute(
         "SELECT COUNT(*) FROM summary_largest_payments lp "
         "WHERE EXISTS (SELECT 1 FROM expenditures e "
-        "  WHERE e.is_offsetting AND e.invoice_number = lp.invoice_number "
+        "  WHERE e.is_offsetting AND e.payee_canonical = lp.payee "
+        "  AND e.invoice_number = lp.invoice_number "
         "  AND e.invoice_amount = lp.invoice_amount)"
     ).fetchone()[0]
     assert leaked == 0

@@ -133,6 +133,23 @@ def pull_records(
         page += 1
         print(f"  Page {page} — fetched {len(batch)} records ({len(all_records):,} of {total:,})")
 
+        # Safety bound against a layer that does NOT paginate
+        # (supportsPagination=false — common on older on-prem ArcGIS Server):
+        # it ignores resultOffset, returns the SAME page every time with
+        # exceededTransferLimit=true, so neither the empty-page nor the flag
+        # break ever fires and the loop would spin forever appending duplicates.
+        # A correct pull collects exactly `total`; overshooting it by more than a
+        # page means the server is not honoring the offset — stop loudly.
+        if total and len(all_records) > total + batch_size:
+            print(f"  ⚠️  Stopping at {len(all_records):,} records, past the expected "
+                  f"{total:,}: the layer appears to ignore pagination (resultOffset) "
+                  "and is returning duplicates. Data was NOT saved reliably — verify "
+                  "the layer supports paging.")
+            raise RuntimeError(
+                f"pagination not honored by {base_url}: fetched {len(all_records):,} "
+                f"rows for an expected {total:,}; aborting to avoid a duplicate-laden dump."
+            )
+
         # The transfer-limit flag is the authoritative "more to come" signal and
         # is the one that survives a server whose page cap is below batch_size.
         if not data.get("exceededTransferLimit", False):

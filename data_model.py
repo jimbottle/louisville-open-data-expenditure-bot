@@ -462,19 +462,30 @@ CHART_TIME_KEYWORDS = ("year", "fiscal", "month", "date")
 CHART_LABEL_KEYWORDS = CHART_TIME_KEYWORDS + ("name", "agency", "payee", "type", "category", "fund")
 
 # Whether a chart's y-values are dollars or a plain count, so the frontend axis
-# formats "1,500 employees" as 1,500 rather than "$1.5K". Count keywords win
-# over money keywords (an "agency_count" is a count, not currency); an integer
-# measure with no money word defaults to a count (dollar sums are ROUND()ed
-# floats in this schema, counts are COUNT(*) integers).
+# formats "1,500 employees" as 1,500 rather than "$1.5K".
 CHART_COUNT_KEYWORDS = ("count", "number", "num_", "_num", "n_distinct", "distinct",
                         "transactions", "payments_just_under", "employees", "_count")
-CHART_MONEY_KEYWORDS = ("spend", "amount", "total", "cost", "pay", "salary", "comp",
-                        "invoice", "extended", "revenue", "funding", "fund", "budget",
-                        "price", "paid", "rate", "allowance", "dollar")
+# Only UNAMBIGUOUS money words. Ambiguous ones (total, paid, fund, comp, rate)
+# were dropped on purpose: they also appear in count aliases an LLM writes
+# (total_vendors, vendors_paid, funded_projects, companies), so relying on them
+# would mislabel those integer counts as currency. Everything not caught here
+# or by a count keyword falls to the integer-dtype signal, which is reliable in
+# this schema (dollar sums are ROUND()ed floats, counts are COUNT(*) integers).
+CHART_MONEY_KEYWORDS = ("spend", "amount", "salary", "invoice", "revenue",
+                        "cost", "dollar", "extended")
 
 
 def measure_kind(col_name, series=None) -> str:
-    """Classify a chart's value column as 'currency' or 'count' for axis formatting."""
+    """Classify a chart's value column as 'currency' or 'count' for axis formatting.
+
+    Order matters. The integer-dtype signal is checked BEFORE money keywords
+    because dollar sums are ROUND()ed floats here and counts are COUNT(*)
+    integers — the most reliable signal. Otherwise an LLM-chosen alias for a
+    count that happens to contain a money substring (`total_vendors`,
+    `vendors_paid`, `funded_projects`, `companies`) would render as `$1.5K`,
+    the exact mislabel this exists to prevent. Explicit count keywords still
+    win over everything.
+    """
     name = (col_name or "").lower()
     if any(k in name for k in CHART_COUNT_KEYWORDS):
         return "count"

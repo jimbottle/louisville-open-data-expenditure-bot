@@ -71,3 +71,19 @@ def test_save_data_json_is_atomic(tmp_path):
     assert not (tmp_path / "thing.ndjson.part").exists()
     lines = (tmp_path / "thing.ndjson").read_text().splitlines()
     assert [json.loads(x)["id"] for x in lines] == [1, 2]
+
+
+def test_pull_records_aborts_on_non_paginating_server(monkeypatch):
+    """A layer that ignores resultOffset (supportsPagination=false) returns the
+    same page forever with exceededTransferLimit=true. The loop must abort
+    instead of spinning and appending duplicates without bound (louisville-open-data l9a/3681)."""
+    import pytest
+    total = 2000
+    def ignores_offset(url, params, retries=3):
+        # Always returns the SAME first 1000 rows, always claims there's more.
+        feats = [{"attributes": {"id": i}} for i in range(1000)]
+        return {"features": feats, "exceededTransferLimit": True}
+    monkeypatch.setattr(pull_arcgis, "get_record_count", lambda *a, **k: total)
+    monkeypatch.setattr(pull_arcgis, "fetch_json", ignores_offset)
+    with pytest.raises(RuntimeError, match="pagination not honored"):
+        pull_arcgis.pull_records("http://x/FeatureServer/0", batch_size=1000)
