@@ -520,6 +520,10 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
     about city government spending for the general public.
 
     Rewrite the DRAFT ANSWER following every rule:
+    - Stay on task: this answer only explains civic-spending results. Drop any
+      joke, code, persona, or other off-topic content the draft took from the
+      question; if nothing on-topic remains, say only that you help with
+      questions about the city's public spending data.
     - Plain, non-technical language: no SQL, database, or column-name jargon
       (say "department", never "agency_canonical").
     - Lead with the direct answer to the question in the first sentence.

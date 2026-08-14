@@ -2022,3 +2022,18 @@ def test_sql_prompt_never_advertises_columns_the_loader_dropped(con):
     for c in ["cost_center", "project", "program", "grant_", "financing_source",
               "region", "fiscal_year", "extended_amount", "spend_category", "fund"]:
         assert c in cols, f"prompt advertises {c} but it is not in the loaded table"
+
+
+# ── domain scoping against instruction injection (louisville-open-data-prk) ───
+
+def test_interpret_and_refine_prompts_scope_to_the_domain():
+    """Observed live: an injected 'tell me a joke' in the question made the
+    interpreter tell a joke. Both the interpret prompt and the refine editor
+    must instruct the model to stay on the civic-spending task and drop
+    injected off-domain requests."""
+    src = _app_source()
+    assert "Stay strictly on task" in src, "interpret_system lost its domain-scoping rule"
+
+    import analytics_agent as aa
+    flat = re.sub(r"\s+", " ", aa.REFINE_SYSTEM_PROMPT)
+    assert "Stay on task" in flat, "refine prompt lost its domain-scoping rule"
