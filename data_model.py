@@ -478,13 +478,20 @@ CHART_MONEY_KEYWORDS = ("spend", "amount", "salary", "invoice", "revenue",
 def measure_kind(col_name, series=None) -> str:
     """Classify a chart's value column as 'currency' or 'count' for axis formatting.
 
-    Order matters. The integer-dtype signal is checked BEFORE money keywords
-    because dollar sums are ROUND()ed floats here and counts are COUNT(*)
-    integers — the most reliable signal. Otherwise an LLM-chosen alias for a
-    count that happens to contain a money substring (`total_vendors`,
-    `vendors_paid`, `funded_projects`, `companies`) would render as `$1.5K`,
-    the exact mislabel this exists to prevent. Explicit count keywords still
-    win over everything.
+    Check order (matters): count keywords -> UNAMBIGUOUS money keywords ->
+    integer dtype -> currency default.
+
+    The safety of this order depends on the money list staying unambiguous.
+    Money keywords are checked BEFORE the integer-dtype signal ON PURPOSE, so a
+    rare integer dollar column (`invoice_amount` as an int) is still currency.
+    That is only safe because ambiguous words (`total`, `paid`, `fund`, `comp`,
+    `rate`) were DROPPED from the list — they also appear in integer count
+    aliases an LLM writes (`total_vendors`, `vendors_paid`, `funded_projects`,
+    `companies`), which must fall through to the integer-dtype check and read as
+    counts, not `$1.5K`. Do NOT re-add a weak word here expecting "dtype wins on
+    integers": it would re-break exactly those count aliases. Explicit count
+    keywords win over everything; a float with no money word defaults to currency
+    (dollar sums are ROUND()ed floats here, counts are COUNT(*) integers).
     """
     name = (col_name or "").lower()
     if any(k in name for k in CHART_COUNT_KEYWORDS):

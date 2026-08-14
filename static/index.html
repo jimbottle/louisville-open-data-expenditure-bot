@@ -1245,10 +1245,10 @@ async function streamAnswer(question, opts = {}) {
       } catch { /* body wasn't JSON, keep the generic message */ }
       if (controller.signal.reason === 'superseded') return;
       showError(msg, { retry: true });
-      // Teardown (clearProcessing/clearWaiting + the identity-guarded shared
-      // state) is owned by the finally + epilogue below, exactly as the SSE
-      // path is — so this early return can't skip the processing-indicator
-      // cleanup or clobber a superseding stream.
+      // All teardown (clearProcessing/clearWaiting + the identity-guarded
+      // Ask-button/isStreaming reset) runs in the finally below, which executes
+      // on this return — so the button never stays stuck on "Stop" after an
+      // HTTP error, and a superseding stream's state is left untouched.
       return;
     }
 
@@ -1546,21 +1546,27 @@ async function streamAnswer(question, opts = {}) {
     }
   } finally {
     clearTimeout(stallTimer);
-    // clearProcessing touches only THIS invocation's element, so it runs
-    // unconditionally — otherwise a superseded turn's "Lou is processing…" line
-    // is orphaned in the transcript. Only the SHARED state (activeController) is
-    // gated on still being the active stream.
+    // Invocation-local: run always so a superseded turn can't orphan its spinner.
     clearProcessing();
+    clearWaiting();
+    // ALL shared teardown lives in this finally, NOT after the try: an early
+    // `return` from the try (non-SSE HTTP error, supersede) runs the finally
+    // then exits the function, skipping any post-try code — a reset placed there
+    // soft-locked the UI on every 429/HTTP error. Reset the shared state only if
+    // this stream still owns the lifecycle (a retry/ask-again may have
+    // superseded us).
     ownsLifecycle = (activeController === controller);
-    if (ownsLifecycle) activeController = null;
+    if (ownsLifecycle) {
+      activeController = null;
+      isStreaming = false;
+      resetAskButton();
+      questionEl.focus();
+    }
   }
 
-  // clearWaiting is also invocation-local (this turn's typing dots / status
-  // line) — clean it regardless of supersede.
-  clearWaiting();
-
-  // A superseded stream stops here: the stream that replaced it owns the
-  // SHARED teardown — history, the Ask button, isStreaming.
+  // Answer-completion work below runs only for a normally-completed stream that
+  // still owns the lifecycle. A superseded stream (or an early HTTP-error
+  // return) has no answer to record and its teardown already ran in the finally.
   if (!ownsLifecycle) return;
 
   // Safety net: if the stream ended without producing any renderable content,
@@ -1659,10 +1665,8 @@ async function streamAnswer(question, opts = {}) {
       scrollBottom();
     }
   }
-
-  isStreaming = false;
-  resetAskButton();
-  questionEl.focus();
+  // NOTE: isStreaming / resetAskButton / questionEl.focus() are reset in the
+  // finally above (which runs on every exit path), not here — see that comment.
 }
 
 // Branding + starter chips come from the active city pack, so nothing in

@@ -325,3 +325,19 @@ def test_vendored_chartjs_is_served(monkeypatch):
     r = TestClient(app.app).get("/static/vendor/chart.umd.min.js")
     assert r.status_code == 200
     assert "Chart" in r.text[:5000] or "chart" in r.text[:5000].lower()
+
+
+def test_stream_teardown_lives_in_finally_not_after_try():
+    """A `return` from inside the try (non-SSE HTTP error, supersede) runs the
+    finally but skips any post-try code, so the Ask-button/isStreaming reset
+    must live in the finally or the UI soft-locks after a 429 (louisville-open-data 3696)."""
+    html = open(os.path.join(REPO, "static", "index.html")).read()
+    fn = html[html.index("async function streamAnswer"):]
+    finally_start = fn.index("} finally {")
+    # The finally block ends at the "// Answer-completion work below" epilogue
+    # comment; assert the shared-state reset sits before that boundary (i.e.
+    # inside the finally, which always runs), not after the try.
+    finally_block = fn[finally_start:fn.index("// Answer-completion work below")]
+    assert "isStreaming = false;" in finally_block
+    assert "resetAskButton();" in finally_block
+    assert "clearProcessing();" in finally_block and "clearWaiting();" in finally_block
