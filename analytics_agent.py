@@ -323,8 +323,20 @@ def _is_model_not_found(exc: Exception) -> bool:
     return "model" in str(exc).lower()
 
 
+class ModelCatalogueUnavailable(RuntimeError):
+    """The provider's model list could not be read.
+
+    Kept distinct from "read it fine, nothing usable in there": that answer is
+    durable and worth latching the primary out over, while this one may be a
+    single timeout. Conflating them let one failed GET /models route fifteen
+    minutes of traffic to the billed provider.
+    """
+
+
 def _resolve_fallback_model(client: openai.OpenAI, bad_model: str):
-    """Pick a replacement the provider actually offers, or None.
+    """Pick a replacement the provider actually offers, or None if it offers none.
+
+    Raises ModelCatalogueUnavailable if the catalogue could not be read at all.
 
     The last resort — "anything available" — is deliberately restricted to
     free models when the primary is OpenRouter. Its catalogue lists hundreds of
@@ -336,7 +348,7 @@ def _resolve_fallback_model(client: openai.OpenAI, bad_model: str):
         available = [m.id for m in client.models.list().data]
     except Exception as e:
         log.error("Model fallback: could not list provider models: %s", e)
-        return None
+        raise ModelCatalogueUnavailable(str(e)) from e
     for pref in _fallback_preferences():
         if pref != bad_model and pref in available:
             return pref
@@ -390,7 +402,18 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
             raise
         # Another thread may have already switched while this call was in flight.
         already = get_active_model(model)
-        replacement = already if already != model else _resolve_fallback_model(client, model)
+        # `catalogue_read` separates "the provider has nothing for us" (durable,
+        # latch it) from "we could not ask" (possibly a one-off timeout, so keep
+        # re-asking). Both used to arrive as a bare None.
+        catalogue_read = True
+        if already != model:
+            replacement = already
+        else:
+            try:
+                replacement = _resolve_fallback_model(client, model)
+            except ModelCatalogueUnavailable as list_err:
+                log.warning("Could not read the model catalogue while replacing '%s': %s", model, list_err)
+                replacement, catalogue_read = None, False
         if not replacement:
             # No replacement the provider offers (or models.list() failed). The
             # other provider is a whole second chance sitting right here, and a
@@ -400,13 +423,17 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
             # while a funded Cerebras key stood idle.
             if fallback_fn:
                 log.warning("No replacement for '%s' at the primary provider; using the fallback provider", model)
-                # Latch first: in this state EVERY call lands here, and each one
-                # would otherwise pay a 404 plus a fresh models.list() over a
-                # several-hundred-entry catalogue — two or three times per
-                # question — to rediscover what we already know. Subsequent calls
-                # go straight to the fallback until the recheck window expires,
-                # so a restored slug heals by itself.
-                _mark_primary_unusable()
+                # Latch only when the catalogue actually said there is nothing
+                # usable. In THAT state every call lands here and would each pay
+                # a 404 plus a fresh models.list() over a several-hundred-entry
+                # catalogue, two or three times per question, to rediscover what
+                # we already know; the latch pays it once per window and heals
+                # when the window expires. A failed listing is not that: it may
+                # be one timeout, and latching would spend fifteen minutes of
+                # billed traffic without ever retrying the free model that is
+                # probably still sitting in the catalogue.
+                if catalogue_read:
+                    _mark_primary_unusable()
                 try:
                     # Through the ladder, not a bare call: this is the only path
                     # serving the question now, so the fallback deserves the same

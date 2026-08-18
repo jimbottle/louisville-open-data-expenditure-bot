@@ -396,3 +396,63 @@ def test_out_of_credit_fallback_surfaces_as_a_quota_error(monkeypatch):
         aa._call_with_model_fallback(mk, "primary", "dead/model:free",
                                     fallback_client="cerebras", fallback_model="gpt-oss-120b")
     assert aa.is_quota_error(exc.value)
+
+
+def test_a_failed_catalogue_listing_does_not_latch_the_primary_out(monkeypatch):
+    """One timeout on GET /models must not spend 15 minutes of billed traffic —
+    the free replacement is probably still sitting in the catalogue."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    attempts = []
+
+    def flaky_resolve(client, model):
+        attempts.append(model)
+        raise aa.ModelCatalogueUnavailable("connection reset")
+
+    monkeypatch.setattr(aa, "_resolve_fallback_model", flaky_resolve)
+
+    def mk(client, model):
+        def _call():
+            if client == "primary":
+                raise _not_found()
+            return "answer from cerebras"
+        return _call
+
+    for _ in range(2):
+        assert aa._call_with_model_fallback(
+            mk, "primary", "dead/model:free",
+            fallback_client="cerebras", fallback_model="gpt-oss-120b",
+        ) == "answer from cerebras"
+
+    assert not aa._primary_is_unusable(), "a listing failure is not evidence the primary is dead"
+    assert len(attempts) == 2, "resolution must be re-attempted on the next question"
+
+
+def test_a_listing_failure_still_answers_the_question(monkeypatch):
+    """Falling back is right either way; only the latch differs."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setattr(aa, "_resolve_fallback_model",
+                        lambda c, m: (_ for _ in ()).throw(aa.ModelCatalogueUnavailable("500")))
+
+    def mk(client, model):
+        def _call():
+            if client == "primary":
+                raise _not_found()
+            return f"answer from {model}"
+        return _call
+
+    assert aa._call_with_model_fallback(
+        mk, "primary", "dead/model:free",
+        fallback_client="cerebras", fallback_model="gpt-oss-120b",
+    ) == "answer from gpt-oss-120b"
+
+
+def test_resolver_raises_rather_than_returning_none_when_it_cannot_ask():
+    """The two outcomes must stay distinguishable at the source."""
+    class _Broken:
+        class models:
+            @staticmethod
+            def list():
+                raise TimeoutError("upstream 504")
+
+    with pytest.raises(aa.ModelCatalogueUnavailable):
+        aa._resolve_fallback_model(_Broken(), "dead/model:free")
