@@ -300,3 +300,94 @@ def test_daily_cap_goes_straight_to_the_fallback_provider(monkeypatch):
     assert calls == ["primary", "cerebras"]
     assert slept == []
     assert aa._free_tier_is_exhausted()
+
+
+# ── Mixed failure sequences (the ladder's second attempt) ────────────────────
+
+def test_rate_limit_then_quota_falls_over_and_latches(monkeypatch):
+    """429 first, out of credit second. The old ladder special-cased attempt 1,
+    so this sequence reached the unclassified path: no fallback on a 402, no
+    latch on a quota 429, and the ~16s wait repeated on every later call."""
+    slept = []
+    monkeypatch.setattr(aa.time, "sleep", lambda s: slept.append(s))
+    errors = [_rate_limited(), _payment_required()]
+    calls = []
+
+    def primary():
+        calls.append("primary")
+        raise errors.pop(0)
+
+    def fallback():
+        calls.append("fallback")
+        return "answer"
+
+    assert aa._call_with_retry(primary, fallback_fn=fallback) == "answer"
+    assert calls == ["primary", "primary", "fallback"]
+    assert slept == [aa.RETRY_BASE_DELAY]   # one wait, for the ordinary 429 only
+    assert aa._free_tier_is_exhausted()
+
+
+def test_rate_limit_then_daily_cap_falls_over_and_latches(monkeypatch):
+    """Same shape via OpenRouter, which enforces a 20/min AND a 50/day cap on
+    one key, so the per-minute limit landing first is routine."""
+    monkeypatch.setattr(aa.time, "sleep", lambda s: None)
+    errors = [_rate_limited(), _daily_cap_429()]
+
+    def primary():
+        raise errors.pop(0)
+
+    assert aa._call_with_retry(primary, fallback_fn=lambda: "answer") == "answer"
+    assert aa._free_tier_is_exhausted()
+
+
+def test_plain_rate_limit_fallback_does_not_latch(monkeypatch):
+    """A per-minute limit clears in a minute; latching it would hand 15 minutes
+    of traffic to the billed provider over one spike."""
+    monkeypatch.setattr(aa.time, "sleep", lambda s: None)
+
+    def primary():
+        raise _rate_limited()
+
+    assert aa._call_with_retry(primary, fallback_fn=lambda: "answer") == "answer"
+    assert not aa._free_tier_is_exhausted()
+
+
+def test_failed_fallback_surfaces_the_primary_error_not_the_fallback_one():
+    """app.py picks the user's message from this exception. The fallback's own
+    error (a Cerebras 402) would say "the bill is unpaid" for an allowance that
+    resets at midnight."""
+    def primary():
+        raise _daily_cap_429()
+
+    def fallback():
+        raise _payment_required()
+
+    with pytest.raises(Exception) as exc:
+        aa._call_with_retry(primary, fallback_fn=fallback)
+    assert aa.is_daily_cap_error(exc.value), "daily-cap classification must survive"
+    assert isinstance(exc.value.__cause__, openai.APIStatusError)
+
+
+def test_empty_completion_fails_over_to_the_other_provider():
+    """An empty reply will not fill itself in on a retry — try the other side."""
+    calls = []
+
+    def primary():
+        calls.append("primary")
+        raise aa.EmptyCompletionError("LLM returned an empty message (finish_reason=length)")
+
+    def fallback():
+        calls.append("fallback")
+        return "answer"
+
+    assert aa._call_with_retry(primary, fallback_fn=fallback) == "answer"
+    assert calls == ["primary", "fallback"]
+    assert not aa._free_tier_is_exhausted()  # nothing was exhausted
+
+
+def test_empty_completion_without_a_fallback_raises_its_own_type():
+    def primary():
+        raise aa.EmptyCompletionError("LLM returned an empty message (finish_reason=length)")
+
+    with pytest.raises(aa.EmptyCompletionError):
+        aa._call_with_retry(primary)

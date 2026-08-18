@@ -32,11 +32,18 @@ RETRY_BASE_DELAY = 16  # seconds, matches Gemini's suggested retry delay
 
 # Track which tier was used on the last call (for dev mode display)
 _last_tier_used = "free"
+# Whether that call was served by the fallback client rather than the primary.
+_last_call_via_fallback = False
 
 
 def get_last_tier_used() -> str:
     """Return which tier was used on the most recent LLM call."""
     return _last_tier_used
+
+
+def last_call_used_fallback() -> bool:
+    """True when the most recent call was served by the fallback provider."""
+    return _last_call_via_fallback
 
 
 def is_quota_error(e: Exception) -> bool:
@@ -90,85 +97,102 @@ def is_daily_cap_error(e: Exception) -> bool:
     return "free-models-per-day" in s or ("per-day" in s and "free" in s)
 
 
+class EmptyCompletionError(RuntimeError):
+    """A provider returned a completion with no content.
+
+    Its own class (not a bare ValueError) so `_call_with_retry` can fail the
+    call over to the other provider and `app.is_service_error` can tell the user
+    it is our end, not their wording.
+    """
+
+
 def _call_with_retry(fn, on_retry=None, fallback_fn=None):
-    """Retry on 429 rate limit errors. Always tries free tier first, falls back to paid only when confirmed limited."""
-    global _last_tier_used
+    """Run an LLM call, falling over to the fallback provider when the primary can't serve.
+
+    One classification point, deliberately: an earlier version special-cased the
+    first retry inside the rate-limit ladder, so "429 first, out-of-credit
+    second" took the unclassified path — no fallback on a 402, and no latch on
+    an insufficient_quota 429, which is the ~48s-per-question stall the
+    classifier exists to prevent.
+
+    Failure kinds and what each earns:
+      * out of credit / past the daily allowance — the other provider, now. No
+        amount of waiting fixes a spent key, and the primary is latched out.
+      * empty completion — the other provider, now. It will not fill itself in.
+      * ordinary rate limit — one more try on the primary (per-minute windows
+        clear), then the other provider, then the rest of the ladder.
+    """
+    global _last_tier_used, _last_call_via_fallback
+
     if fallback_fn and _free_tier_is_exhausted():
         try:
             result = fallback_fn()
             _last_tier_used = "paid"
+            _last_call_via_fallback = True
             return result
         except Exception as paid_err:
-            # Paid tier is unusable too — clear the latch so the free key is
+            # Fallback is unusable too — clear the latch so the primary is
             # retried normally below rather than being skipped on a stale flag.
-            log.warning("Paid tier failed while free tier was latched out: %s", paid_err)
+            log.warning("Fallback provider failed while primary was latched out: %s", paid_err)
             _mark_free_tier_exhausted(False)
+
+    fallback_tried = False
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             result = fn()
             _last_tier_used = get_primary_tier()
+            _last_call_via_fallback = False
             return result
         except Exception as e:
-            # Quota first, and deliberately outside the RateLimitError clause:
-            # billing exhaustion arrives as a 402 from Cerebras but as a 429
-            # (`insufficient_quota`) from other OpenAI-compatible providers, and
-            # a 429-shaped one caught by the rate-limit ladder below would sleep
-            # through every attempt retrying a key that cannot recover, never
-            # reaching the latch — the same stall on all three LLM calls of
-            # every question. Out of credit never clears by waiting; only a
-            # different (funded) key can succeed.
-            if is_quota_error(e) or is_daily_cap_error(e):
-                if not fallback_fn:
-                    log.error("Primary key exhausted (credit or daily cap) and no fallback key configured: %s", e)
-                    raise
-                log.info("Primary key exhausted (credit or daily allowance), using paid tier")
+            exhausted = is_quota_error(e) or is_daily_cap_error(e)
+            empty = isinstance(e, EmptyCompletionError)
+            rate_limited = isinstance(e, openai.RateLimitError)
+
+            if not (exhausted or empty or rate_limited):
+                log.error("LLM call failed (attempt %d): %s", attempt, e)
+                raise
+
+            # A plain rate limit gets one more shot at the primary first; the
+            # other two are hopeless on this key, so they cross over at once.
+            if (exhausted or empty or attempt > 1) and fallback_fn and not fallback_tried:
+                fallback_tried = True
+                log.info("Primary unavailable (%s), using fallback provider",
+                         "exhausted" if exhausted else ("empty reply" if empty else "rate limited"))
                 if on_retry:
                     on_retry(attempt, MAX_RETRIES, 0)
                 try:
                     result = fallback_fn()
                     _last_tier_used = "paid"
-                    _mark_free_tier_exhausted()
+                    _last_call_via_fallback = True
+                    if exhausted:
+                        # Only for credit/allowance exhaustion. Latching on an
+                        # ordinary 429 would route 15 minutes of traffic to the
+                        # billed provider over a one-minute spike.
+                        _mark_free_tier_exhausted()
                     return result
                 except Exception as fallback_err:
-                    log.warning("Paid tier fallback failed: %s", fallback_err)
-                    raise
+                    log.warning("Fallback provider failed: %s", fallback_err)
+                    if exhausted or empty or attempt == MAX_RETRIES:
+                        # Raise the PRIMARY's error, not the fallback's: app.py
+                        # picks the user-facing message from this exception, and
+                        # a Cerebras 402 here would say "the bill is unpaid" for
+                        # an allowance that resets at midnight.
+                        raise e from fallback_err
+                    # Ordinary rate limit with attempts left: keep walking the ladder.
 
-            if not isinstance(e, openai.RateLimitError):
-                log.error("LLM call failed (attempt %d): %s", attempt, e)
+            if exhausted or empty:
+                log.error("Primary cannot serve (%s) and no fallback answered: %s",
+                          "exhausted" if exhausted else "empty reply", e)
+                raise
+
+            if attempt == MAX_RETRIES:
+                log.warning("Rate limit: all %d retries exhausted (primary and fallback)", MAX_RETRIES)
                 raise
 
             delay = RETRY_BASE_DELAY
             match = re.search(r'retry in ([\d.]+)s', str(e))
             if match:
                 delay = min(float(match.group(1)) + 1, 60)
-
-            # First retry: wait and try free tier again (per-minute limit may have cleared)
-            if attempt == 1:
-                log.info("Rate limited (attempt 1/%d), retrying free tier in %.0fs", MAX_RETRIES, delay)
-                if on_retry:
-                    on_retry(attempt, MAX_RETRIES, delay)
-                time.sleep(delay)
-                try:
-                    result = fn()
-                    _last_tier_used = get_primary_tier()
-                    return result
-                except openai.RateLimitError:
-                    # Free tier still limited — fall back to paid if available
-                    if fallback_fn:
-                        log.info("Free tier confirmed limited, using paid tier")
-                        if on_retry:
-                            on_retry(attempt + 1, MAX_RETRIES, 0)
-                        try:
-                            result = fallback_fn()
-                            _last_tier_used = "paid"
-                            return result
-                        except Exception as fallback_err:
-                            log.warning("Paid tier fallback failed: %s", fallback_err)
-
-            if attempt == MAX_RETRIES:
-                log.warning("Rate limit: all %d retries exhausted (free and paid)", MAX_RETRIES)
-                raise
-
             log.info("Rate limited (attempt %d/%d), retrying in %.0fs", attempt, MAX_RETRIES, delay)
             if on_retry:
                 on_retry(attempt, MAX_RETRIES, delay)
@@ -241,6 +265,18 @@ TRUNCATION_NOTE = (
 
 DEFAULT_MODEL_FALLBACKS = ["gpt-oss-120b", "zai-glm-4.7", "llama-3.3-70b", "llama3.1-8b"]
 
+# OpenRouter slugs, for when OpenRouter is the primary. The bare Cerebras ids
+# above can never match a 'vendor/model:free' slug, so without a provider-aware
+# list every preference misses and the resolver falls through to "anything the
+# account offers" — which on OpenRouter means an arbitrary entry from a
+# catalogue of hundreds, almost all of them paid. Ranked by the 2026-08-18
+# benchmark on the real NL->SQL task (see CLAUDE.md).
+DEFAULT_OPENROUTER_MODEL_FALLBACKS = [
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "poolside/laguna-s-2.1:free",
+    "openai/gpt-oss-20b:free",
+]
+
 _active_model = None          # replacement model once a fallback has engaged
 _model_fallback_event = None  # {"from", "to", "time"} of the last fallback
 _fallback_lock = threading.Lock()  # SSE requests run on threadpool threads
@@ -250,6 +286,8 @@ def _fallback_preferences() -> list:
     env = os.environ.get("MODEL_FALLBACKS", "")
     if env.strip():
         return [m.strip() for m in env.split(",") if m.strip()]
+    if _openrouter_key():
+        return list(DEFAULT_OPENROUTER_MODEL_FALLBACKS)
     return list(DEFAULT_MODEL_FALLBACKS)
 
 
@@ -280,7 +318,14 @@ def _is_model_not_found(exc: Exception) -> bool:
 
 
 def _resolve_fallback_model(client: openai.OpenAI, bad_model: str):
-    """Pick a replacement: first preference the provider offers, else anything."""
+    """Pick a replacement the provider actually offers, or None.
+
+    The last resort — "anything available" — is deliberately restricted to
+    free models when the primary is OpenRouter. Its catalogue lists hundreds of
+    models, nearly all paid: taking the first entry would silently move the bot
+    onto an unvetted, billable model (or one that 402s on a free-tier key)
+    because a free slug churned.
+    """
     try:
         available = [m.id for m in client.models.list().data]
     except Exception as e:
@@ -289,6 +334,11 @@ def _resolve_fallback_model(client: openai.OpenAI, bad_model: str):
     for pref in _fallback_preferences():
         if pref != bad_model and pref in available:
             return pref
+    if _openrouter_key():
+        free = [m for m in available if m != bad_model and m.endswith(":free")]
+        if not free:
+            log.error("Model fallback: no free OpenRouter model available to replace '%s'", bad_model)
+        return free[0] if free else None
     return next((m for m in available if m != bad_model), None)
 
 
@@ -343,9 +393,14 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
             # fallback keeps its own pinned model.
             fallback_fn = make_call(fallback_client, replacement)
         result = _call_with_retry(make_call(client, replacement), on_retry=on_retry, fallback_fn=fallback_fn)
-        # Record only after the replacement actually worked, so /api/health
-        # never advertises a fallback that failed.
-        _record_model_fallback(model, replacement)
+        # Record only when the REPLACEMENT served the call. If the other
+        # provider's fallback rescued it, the replacement is unproven — pinning
+        # it process-wide would put a failing round trip in front of every later
+        # question and advertise it in /api/health.
+        if not last_call_used_fallback():
+            _record_model_fallback(model, replacement)
+        else:
+            log.warning("Replacement model '%s' did not serve the call (fallback provider did); not recording it", replacement)
         return result
 
 
@@ -506,10 +561,10 @@ def _message_text(response) -> str:
     """
     choices = getattr(response, "choices", None)
     if not choices:
-        raise ValueError("LLM response contained no choices")
+        raise EmptyCompletionError("LLM response contained no choices")
     text = getattr(choices[0].message, "content", None)
     if not text or not text.strip():
-        raise ValueError(
+        raise EmptyCompletionError(
             f"LLM returned an empty message (finish_reason={getattr(choices[0], 'finish_reason', None)})"
         )
     return text
@@ -534,12 +589,17 @@ def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, qu
             if history:
                 messages.extend(history[-6:])
             messages.append({"role": "user", "content": question})
-            return c.with_raw_response.chat.completions.create(
+            raw = c.with_raw_response.chat.completions.create(
                 model=m,
                 messages=messages,
                 temperature=0.2,
                 max_tokens=300,
             )
+            # Checked here, inside the retry/fallback envelope, so a provider
+            # that answers with no content is failed over rather than surfacing
+            # to the user as if the question were at fault.
+            _message_text(raw.parse())
+            return raw
         return _call
     raw = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
     response = raw.parse()
@@ -564,12 +624,14 @@ def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question
             if reasoning:
                 user_content = f"Question: {question}\n\nQuery plan:\n{reasoning}\n\nNow write ONLY the SQL query based on this plan."
             messages.append({"role": "user", "content": user_content})
-            return c.with_raw_response.chat.completions.create(
+            raw = c.with_raw_response.chat.completions.create(
                 model=m,
                 messages=messages,
                 temperature=0.1,
                 max_tokens=2048,
             )
+            _message_text(raw.parse())  # empty reply -> fail over, not "reword it"
+            return raw
         return _call
     raw = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
     response = raw.parse()
@@ -590,7 +652,7 @@ def interpret_results(
     user_msg = f"Question: {question}\n\nSQL executed:\n{sql}\n\nResults:\n{results}"
     def _make_call(c, m):
         def _call():
-            return c.chat.completions.create(
+            resp = c.chat.completions.create(
                 model=m,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -599,6 +661,8 @@ def interpret_results(
                 temperature=0.3,
                 max_tokens=4096,
             )
+            _message_text(resp)  # empty reply -> fail over, not "reword it"
+            return resp
         return _call
     response = _call_with_model_fallback(_make_call, client, model)
     return _message_text(response).strip()

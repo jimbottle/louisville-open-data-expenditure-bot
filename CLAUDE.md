@@ -165,8 +165,12 @@ executed against DuckDB): `nvidia/nemotron-3-super-120b-a12b:free` 3/3 at ~7s,
 `poolside/laguna-s-2.1:free` 3/3 at ~17s, `openai/gpt-oss-20b:free` 2/3 at ~29s
 (one reply had no content at all), `google/gemma-4-31b-it:free` 0/3 (upstream
 429s). Re-run that comparison before switching models rather than trusting a
-model card. The 404 `model_not_found` handler also auto-switches within
-OpenRouter's catalogue if a slug disappears.
+model card. If a slug disappears, the 404 `model_not_found` handler switches to
+another model — but only to one of `DEFAULT_OPENROUTER_MODEL_FALLBACKS`, or
+failing that any `:free` slug the account can see. It will never cross into
+OpenRouter's paid catalogue, and a replacement that had to be rescued by the
+Cerebras fallback is not pinned (it would put a failing round trip in front of
+every later question).
 
 **Free-tier limits.** OpenRouter caps `:free` models at 20 requests/minute and
 **50 requests/day** — 1,000/day once the account has purchased $10 of credits.

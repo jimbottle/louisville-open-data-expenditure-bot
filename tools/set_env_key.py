@@ -30,6 +30,16 @@ def main() -> int:
         print(f"refusing to write a variable named {args.name!r}", file=sys.stderr)
         return 2
 
+    # Fail closed. Without a controlling terminal getpass falls back to reading
+    # stdin WITH ECHO ON — on the documented server path (driven through an MCP
+    # runner, not a tty) that would print the secret into the captured output,
+    # the one thing this script exists to prevent. A stderr warning is not
+    # enough when the damage is "rotate the key again".
+    if not sys.stdin.isatty():
+        print("no terminal available: this would echo the secret. Run it in an "
+              "interactive shell (ssh to the host if need be).", file=sys.stderr)
+        return 2
+
     value = getpass.getpass(f"{args.name} (input hidden, paste and press return): ").strip()
     if not value:
         print("nothing entered; file unchanged", file=sys.stderr)
@@ -50,8 +60,24 @@ def main() -> int:
     if not replaced:
         lines.append(prefix + value)
 
-    with open(args.file, "w") as fh:
-        fh.write("\n".join(lines) + "\n")
+    # Write a private temp file and rename over the target. Truncating the real
+    # file first meant an interrupt (Ctrl-C, full disk, encoding error) between
+    # truncation and the finished write destroyed every OTHER secret in it —
+    # and .env is gitignored, so there is nothing to recover from. Creating the
+    # temp file with 0600 from the start also closes the window where a
+    # newly-created env file sits at 0644 with a secret already in it.
+    tmp = args.file + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("\n".join(lines) + "\n")
+        os.replace(tmp, args.file)  # atomic within one filesystem
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     os.chmod(args.file, 0o600)
 
     # No length, no last-four, no digest: a fingerprint is still key material,

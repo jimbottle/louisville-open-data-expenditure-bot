@@ -50,6 +50,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from analytics_agent import (
+    EmptyCompletionError,
     execute_sql_safe,
     is_daily_cap_error,
     is_quota_error,
@@ -111,9 +112,9 @@ RATE_LIMIT_MSG = "Evan buys his inference on the cheap and we just hit the provi
 # Shown when OpenRouter's free daily allowance is spent and no fallback answered.
 # Distinct from QUOTA_MSG: this one DOES clear by itself, at midnight UTC.
 DAILY_CAP_MSG = (
-    "Lou has used up today's free allowance from its language-model provider, and the "
-    "paid backup didn't answer either. Nothing is wrong with your question — the free "
-    "quota resets at midnight UTC, so try again tomorrow. The example answers below are "
+    "Lou has used up today's free allowance from its language-model provider, and no "
+    "backup could pick it up. Nothing is wrong with your question — the free quota "
+    "resets at midnight UTC, so try again tomorrow. The example answers below are "
     "cached and still work."
 )
 
@@ -387,6 +388,10 @@ def is_service_error(e: Exception) -> bool:
         openai.AuthenticationError, openai.PermissionDeniedError,
         openai.NotFoundError, openai.APIConnectionError,
         openai.APITimeoutError, openai.InternalServerError,
+        # A provider that answers with no content at all is our problem too.
+        # Without this it fell through to the generic branch and told the user
+        # to reword a question they had written perfectly well.
+        EmptyCompletionError,
     )):
         return True
     # String fallback ONLY for LLM-specific phrasings. Deliberately narrow: the
