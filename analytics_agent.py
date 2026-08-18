@@ -78,6 +78,18 @@ def _mark_free_tier_exhausted(exhausted: bool = True) -> None:
     _free_tier_exhausted_at = time.time() if exhausted else None
 
 
+def is_daily_cap_error(e: Exception) -> bool:
+    """OpenRouter's free-model DAILY allowance is spent (50/day under $10 of credits).
+
+    It arrives as a 429, but unlike an ordinary rate limit it does not clear in
+    16 seconds — it resets at midnight UTC. Waiting out the retry ladder just
+    stalls the user for ~48s before the same failure, so this is handled on the
+    quota path (straight to the fallback provider) rather than the rate-limit one.
+    """
+    s = str(e).lower()
+    return "free-models-per-day" in s or ("per-day" in s and "free" in s)
+
+
 def _call_with_retry(fn, on_retry=None, fallback_fn=None):
     """Retry on 429 rate limit errors. Always tries free tier first, falls back to paid only when confirmed limited."""
     global _last_tier_used
@@ -105,11 +117,11 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
             # reaching the latch — the same stall on all three LLM calls of
             # every question. Out of credit never clears by waiting; only a
             # different (funded) key can succeed.
-            if is_quota_error(e):
+            if is_quota_error(e) or is_daily_cap_error(e):
                 if not fallback_fn:
-                    log.error("LLM account out of credit and no fallback key configured: %s", e)
+                    log.error("Primary key exhausted (credit or daily cap) and no fallback key configured: %s", e)
                     raise
-                log.info("Primary key out of credit, using paid tier")
+                log.info("Primary key exhausted (credit or daily allowance), using paid tier")
                 if on_retry:
                     on_retry(attempt, MAX_RETRIES, 0)
                 try:

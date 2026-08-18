@@ -171,7 +171,12 @@ OpenRouter's catalogue if a slug disappears.
 **Free-tier limits.** OpenRouter caps `:free` models at 20 requests/minute and
 **50 requests/day** — 1,000/day once the account has purchased $10 of credits.
 The bot makes 2-3 LLM calls per question, so 50/day is roughly 16-25 questions
-before the Cerebras fallback carries everything. Check a key's status with
+before the Cerebras fallback carries everything — the deliberate choice
+(2026-08-18) is to let it, rather than buy credits. That cap arrives as a 429
+saying `free-models-per-day`, which `is_daily_cap_error` routes onto the quota
+path (immediate fallback, no 16s retry ladder, since it only resets at midnight
+UTC). If both providers are exhausted the user sees `DAILY_CAP_MSG`, which says
+the allowance resets — not `QUOTA_MSG`, which asks for money. Check a key's status with
 `curl -s https://openrouter.ai/api/v1/key -H "Authorization: Bearer $OPENROUTER_API_KEY"`
 (`is_free_tier` tells you which cap applies).
 

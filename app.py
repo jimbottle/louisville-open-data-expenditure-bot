@@ -51,6 +51,7 @@ from fastapi.staticfiles import StaticFiles
 
 from analytics_agent import (
     execute_sql_safe,
+    is_daily_cap_error,
     is_quota_error,
     generate_sql,
     MAX_DISPLAY_ROWS,
@@ -107,6 +108,15 @@ RATE_LIMIT_MSG = "Evan buys his inference on the cheap and we just hit the provi
 # Shown when the LLM account is out of credit (HTTP 402). Deliberately explicit
 # that this is a funding problem on our end: it does NOT clear on its own like a
 # rate limit does, so "try again in a few minutes" would be a lie.
+# Shown when OpenRouter's free daily allowance is spent and no fallback answered.
+# Distinct from QUOTA_MSG: this one DOES clear by itself, at midnight UTC.
+DAILY_CAP_MSG = (
+    "Lou has used up today's free allowance from its language-model provider, and the "
+    "paid backup didn't answer either. Nothing is wrong with your question — the free "
+    "quota resets at midnight UTC, so try again tomorrow. The example answers below are "
+    "cached and still work."
+)
+
 QUOTA_MSG = (
     "Lou's language-model account is out of credit, so the provider is refusing new "
     "queries until Evan puts more money on it. Nothing is wrong with your question, and "
@@ -1091,7 +1101,12 @@ async def ask(request: Request):
                 return
         except Exception as e:
             log.error("SQL generation failed: %s", e)
-            if is_quota_error(e):
+            if is_daily_cap_error(e):
+                track_error("daily_cap", str(e)[:200])
+                yield send("log", {"content": "Free daily allowance exhausted at the provider."})
+                yield send("debug", {"content": f"Daily cap detail: {e}"})
+                yield send("error", {"content": DAILY_CAP_MSG})
+            elif is_quota_error(e):
                 track_error("quota", str(e)[:200])
                 yield send("log", {"content": "LLM account out of credit (payment required)."})
                 yield send("debug", {"content": f"Quota/billing error detail: {e}"})
@@ -1139,7 +1154,12 @@ async def ask(request: Request):
                 with db_lock:
                     result_df, result_str = execute_sql_safe(con, sql)
             except Exception as e2:
-                if is_quota_error(e2):
+                if is_daily_cap_error(e2):
+                    track_error("daily_cap", str(e2)[:200])
+                    yield send("log", {"content": "Free daily allowance exhausted at the provider."})
+                    yield send("debug", {"content": f"Daily cap detail: {e2}"})
+                    yield send("error", {"content": DAILY_CAP_MSG})
+                elif is_quota_error(e2):
                     track_error("quota", str(e2)[:200])
                     yield send("log", {"content": "LLM account out of credit (payment required)."})
                     yield send("debug", {"content": f"Quota/billing error detail: {e2}"})
@@ -1295,7 +1315,12 @@ Explain in plain text (no markdown) why this likely returned no results based on
         except Exception as e:
             draft_error = e
             log.error("Interpretation failed: %s", e)
-            if is_quota_error(e):
+            if is_daily_cap_error(e):
+                track_error("daily_cap", str(e)[:200])
+                yield send("log", {"content": "Free daily allowance exhausted during interpretation."})
+                yield send("debug", {"content": f"Daily cap detail: {e}"})
+                yield send("error", {"content": DAILY_CAP_MSG})
+            elif is_quota_error(e):
                 track_error("quota", str(e)[:200])
                 yield send("log", {"content": "LLM account out of credit during interpretation."})
                 yield send("debug", {"content": f"Quota/billing error detail: {e}"})

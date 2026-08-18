@@ -387,3 +387,23 @@ def test_quota_exhaustion_is_tracked_separately_from_rate_limits(client, monkeyp
     before = app.persistent_stats["errors"].get("quota_errors", 0)
     _post(client, "another question about spending")
     assert app.persistent_stats["errors"].get("quota_errors", 0) == before + 1
+
+
+def test_daily_cap_says_it_resets_rather_than_asking_for_money(client, monkeypatch):
+    """Free allowance spent is not the same as out of credit: it clears by itself."""
+    import app
+
+    def _capped(*a, **kw):
+        import httpx
+        import openai
+        resp = httpx.Response(429, request=httpx.Request("POST", "https://openrouter.ai/api/v1"))
+        raise openai.RateLimitError(
+            "Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 free model requests per day",
+            response=resp, body=None,
+        )
+
+    monkeypatch.setattr(app, "generate_sql", _capped)
+    errors = [e["content"] for e in _events(_post(client, "spending by agency")) if e["type"] == "error"]
+    assert errors == [app.DAILY_CAP_MSG]
+    assert errors[0] != app.QUOTA_MSG
+    assert errors[0] != app.RATE_LIMIT_MSG

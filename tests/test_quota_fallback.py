@@ -259,3 +259,44 @@ def test_ordinary_rate_limit_still_retries_and_falls_back(monkeypatch):
     assert calls == ["primary", "primary", "paid"]
     assert slept == [aa.RETRY_BASE_DELAY]
     assert not aa._free_tier_is_exhausted()
+
+
+# ── OpenRouter free daily allowance ──────────────────────────────────────────
+
+def _daily_cap_429():
+    """OpenRouter's free-tier daily allowance (50/day under $10 of credits)."""
+    req = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    resp = httpx.Response(429, request=req)
+    return openai.RateLimitError(
+        "Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. "
+        "Add 10 credits to unlock 1000 free model requests per day', 'code': 429}}",
+        response=resp,
+        body=None,
+    )
+
+
+def test_daily_cap_is_distinguished_from_an_ordinary_rate_limit():
+    assert aa.is_daily_cap_error(_daily_cap_429())
+    assert not aa.is_daily_cap_error(_rate_limited())
+    assert not aa.is_daily_cap_error(_payment_required())
+
+
+def test_daily_cap_goes_straight_to_the_fallback_provider(monkeypatch):
+    """It resets at midnight UTC, so the 16s retry ladder can only waste the
+    user's time before failing the same way."""
+    slept = []
+    monkeypatch.setattr(aa.time, "sleep", lambda s: slept.append(s))
+    calls = []
+
+    def primary():
+        calls.append("primary")
+        raise _daily_cap_429()
+
+    def cerebras():
+        calls.append("cerebras")
+        return "answer"
+
+    assert aa._call_with_retry(primary, fallback_fn=cerebras) == "answer"
+    assert calls == ["primary", "cerebras"]
+    assert slept == []
+    assert aa._free_tier_is_exhausted()
