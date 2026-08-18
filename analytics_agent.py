@@ -431,9 +431,12 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
         catalogue_read = True
         if already != model:
             replacement = already
-        elif _catalogue_is_cooling_down():
+        elif fallback_fn and _catalogue_is_cooling_down():
             # Asked recently and could not get an answer; don't stall this
-            # question on the same dead endpoint. Still falls back below.
+            # question on the same dead endpoint — fall back below instead.
+            # Only when there IS a fallback: with none, the listing is the only
+            # route to an answer (a Cerebras-only deployment whose MODEL was
+            # deprecated), so paying the timeout beats failing outright.
             log.info("Skipping model re-resolution: the catalogue listing failed within the last %ds",
                      CATALOGUE_RETRY_SECONDS)
             replacement, catalogue_read = None, False

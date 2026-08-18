@@ -544,3 +544,35 @@ def test_a_successful_listing_clears_the_cooldown(monkeypatch):
         fallback_client="cerebras", fallback_model="gpt-oss-120b",
     ) == "answer from other/model:free"
     assert not aa._catalogue_is_cooling_down()
+
+
+def test_the_cooldown_never_skips_the_only_route_to_an_answer(monkeypatch):
+    """With no fallback configured — a Cerebras-only deployment whose MODEL was
+    deprecated — the listing IS the answer path. Skipping it trades a possible
+    failure for a guaranteed one, for a full minute."""
+    monkeypatch.setenv("CEREBRAS_PAID_API_KEY", "cb-key")
+    attempts = []
+
+    def resolve(client, model):
+        attempts.append(model)
+        if len(attempts) == 1:
+            raise aa.ModelCatalogueUnavailable("one blip")
+        return "a-live-model"
+
+    monkeypatch.setattr(aa, "_resolve_fallback_model", resolve)
+
+    def mk(client, model):
+        def _call():
+            if model == "deprecated-model":
+                raise _not_found()
+            return f"answer from {model}"
+        return _call
+
+    # The blip fails this question...
+    with pytest.raises(openai.NotFoundError):
+        aa._call_with_model_fallback(mk, "client", "deprecated-model")
+    assert aa._catalogue_is_cooling_down()
+    # ...but the next one must still re-list and find the live model, rather
+    # than hard-failing for the rest of the cooldown window.
+    assert aa._call_with_model_fallback(mk, "client", "deprecated-model") == "answer from a-live-model"
+    assert len(attempts) == 2
