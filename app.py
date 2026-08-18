@@ -51,6 +51,7 @@ from fastapi.staticfiles import StaticFiles
 
 from analytics_agent import (
     execute_sql_safe,
+    is_quota_error,
     generate_sql,
     MAX_DISPLAY_ROWS,
     TOTALS_MOVED_NOTE,
@@ -59,6 +60,7 @@ from analytics_agent import (
     TRUNCATION_NOTE,
     get_active_model,
     get_last_tier_used,
+    get_primary_tier,
     get_model_fallback_event,
     interpret_results_stream,
     make_client,
@@ -94,7 +96,16 @@ MODEL = os.environ.get("MODEL", "gpt-oss-120b")  # Cerebras model; override via 
 RAG_SETTINGS = {"min_score": 3.0, "k": 3}
 RAG_DB = ""
 
-RATE_LIMIT_MSG = "Evan was too cheap to use anything other than a free tier and we just hit that free tier's limit. Try again in a few minutes."
+RATE_LIMIT_MSG = "Evan buys his inference on the cheap and we just hit the provider's rate limit. Try again in a few minutes."
+
+# Shown when the LLM account is out of credit (HTTP 402). Deliberately explicit
+# that this is a funding problem on our end: it does NOT clear on its own like a
+# rate limit does, so "try again in a few minutes" would be a lie.
+QUOTA_MSG = (
+    "Lou's language-model account is out of credit, so the provider is refusing new "
+    "queries until Evan puts more money on it. Nothing is wrong with your question, and "
+    "this won't clear on its own — the example answers below are cached and still work."
+)
 
 # ── State ────────────────────────────────────────────────────────────────────
 
@@ -619,9 +630,9 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
     client = make_client()
     paid_client = make_paid_client()
     if paid_client:
-        log.info("Model: %s (paid tier fallback available)", MODEL)
+        log.info("Model: %s (%s tier, paid tier fallback available)", MODEL, get_primary_tier())
     else:
-        log.info("Model: %s (free tier only)", MODEL)
+        log.info("Model: %s (%s tier, no fallback key)", MODEL, get_primary_tier())
     log.info("Logs writing to: %s", LOG_DIR)
 
     # A deploy that forgets TRUSTED_PROXY_IPS silently collapses the per-IP rate
@@ -1073,7 +1084,12 @@ async def ask(request: Request):
                 return
         except Exception as e:
             log.error("SQL generation failed: %s", e)
-            if is_rate_limit_error(e):
+            if is_quota_error(e):
+                track_error("quota", str(e)[:200])
+                yield send("log", {"content": "LLM account out of credit (payment required)."})
+                yield send("debug", {"content": f"Quota/billing error detail: {e}"})
+                yield send("error", {"content": QUOTA_MSG})
+            elif is_rate_limit_error(e):
                 track_error("rate_limit", "SQL generation")
                 yield send("log", {"content": "Rate limit hit during SQL generation. Retries exhausted."})
                 yield send("error", {"content": RATE_LIMIT_MSG})
@@ -1116,7 +1132,12 @@ async def ask(request: Request):
                 with db_lock:
                     result_df, result_str = execute_sql_safe(con, sql)
             except Exception as e2:
-                if is_rate_limit_error(e2):
+                if is_quota_error(e2):
+                    track_error("quota", str(e2)[:200])
+                    yield send("log", {"content": "LLM account out of credit (payment required)."})
+                    yield send("debug", {"content": f"Quota/billing error detail: {e2}"})
+                    yield send("error", {"content": QUOTA_MSG})
+                elif is_rate_limit_error(e2):
                     track_error("rate_limit", "SQL retry")
                     yield send("log", {"content": "Rate limit hit during SQL retry."})
                     yield send("error", {"content": RATE_LIMIT_MSG})
@@ -1267,7 +1288,12 @@ Explain in plain text (no markdown) why this likely returned no results based on
         except Exception as e:
             draft_error = e
             log.error("Interpretation failed: %s", e)
-            if is_rate_limit_error(e):
+            if is_quota_error(e):
+                track_error("quota", str(e)[:200])
+                yield send("log", {"content": "LLM account out of credit during interpretation."})
+                yield send("debug", {"content": f"Quota/billing error detail: {e}"})
+                yield send("error", {"content": QUOTA_MSG})
+            elif is_rate_limit_error(e):
                 track_error("rate_limit", "Interpretation")
                 yield send("log", {"content": "Rate limit hit during interpretation. Retries exhausted."})
                 yield send("error", {"content": RATE_LIMIT_MSG})

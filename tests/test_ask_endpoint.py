@@ -342,3 +342,48 @@ def test_anti_framing_headers_are_sent(client):
     assert r.headers.get("X-Content-Type-Options") == "nosniff"
     # And the SSE stream still works with the middleware in place.
     assert client.post("/api/ask", json={"question": ""}).status_code == 200
+
+
+# ── Out-of-credit (HTTP 402) ─────────────────────────────────────────────────
+
+def _payment_required():
+    """The exact error Cerebras raises once an account's credit runs out."""
+    import httpx
+    import openai
+    resp = httpx.Response(402, request=httpx.Request("POST", "https://api.test/v1/chat/completions"))
+    return openai.APIStatusError(
+        "Error code: 402 - {'message': 'Payment required to access this resource. "
+        "Visit your billing tab.', 'code': 'payment_required'}",
+        response=resp,
+        body={"code": "payment_required"},
+    )
+
+
+def test_quota_exhaustion_says_it_is_a_funding_problem(client, monkeypatch):
+    """A 402 must NOT be reported as 'reword your question' — the user cannot
+    fix it by rewording, and the project is happy to say the bill is unpaid."""
+    import app
+
+    def _broke(*a, **kw):
+        raise _payment_required()
+
+    monkeypatch.setattr(app, "generate_sql", _broke)
+    r = _post(client, "How much grant funding has Louisville received?")
+    events = _events(r)
+    errors = [e["content"] for e in events if e["type"] == "error"]
+    assert errors == [app.QUOTA_MSG]
+    assert "out of credit" in errors[0]
+    assert "reword" not in errors[0].lower()
+    assert errors[0] != app.RATE_LIMIT_MSG
+
+
+def test_quota_exhaustion_is_tracked_separately_from_rate_limits(client, monkeypatch):
+    import app
+
+    def _broke(*a, **kw):
+        raise _payment_required()
+
+    monkeypatch.setattr(app, "generate_sql", _broke)
+    before = app.persistent_stats["errors"].get("quota_errors", 0)
+    _post(client, "another question about spending")
+    assert app.persistent_stats["errors"].get("quota_errors", 0) == before + 1

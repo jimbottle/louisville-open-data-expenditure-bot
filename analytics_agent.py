@@ -39,13 +39,62 @@ def get_last_tier_used() -> str:
     return _last_tier_used
 
 
+def is_quota_error(e: Exception) -> bool:
+    """Billing exhaustion on the LLM account — only paying more money fixes it.
+
+    Distinct from is_rate_limit_error: a 429 clears by itself in a minute; this
+    does not. Cerebras retired its always-free tier in July 2026, so an expired
+    trial now answers every call with HTTP 402 `payment_required`, which the
+    openai SDK raises as a bare APIStatusError (no dedicated subclass) — it fell
+    through to the generic handler and told users to reword their question.
+
+    Checked BEFORE the rate-limit branch because OpenAI-compatible providers
+    report the same condition as a 429 with `insufficient_quota`.
+    """
+    if getattr(e, "status_code", None) == 402:
+        return True
+    s = str(e).lower()
+    return any(k in s for k in ("payment_required", "insufficient_quota", "insufficient_credit"))
+
+
+# Once the free key answers 402, it will keep answering 402 until someone tops
+# the account up, so every later call would waste a round trip discovering that
+# again (three LLM calls per question). Latch it and go straight to the paid key,
+# rechecking the free key occasionally in case credit was added.
+_free_tier_exhausted_at = None
+FREE_TIER_RECHECK_SECONDS = 900
+
+
+def _free_tier_is_exhausted() -> bool:
+    """True while the free key is known to be out of credit (within the recheck window)."""
+    return (
+        _free_tier_exhausted_at is not None
+        and (time.time() - _free_tier_exhausted_at) < FREE_TIER_RECHECK_SECONDS
+    )
+
+
+def _mark_free_tier_exhausted(exhausted: bool = True) -> None:
+    global _free_tier_exhausted_at
+    _free_tier_exhausted_at = time.time() if exhausted else None
+
+
 def _call_with_retry(fn, on_retry=None, fallback_fn=None):
     """Retry on 429 rate limit errors. Always tries free tier first, falls back to paid only when confirmed limited."""
     global _last_tier_used
+    if fallback_fn and _free_tier_is_exhausted():
+        try:
+            result = fallback_fn()
+            _last_tier_used = "paid"
+            return result
+        except Exception as paid_err:
+            # Paid tier is unusable too — clear the latch so the free key is
+            # retried normally below rather than being skipped on a stale flag.
+            log.warning("Paid tier failed while free tier was latched out: %s", paid_err)
+            _mark_free_tier_exhausted(False)
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             result = fn()
-            _last_tier_used = "free"
+            _last_tier_used = get_primary_tier()
             return result
         except openai.RateLimitError as e:
             delay = RETRY_BASE_DELAY
@@ -61,7 +110,7 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
                 time.sleep(delay)
                 try:
                     result = fn()
-                    _last_tier_used = "free"
+                    _last_tier_used = get_primary_tier()
                     return result
                 except openai.RateLimitError:
                     # Free tier still limited — fall back to paid if available
@@ -85,6 +134,24 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
                 on_retry(attempt, MAX_RETRIES, delay)
             time.sleep(delay)
         except Exception as e:
+            # Out of credit on this key. Unlike a 429 this never clears on its
+            # own, so retrying the same client is pointless — but the paid key
+            # is a different account and usually still funded. Cerebras retired
+            # its always-free tier in July 2026, so the free key 402s on every
+            # call; without this the paid fallback (only wired to 429) was never
+            # reached and every live question failed.
+            if is_quota_error(e) and fallback_fn:
+                log.info("Free tier out of credit (402), using paid tier")
+                if on_retry:
+                    on_retry(attempt, MAX_RETRIES, 0)
+                try:
+                    result = fallback_fn()
+                    _last_tier_used = "paid"
+                    _mark_free_tier_exhausted()
+                    return result
+                except Exception as fallback_err:
+                    log.warning("Paid tier fallback failed: %s", fallback_err)
+                    raise
             log.error("LLM call failed (attempt %d): %s", attempt, e)
             raise
 
@@ -743,11 +810,31 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
     return result_df, result_str
 
 
+def _primary_api_key() -> str:
+    """The key the main client talks to the provider with.
+
+    Cerebras retired its always-free tier in July 2026 (an expired $5 trial now
+    402s on every call), so a deployment may carry only the paid key. Falling
+    through to CEREBRAS_PAID_API_KEY lets that be the whole configuration
+    instead of forcing the same secret to be set twice.
+    """
+    return (
+        os.environ.get("CEREBRAS_API_KEY")
+        or os.environ.get("CEREBRAS_PAID_API_KEY")
+        or os.environ.get("GEMINI_API_KEY", "")
+    )
+
+
+def get_primary_tier() -> str:
+    """'free' or 'paid' — which tier the main client's key belongs to."""
+    return "free" if os.environ.get("CEREBRAS_API_KEY") else "paid"
+
+
 def make_client(base_url: str = None, api_key: str = None) -> openai.OpenAI:
     """Create an OpenAI-compatible client. Disables built-in retries — we handle them in _call_with_retry."""
     import httpx
     return openai.OpenAI(
-        api_key=api_key or os.environ.get("CEREBRAS_API_KEY") or os.environ.get("GEMINI_API_KEY", ""),
+        api_key=api_key or _primary_api_key(),
         base_url=base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL),
         max_retries=0,
         timeout=httpx.Timeout(60.0, connect=10.0),
@@ -755,10 +842,15 @@ def make_client(base_url: str = None, api_key: str = None) -> openai.OpenAI:
 
 
 def make_paid_client(base_url: str = None, api_key: str = None) -> openai.OpenAI:
-    """Create a paid-tier client as fallback. Returns None if no paid key is configured."""
+    """Create a paid-tier fallback client, or None when there is nothing to fall back TO.
+
+    None when no paid key is configured, and also when the paid key IS the
+    primary client's key: falling back from a key to itself just doubles every
+    failure (two 402s, two rate limits) with no chance of a different outcome.
+    """
     import httpx
     paid_key = api_key or os.environ.get("CEREBRAS_PAID_API_KEY", "")
-    if not paid_key:
+    if not paid_key or (api_key is None and paid_key == _primary_api_key()):
         return None
     return openai.OpenAI(
         api_key=paid_key,

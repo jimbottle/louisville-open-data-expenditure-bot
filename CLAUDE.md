@@ -95,7 +95,7 @@ docker stop louisville-bot-prev
 # refresh_data.py must be run with the same ADMIN_TOKEN in their env).
 docker run -d --name louisville-bot --restart unless-stopped -p 8000:8000 \
   -v louisville-data:/data:ro -v louisville-state:/state -v louisville-logs:/logs \
-  -e CEREBRAS_API_KEY=... -e CEREBRAS_PAID_API_KEY=... -e MODEL=gpt-oss-120b \
+  -e CEREBRAS_PAID_API_KEY=... -e MODEL=gpt-oss-120b \
   -e LLM_BASE_URL=https://api.cerebras.ai/v1 -e DATA_DIR=/data -e STATS_DIR=/state -e LOG_DIR=/logs \
   -e TRUSTED_PROXY_IPS=172.17.0.1 -e ADMIN_TOKEN=... \
   --health-cmd "curl -sf --max-time 5 http://localhost:8000/api/health || exit 1" \
@@ -136,12 +136,29 @@ Persistent state lives in Docker named volumes, not the image: `louisville-data`
 
 The old `docker-compose.yml` and `deploy.sh` were **removed** (they described a superseded SSH-rsync flow that leaked `.env` and carried the 45s health `start_period` that caused the 2026-08-11 outage). The authoritative deploy is the MCP Docker flow above; there is no compose/rsync path.
 
+### API keys / tiers (the free tier is gone)
+
+Cerebras **retired its always-free tier in July 2026**, replacing it with a one-time
+$5 trial that expires 30 days after it is granted. The old free key now answers
+**HTTP 402 `payment_required`** on every call, so the bot runs on the paid
+(Raylytics pay-as-you-go) credits: set **`CEREBRAS_PAID_API_KEY` only** and leave
+`CEREBRAS_API_KEY` unset — `make_client()` falls through to the paid key and
+`make_paid_client()` returns None (no point falling back from a key to itself).
+
+If a free-tier key is ever set again, it is the primary and the paid key becomes
+the fallback — used on a 429 *and* on a 402, with the exhausted free key latched
+out for 15 minutes so it isn't re-probed on every call. A 402 with no working key
+shows the user `QUOTA_MSG` ("out of credit"), never "try rewording your question".
+
+Balance/limits: https://cloud.cerebras.ai → Pay as you go. Developer-tier limits
+for `gpt-oss-120b` are 1M TPM / 1K RPM (the 5 RPM / 1M TPD trial caps do not apply).
+
 ### LLM model (`MODEL` env)
 
 Currently `gpt-oss-120b` on Cerebras. **Cerebras deprecates models without notice** — the bot previously ran `qwen-3-235b-a22b-instruct-2507`, which started returning `404 model_not_found` on every live call (cached starter answers still worked, which masked it). If live queries suddenly fail, list the account's current models and switch:
 
 ```bash
-curl -s https://api.cerebras.ai/v1/models -H "Authorization: Bearer $CEREBRAS_API_KEY"   # pick a valid id
+curl -s https://api.cerebras.ai/v1/models -H "Authorization: Bearer $CEREBRAS_PAID_API_KEY"   # pick a valid id
 # then recreate the container with the new -e MODEL=... (no image rebuild needed)
 ```
 
