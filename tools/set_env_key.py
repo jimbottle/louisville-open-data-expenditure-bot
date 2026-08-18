@@ -6,8 +6,8 @@ or in an agent transcript.
     python3 tools/set_env_key.py --file /Users/macserver/louisville-bot.env OPENROUTER_API_KEY
 
 The value is read with a hidden prompt (getpass), the line is replaced in place
-(or appended if absent), the file is chmod 600, and only a fingerprint —
-length and last four characters — is printed back.
+(or appended if absent), the file is chmod 600, and nothing about
+the value is printed back.
 
 Exists because editing a dot-prefixed file is awkward in Finder (⌘⇧. toggles
 hidden files) and because pasting a key into a chat or a shell command leaks it
@@ -54,8 +54,9 @@ def main() -> int:
         fh.write("\n".join(lines) + "\n")
     os.chmod(args.file, 0o600)
 
-    print(f"{'replaced' if replaced else 'appended'} {args.name} in {args.file} "
-          f"(len={len(value)}, ...{value[-4:]}); file is now mode 600")
+    # No length, no last-four, no digest: a fingerprint is still key material,
+    # and any of it on a screen or in a log is a reason to rotate again.
+    print(f"{'replaced' if replaced else 'appended'} {args.name} in {args.file}; mode 600")
     return 0
 
 
