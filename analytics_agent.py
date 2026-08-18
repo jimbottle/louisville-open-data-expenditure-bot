@@ -61,25 +61,27 @@ def is_quota_error(e: Exception) -> bool:
     return any(k in s for k in ("payment_required", "insufficient_quota", "insufficient_credit"))
 
 
-# Once the free key answers 402, it will keep answering 402 until someone tops
-# the account up, so every later call would waste a round trip discovering that
-# again (three LLM calls per question). Latch it and go straight to the paid key,
-# rechecking the free key occasionally in case credit was added.
-_free_tier_exhausted_at = None
-FREE_TIER_RECHECK_SECONDS = 900
+# Some primary failures do not clear on a retry: a key that is out of credit
+# keeps answering 402, and a retired model with no free replacement keeps
+# 404-ing (and re-listing a several-hundred-entry catalogue to discover that).
+# Every later call would pay to learn the same thing, three times per question.
+# Latch it, go straight to the fallback provider, and recheck occasionally so
+# credit added or a slug restored heals by itself.
+_primary_unusable_at = None
+PRIMARY_RECHECK_SECONDS = 900
 
 
-def _free_tier_is_exhausted() -> bool:
-    """True while the free key is known to be out of credit (within the recheck window)."""
+def _primary_is_unusable() -> bool:
+    """True while the primary is known to be unusable (within the recheck window)."""
     return (
-        _free_tier_exhausted_at is not None
-        and (time.time() - _free_tier_exhausted_at) < FREE_TIER_RECHECK_SECONDS
+        _primary_unusable_at is not None
+        and (time.time() - _primary_unusable_at) < PRIMARY_RECHECK_SECONDS
     )
 
 
-def _mark_free_tier_exhausted(exhausted: bool = True) -> None:
-    global _free_tier_exhausted_at
-    _free_tier_exhausted_at = time.time() if exhausted else None
+def _mark_primary_unusable(unusable: bool = True) -> None:
+    global _primary_unusable_at
+    _primary_unusable_at = time.time() if unusable else None
 
 
 def is_daily_cap_error(e: Exception) -> bool:
@@ -131,7 +133,7 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
         if provenance is not None:
             provenance["used_fallback"] = via_fallback
 
-    if fallback_fn and _free_tier_is_exhausted():
+    if fallback_fn and _primary_is_unusable():
         try:
             result = fallback_fn()
             _served(True)
@@ -140,7 +142,7 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
             # Fallback is unusable too — clear the latch so the primary is
             # retried normally below rather than being skipped on a stale flag.
             log.warning("Fallback provider failed while primary was latched out: %s", paid_err)
-            _mark_free_tier_exhausted(False)
+            _mark_primary_unusable(False)
 
     fallback_tried = False
     for attempt in range(1, MAX_RETRIES + 1):
@@ -172,7 +174,7 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
                         # Only for credit/allowance exhaustion. Latching on an
                         # ordinary 429 would route 15 minutes of traffic to the
                         # billed provider over a one-minute spike.
-                        _mark_free_tier_exhausted()
+                        _mark_primary_unusable()
                     return result
                 except Exception as fallback_err:
                     log.warning("Fallback provider failed: %s", fallback_err)
@@ -398,12 +400,30 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
             # while a funded Cerebras key stood idle.
             if fallback_fn:
                 log.warning("No replacement for '%s' at the primary provider; using the fallback provider", model)
+                # Latch first: in this state EVERY call lands here, and each one
+                # would otherwise pay a 404 plus a fresh models.list() over a
+                # several-hundred-entry catalogue — two or three times per
+                # question — to rediscover what we already know. Subsequent calls
+                # go straight to the fallback until the recheck window expires,
+                # so a restored slug heals by itself.
+                _mark_primary_unusable()
                 try:
-                    result = fallback_fn()
+                    # Through the ladder, not a bare call: this is the only path
+                    # serving the question now, so the fallback deserves the same
+                    # retries and the same on_retry progress events as anywhere
+                    # else. A single transient 429 used to kill the question.
+                    result = _call_with_retry(fallback_fn, on_retry=on_retry)
                     _last_tier_used = "paid"
                     return result
                 except Exception as fallback_err:
                     log.warning("Fallback provider failed after model_not_found: %s", fallback_err)
+                    # app.py classifies the exception it is given and does not
+                    # look at __cause__, so an out-of-credit or spent-allowance
+                    # fallback has to surface on its own terms — otherwise the
+                    # user is told to "try again in a little while" about a
+                    # condition that only money or midnight resolves.
+                    if is_quota_error(fallback_err) or is_daily_cap_error(fallback_err):
+                        raise
                     raise e from fallback_err
             raise
         log.warning("Model '%s' not found at provider; retrying with '%s'", model, replacement)

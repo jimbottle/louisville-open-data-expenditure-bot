@@ -21,9 +21,9 @@ import analytics_agent as aa  # noqa: E402
 @pytest.fixture(autouse=True)
 def _clear_free_tier_latch():
     """The exhausted-free-tier latch is module state; don't leak it between tests."""
-    aa._mark_free_tier_exhausted(False)
+    aa._mark_primary_unusable(False)
     yield
-    aa._mark_free_tier_exhausted(False)
+    aa._mark_primary_unusable(False)
 
 
 def _payment_required():
@@ -145,9 +145,9 @@ def test_latch_expires_so_topped_up_credit_is_picked_back_up(monkeypatch):
     def paid():
         return "paid answer"
 
-    aa._mark_free_tier_exhausted()
+    aa._mark_primary_unusable()
     real_time = aa.time.time
-    monkeypatch.setattr(aa.time, "time", lambda: real_time() + aa.FREE_TIER_RECHECK_SECONDS + 1)
+    monkeypatch.setattr(aa.time, "time", lambda: real_time() + aa.PRIMARY_RECHECK_SECONDS + 1)
     assert aa._call_with_retry(free, fallback_fn=paid) == "free answer"
 
 
@@ -163,10 +163,10 @@ def test_latch_clears_when_the_paid_tier_also_fails():
         calls.append("paid")
         raise RuntimeError("paid key revoked")
 
-    aa._mark_free_tier_exhausted()
+    aa._mark_primary_unusable()
     assert aa._call_with_retry(free, fallback_fn=paid) == "free answer"
     assert calls == ["paid", "free"]
-    assert not aa._free_tier_is_exhausted()
+    assert not aa._primary_is_unusable()
 
 
 # ── Key selection (single-key operation) ─────────────────────────────────────
@@ -221,7 +221,7 @@ def test_insufficient_quota_429_skips_the_rate_limit_ladder(monkeypatch):
     assert aa._call_with_retry(primary, fallback_fn=paid) == "answer"
     assert calls == ["primary", "paid"]
     assert slept == []
-    assert aa._free_tier_is_exhausted()
+    assert aa._primary_is_unusable()
 
 
 def test_insufficient_quota_429_without_a_fallback_fails_fast(monkeypatch):
@@ -258,7 +258,7 @@ def test_ordinary_rate_limit_still_retries_and_falls_back(monkeypatch):
     assert aa._call_with_retry(primary, fallback_fn=paid) == "answer"
     assert calls == ["primary", "primary", "paid"]
     assert slept == [aa.RETRY_BASE_DELAY]
-    assert not aa._free_tier_is_exhausted()
+    assert not aa._primary_is_unusable()
 
 
 # ── OpenRouter free daily allowance ──────────────────────────────────────────
@@ -299,7 +299,7 @@ def test_daily_cap_goes_straight_to_the_fallback_provider(monkeypatch):
     assert aa._call_with_retry(primary, fallback_fn=cerebras) == "answer"
     assert calls == ["primary", "cerebras"]
     assert slept == []
-    assert aa._free_tier_is_exhausted()
+    assert aa._primary_is_unusable()
 
 
 # ── Mixed failure sequences (the ladder's second attempt) ────────────────────
@@ -324,7 +324,7 @@ def test_rate_limit_then_quota_falls_over_and_latches(monkeypatch):
     assert aa._call_with_retry(primary, fallback_fn=fallback) == "answer"
     assert calls == ["primary", "primary", "fallback"]
     assert slept == [aa.RETRY_BASE_DELAY]   # one wait, for the ordinary 429 only
-    assert aa._free_tier_is_exhausted()
+    assert aa._primary_is_unusable()
 
 
 def test_rate_limit_then_daily_cap_falls_over_and_latches(monkeypatch):
@@ -337,7 +337,7 @@ def test_rate_limit_then_daily_cap_falls_over_and_latches(monkeypatch):
         raise errors.pop(0)
 
     assert aa._call_with_retry(primary, fallback_fn=lambda: "answer") == "answer"
-    assert aa._free_tier_is_exhausted()
+    assert aa._primary_is_unusable()
 
 
 def test_plain_rate_limit_fallback_does_not_latch(monkeypatch):
@@ -349,7 +349,7 @@ def test_plain_rate_limit_fallback_does_not_latch(monkeypatch):
         raise _rate_limited()
 
     assert aa._call_with_retry(primary, fallback_fn=lambda: "answer") == "answer"
-    assert not aa._free_tier_is_exhausted()
+    assert not aa._primary_is_unusable()
 
 
 def test_failed_fallback_surfaces_the_primary_error_not_the_fallback_one():
@@ -382,7 +382,7 @@ def test_empty_completion_fails_over_to_the_other_provider():
 
     assert aa._call_with_retry(primary, fallback_fn=fallback) == "answer"
     assert calls == ["primary", "fallback"]
-    assert not aa._free_tier_is_exhausted()  # nothing was exhausted
+    assert not aa._primary_is_unusable()  # nothing was exhausted
 
 
 def test_empty_completion_without_a_fallback_raises_its_own_type():

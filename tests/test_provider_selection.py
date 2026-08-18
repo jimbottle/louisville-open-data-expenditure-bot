@@ -27,9 +27,9 @@ def _clean_provider_env(monkeypatch):
                 "MODEL", "LLM_BASE_URL"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(aa, "_active_model", None)
-    aa._mark_free_tier_exhausted(False)
+    aa._mark_primary_unusable(False)
     yield
-    aa._mark_free_tier_exhausted(False)
+    aa._mark_primary_unusable(False)
 
 
 def test_openrouter_key_makes_it_the_primary(monkeypatch):
@@ -285,3 +285,114 @@ def test_provenance_is_per_call_not_a_shared_global():
     aa._call_with_retry(broken, provenance=b, fallback_fn=lambda: "fallback served")
     assert a == {"used_fallback": False}
     assert b == {"used_fallback": True}
+
+
+def _not_found():
+    import httpx
+    return openai.NotFoundError(
+        "model_not_found",
+        response=httpx.Response(404, request=httpx.Request("POST", "https://api.test/v1")),
+        body={"code": "model_not_found"},
+    )
+
+
+def test_no_replacement_recovery_gets_the_retry_ladder(monkeypatch):
+    """This branch is the only thing serving questions while the slug is gone, so
+    a single transient 429 on the fallback must not kill the question."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setattr(aa, "_resolve_fallback_model", lambda c, m: None)
+    monkeypatch.setattr(aa.time, "sleep", lambda s: None)
+    progress = []
+    fallback_attempts = []
+
+    def mk(client, model):
+        def _call():
+            if client == "primary":
+                raise _not_found()
+            fallback_attempts.append(model)
+            if len(fallback_attempts) == 1:
+                import httpx
+                raise openai.RateLimitError(
+                    "429 slow down",
+                    response=httpx.Response(429, request=httpx.Request("POST", "https://api.test/v1")),
+                    body=None,
+                )
+            return f"answer from {model}"
+        return _call
+
+    out = aa._call_with_model_fallback(
+        mk, "primary", "dead/model:free",
+        on_retry=lambda *a: progress.append(a),
+        fallback_client="cerebras", fallback_model="gpt-oss-120b",
+    )
+    assert out == "answer from gpt-oss-120b"
+    assert len(fallback_attempts) == 2, "the fallback should have been retried"
+    assert progress, "the SSE stream should have been told a retry was happening"
+
+
+def test_no_replacement_latches_so_the_catalogue_is_not_re_listed(monkeypatch):
+    """Every call lands here while the slug is gone; re-listing a several-hundred
+    entry catalogue 2-3 times per question is the cost the latch exists to avoid."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    listings = []
+
+    def fake_resolve(client, model):
+        listings.append(model)
+        return None
+
+    monkeypatch.setattr(aa, "_resolve_fallback_model", fake_resolve)
+
+    def mk(client, model):
+        def _call():
+            if client == "primary":
+                raise _not_found()
+            return "answer from cerebras"
+        return _call
+
+    for _ in range(3):
+        assert aa._call_with_model_fallback(
+            mk, "primary", "dead/model:free",
+            fallback_client="cerebras", fallback_model="gpt-oss-120b",
+        ) == "answer from cerebras"
+    assert len(listings) == 1, f"catalogue listed {len(listings)} times; should be latched after the first"
+    assert aa._primary_is_unusable()
+
+
+def test_latch_expires_so_a_restored_slug_is_picked_back_up(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    aa._mark_primary_unusable()
+    real_time = aa.time.time
+    monkeypatch.setattr(aa.time, "time", lambda: real_time() + aa.PRIMARY_RECHECK_SECONDS + 1)
+
+    def mk(client, model):
+        return lambda: f"answer from {client}"
+
+    assert aa._call_with_model_fallback(
+        mk, "primary", "back/from/the/dead:free",
+        fallback_client="cerebras", fallback_model="gpt-oss-120b",
+    ) == "answer from primary"
+
+
+def test_out_of_credit_fallback_surfaces_as_a_quota_error(monkeypatch):
+    """app.py classifies the exception it is handed and never inspects __cause__,
+    so this must not arrive as a model_not_found ("try again in a little while")."""
+    import httpx
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setattr(aa, "_resolve_fallback_model", lambda c, m: None)
+
+    def mk(client, model):
+        def _call():
+            if client == "primary":
+                raise _not_found()
+            raise openai.APIStatusError(
+                "402 payment_required",
+                response=httpx.Response(402, request=httpx.Request("POST", "https://api.test/v1")),
+                body={"code": "payment_required"},
+            )
+        return _call
+
+    with pytest.raises(Exception) as exc:
+        aa._call_with_model_fallback(mk, "primary", "dead/model:free",
+                                    fallback_client="cerebras", fallback_model="gpt-oss-120b")
+    assert aa.is_quota_error(exc.value)

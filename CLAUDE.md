@@ -170,7 +170,11 @@ another model — but only to one of `DEFAULT_OPENROUTER_MODEL_FALLBACKS`, or
 failing that any `:free` slug the account can see. It will never cross into
 OpenRouter's paid catalogue, and a replacement that had to be rescued by the
 Cerebras fallback is not pinned (it would put a failing round trip in front of
-every later question).
+every later question). If no free slug is available at all, the question is
+served by Cerebras — through the normal retry ladder — and the primary is
+latched out for 15 minutes (`PRIMARY_RECHECK_SECONDS`) so each later call skips
+the dead 404 and the catalogue listing behind it, healing by itself if the slug
+comes back.
 
 **Free-tier limits.** OpenRouter caps `:free` models at 20 requests/minute and
 **50 requests/day** — 1,000/day once the account has purchased $10 of credits.
