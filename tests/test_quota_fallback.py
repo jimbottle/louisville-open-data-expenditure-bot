@@ -39,6 +39,18 @@ def _payment_required():
     )
 
 
+def _insufficient_quota_429():
+    """Billing exhaustion as OpenAI-compatible providers other than Cerebras send it:
+    a 429, i.e. the same exception class as an ordinary rate limit."""
+    req = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    resp = httpx.Response(429, request=req)
+    return openai.RateLimitError(
+        "Error code: 429 - {'code': 'insufficient_quota', 'message': 'You exceeded your current quota'}",
+        response=resp,
+        body={"code": "insufficient_quota"},
+    )
+
+
 def _rate_limited():
     req = httpx.Request("POST", "https://api.test/v1/chat/completions")
     resp = httpx.Response(429, request=req)
@@ -188,3 +200,62 @@ def test_empty_free_key_is_treated_as_unset(monkeypatch):
     monkeypatch.setenv("CEREBRAS_PAID_API_KEY", "paid-key")
     assert aa.make_client().api_key == "paid-key"
     assert aa.get_primary_tier() == "paid"
+
+
+def test_insufficient_quota_429_skips_the_rate_limit_ladder(monkeypatch):
+    """A quota error dressed as a 429 must NOT go through wait-and-retry: the key
+    cannot recover by waiting, so the ladder would stall every call for ~48s and
+    never reach the latch."""
+    slept = []
+    monkeypatch.setattr(aa.time, "sleep", lambda s: slept.append(s))
+    calls = []
+
+    def primary():
+        calls.append("primary")
+        raise _insufficient_quota_429()
+
+    def paid():
+        calls.append("paid")
+        return "answer"
+
+    assert aa._call_with_retry(primary, fallback_fn=paid) == "answer"
+    assert calls == ["primary", "paid"]
+    assert slept == []
+    assert aa._free_tier_is_exhausted()
+
+
+def test_insufficient_quota_429_without_a_fallback_fails_fast(monkeypatch):
+    slept = []
+    monkeypatch.setattr(aa.time, "sleep", lambda s: slept.append(s))
+    attempts = []
+
+    def primary():
+        attempts.append(1)
+        raise _insufficient_quota_429()
+
+    with pytest.raises(openai.RateLimitError) as exc:
+        aa._call_with_retry(primary)
+    assert attempts == [1]
+    assert slept == []
+    assert aa.is_quota_error(exc.value)
+
+
+def test_ordinary_rate_limit_still_retries_and_falls_back(monkeypatch):
+    """The 429 ladder must survive the quota short-circuit: a plain rate limit
+    still waits, retries the primary key, then uses the paid key."""
+    slept = []
+    monkeypatch.setattr(aa.time, "sleep", lambda s: slept.append(s))
+    calls = []
+
+    def primary():
+        calls.append("primary")
+        raise _rate_limited()
+
+    def paid():
+        calls.append("paid")
+        return "answer"
+
+    assert aa._call_with_retry(primary, fallback_fn=paid) == "answer"
+    assert calls == ["primary", "primary", "paid"]
+    assert slept == [aa.RETRY_BASE_DELAY]
+    assert not aa._free_tier_is_exhausted()

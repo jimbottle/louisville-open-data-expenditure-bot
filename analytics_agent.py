@@ -96,7 +96,35 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
             result = fn()
             _last_tier_used = get_primary_tier()
             return result
-        except openai.RateLimitError as e:
+        except Exception as e:
+            # Quota first, and deliberately outside the RateLimitError clause:
+            # billing exhaustion arrives as a 402 from Cerebras but as a 429
+            # (`insufficient_quota`) from other OpenAI-compatible providers, and
+            # a 429-shaped one caught by the rate-limit ladder below would sleep
+            # through every attempt retrying a key that cannot recover, never
+            # reaching the latch — the same stall on all three LLM calls of
+            # every question. Out of credit never clears by waiting; only a
+            # different (funded) key can succeed.
+            if is_quota_error(e):
+                if not fallback_fn:
+                    log.error("LLM account out of credit and no fallback key configured: %s", e)
+                    raise
+                log.info("Primary key out of credit, using paid tier")
+                if on_retry:
+                    on_retry(attempt, MAX_RETRIES, 0)
+                try:
+                    result = fallback_fn()
+                    _last_tier_used = "paid"
+                    _mark_free_tier_exhausted()
+                    return result
+                except Exception as fallback_err:
+                    log.warning("Paid tier fallback failed: %s", fallback_err)
+                    raise
+
+            if not isinstance(e, openai.RateLimitError):
+                log.error("LLM call failed (attempt %d): %s", attempt, e)
+                raise
+
             delay = RETRY_BASE_DELAY
             match = re.search(r'retry in ([\d.]+)s', str(e))
             if match:
@@ -133,27 +161,7 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
             if on_retry:
                 on_retry(attempt, MAX_RETRIES, delay)
             time.sleep(delay)
-        except Exception as e:
-            # Out of credit on this key. Unlike a 429 this never clears on its
-            # own, so retrying the same client is pointless — but the paid key
-            # is a different account and usually still funded. Cerebras retired
-            # its always-free tier in July 2026, so the free key 402s on every
-            # call; without this the paid fallback (only wired to 429) was never
-            # reached and every live question failed.
-            if is_quota_error(e) and fallback_fn:
-                log.info("Free tier out of credit (402), using paid tier")
-                if on_retry:
-                    on_retry(attempt, MAX_RETRIES, 0)
-                try:
-                    result = fallback_fn()
-                    _last_tier_used = "paid"
-                    _mark_free_tier_exhausted()
-                    return result
-                except Exception as fallback_err:
-                    log.warning("Paid tier fallback failed: %s", fallback_err)
-                    raise
-            log.error("LLM call failed (attempt %d): %s", attempt, e)
-            raise
+
 
 DEFAULT_MODEL = "qwen-3-235b-a22b-instruct-2507"
 DEFAULT_BASE_URL = "https://api.cerebras.ai/v1"
