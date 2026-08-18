@@ -136,22 +136,44 @@ Persistent state lives in Docker named volumes, not the image: `louisville-data`
 
 The old `docker-compose.yml` and `deploy.sh` were **removed** (they described a superseded SSH-rsync flow that leaked `.env` and carried the 45s health `start_period` that caused the 2026-08-11 outage). The authoritative deploy is the MCP Docker flow above; there is no compose/rsync path.
 
-### API keys / tiers (the free tier is gone)
+### Providers: OpenRouter primary, Cerebras fallback
 
-Cerebras **retired its always-free tier in July 2026**, replacing it with a one-time
-$5 trial that expires 30 days after it is granted. The old free key now answers
-**HTTP 402 `payment_required`** on every call, so the bot runs on the paid
-(Raylytics pay-as-you-go) credits: set **`CEREBRAS_PAID_API_KEY` only** and leave
-`CEREBRAS_API_KEY` unset — `make_client()` falls through to the paid key and
-`make_paid_client()` returns None (no point falling back from a key to itself).
+**Cerebras retired its always-free tier in July 2026** (replaced by a one-time $5
+trial that expires after 30 days), so the old free key answers **HTTP 402
+`payment_required`** on every call. The bot's primary provider is now
+**OpenRouter**, which still has genuinely free models; the Cerebras
+pay-as-you-go key stays behind it as the fallback.
 
-If a free-tier key is ever set again, it is the primary and the paid key becomes
-the fallback — used on a 429 *and* on a 402, with the exhausted free key latched
-out for 15 minutes so it isn't re-probed on every call. A 402 with no working key
-shows the user `QUOTA_MSG` ("out of credit"), never "try rewording your question".
+| | primary | fallback |
+|---|---|---|
+| key | `OPENROUTER_API_KEY` | `CEREBRAS_PAID_API_KEY` |
+| base URL | `OPENROUTER_BASE_URL` (default `https://openrouter.ai/api/v1`) | `LLM_BASE_URL` (Cerebras) |
+| model | `OPENROUTER_MODEL` (default `nvidia/nemotron-3-super-120b-a12b:free`) | `MODEL` (default `gpt-oss-120b`) |
 
-Balance/limits: https://cloud.cerebras.ai → Pay as you go. Developer-tier limits
-for `gpt-oss-120b` are 1M TPM / 1K RPM (the 5 RPM / 1M TPD trial caps do not apply).
+The two providers have **separate base URLs and separate model ids** — a slug
+like `vendor/model:free` means nothing to Cerebras — so `fallback_model` is
+threaded alongside `fallback_client` through every LLM call. Drop
+`OPENROUTER_API_KEY` and everything reverts to Cerebras-only.
+
+The fallback engages on a 429 (after the retry ladder) and immediately on a 402;
+a 402 with no working fallback shows the user `QUOTA_MSG` ("out of credit"),
+never "try rewording your question".
+
+**Picking the OpenRouter model.** Free slugs churn weekly, and the free roster is
+uneven. Benchmarked 2026-08-18 against the real NL→SQL task (3 questions,
+executed against DuckDB): `nvidia/nemotron-3-super-120b-a12b:free` 3/3 at ~7s,
+`poolside/laguna-s-2.1:free` 3/3 at ~17s, `openai/gpt-oss-20b:free` 2/3 at ~29s
+(one reply had no content at all), `google/gemma-4-31b-it:free` 0/3 (upstream
+429s). Re-run that comparison before switching models rather than trusting a
+model card. The 404 `model_not_found` handler also auto-switches within
+OpenRouter's catalogue if a slug disappears.
+
+**Free-tier limits.** OpenRouter caps `:free` models at 20 requests/minute and
+**50 requests/day** — 1,000/day once the account has purchased $10 of credits.
+The bot makes 2-3 LLM calls per question, so 50/day is roughly 16-25 questions
+before the Cerebras fallback carries everything. Check a key's status with
+`curl -s https://openrouter.ai/api/v1/key -H "Authorization: Bearer $OPENROUTER_API_KEY"`
+(`is_free_tier` tells you which cap applies).
 
 ### LLM model (`MODEL` env)
 

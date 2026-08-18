@@ -60,6 +60,8 @@ from analytics_agent import (
     TRUNCATION_NOTE,
     get_active_model,
     get_last_tier_used,
+    get_fallback_model,
+    get_primary_model,
     get_primary_tier,
     get_model_fallback_event,
     interpret_results_stream,
@@ -87,7 +89,11 @@ from data_model import (
 # ── Config ───────────────────────────────────────────────────────────────────
 
 DATA_DIR = os.environ.get("DATA_DIR", "data")
-MODEL = os.environ.get("MODEL", "gpt-oss-120b")  # Cerebras model; override via MODEL env
+# Primary model: an OpenRouter free model when OPENROUTER_API_KEY is set
+# (override with OPENROUTER_MODEL), otherwise the Cerebras model from MODEL.
+MODEL = get_primary_model()
+# The Cerebras fallback speaks its own model ids, never the primary's slug.
+FALLBACK_MODEL = get_fallback_model()
 
 # Set from the city pack at startup. The empty default means "no corpus": the
 # ask path checks the file's existence, so an app whose startup has not run
@@ -630,9 +636,10 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
     client = make_client()
     paid_client = make_paid_client()
     if paid_client:
-        log.info("Model: %s (%s tier, paid tier fallback available)", MODEL, get_primary_tier())
+        log.info("Model: %s (%s), fallback: %s (cerebras paid)",
+                 MODEL, get_primary_tier(), FALLBACK_MODEL)
     else:
-        log.info("Model: %s (%s tier, no fallback key)", MODEL, get_primary_tier())
+        log.info("Model: %s (%s), no fallback key", MODEL, get_primary_tier())
     log.info("Logs writing to: %s", LOG_DIR)
 
     # A deploy that forgets TRUSTED_PROXY_IPS silently collapses the per-IP rate
@@ -1070,7 +1077,7 @@ async def ask(request: Request):
         yield send("status", {"content": "Writing the query…"})
         t_start = time.time()
         try:
-            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry, history=history, reasoning=reasoning, fallback_client=paid_client)
+            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry, history=history, reasoning=reasoning, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
             track_usage(sql_usage.get("prompt_tokens", 0), sql_usage.get("completion_tokens", 0))
             update_limits_from_headers(raw_resp)
             log.info("SQL generated in %.1fs (%d tokens)", time.time() - t_start, sql_usage.get("total_tokens", 0))
@@ -1123,7 +1130,7 @@ async def ask(request: Request):
             yield send("log", {"content": f"Query failed: {type(e).__name__}. Asking model to fix..."})
             try:
                 fix_prompt = f"The following SQL failed with error: {e}\n\nOriginal SQL:\n{sql}\n\nFix the SQL query. Return ONLY the corrected SQL."
-                sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry, history=history, fallback_client=paid_client)
+                sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry, history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
                 track_usage(retry_usage.get("prompt_tokens", 0), retry_usage.get("completion_tokens", 0))
                 update_limits_from_headers(raw_resp)
                 log.info("SQL retry generated")
@@ -1231,7 +1238,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
             empty_served = []
             try:
                 for chunk in interpret_results_stream(
-                    client, MODEL, interpret_system, empty_prompt, sql, "No rows returned", history=history, fallback_client=paid_client,
+                    client, MODEL, interpret_system, empty_prompt, sql, "No rows returned", history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL,
                     documents=documents,
                 ):
                     text = humanize_prose(chunk)
@@ -1266,7 +1273,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
         last_beat = time.time()
         try:
             for chunk in interpret_results_stream(
-                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry, history=history, fallback_client=paid_client,
+                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry, history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL,
                 documents=documents,
             ):
                 draft += chunk
@@ -1335,7 +1342,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
             refine_counter = {"n": 0}
             yield from refine_events_with_fallback(
                 refine_interpretation_stream(
-                    client, MODEL, question, sql, result_str, draft, on_retry=on_retry, fallback_client=paid_client,
+                    client, MODEL, question, sql, result_str, draft, on_retry=on_retry, fallback_client=paid_client, fallback_model=FALLBACK_MODEL,
                     extra_facts=CITY_FACTS, documents=documents,
                 ),
                 draft,

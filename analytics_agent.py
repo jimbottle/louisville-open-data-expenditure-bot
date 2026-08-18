@@ -296,15 +296,24 @@ def _record_model_fallback(from_model: str, to_model: str) -> None:
     log.error("MODEL FALLBACK: '%s' no longer exists at provider; now using '%s'", from_model, to_model)
 
 
-def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_client=None):
+def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_client=None,
+                              fallback_model=None):
     """Run an LLM call, surviving provider model deprecation.
 
     make_call(client, model) must return a zero-arg callable. On a
     model_not_found error the replacement is resolved once, recorded
     module-wide, and the call retried with it.
+
+    fallback_model is the model id to use on the FALLBACK client, for when the
+    two clients are different providers (OpenRouter primary, Cerebras fallback):
+    a slug like 'vendor/model:free' means nothing to Cerebras. Passing it also
+    pins the fallback across a deprecation switch, because the replacement is
+    resolved from the PRIMARY provider's catalogue. Left unset, both clients
+    share one catalogue and the fallback follows the replacement as before.
     """
     model = get_active_model(model)
-    fallback_fn = make_call(fallback_client, model) if fallback_client else None
+    fb_model = fallback_model or model
+    fallback_fn = make_call(fallback_client, fb_model) if fallback_client else None
     try:
         return _call_with_retry(make_call(client, model), on_retry=on_retry, fallback_fn=fallback_fn)
     except openai.NotFoundError as e:
@@ -316,7 +325,11 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
         if not replacement:
             raise
         log.warning("Model '%s' not found at provider; retrying with '%s'", model, replacement)
-        fallback_fn = make_call(fallback_client, replacement) if fallback_client else None
+        if fallback_client and fallback_model is None:
+            # Same provider on both keys, so the dead model is dead on the
+            # fallback too: rebind it to the replacement. A cross-provider
+            # fallback keeps its own pinned model.
+            fallback_fn = make_call(fallback_client, replacement)
         result = _call_with_retry(make_call(client, replacement), on_retry=on_retry, fallback_fn=fallback_fn)
         # Record only after the replacement actually worked, so /api/health
         # never advertises a fallback that failed.
@@ -469,6 +482,27 @@ def strip_sql_fences(sql: str) -> str:
     return sql
 
 
+def _message_text(response) -> str:
+    """The assistant's text, or a clear error when the provider returned none.
+
+    A model that spends its whole budget on reasoning — or is cut off, or is
+    filtered — answers with `content=None`. Indexing straight into that raised
+    `TypeError: 'NoneType' object is not subscriptable`, which reached the user
+    as the generic "I couldn't turn that into a query", blaming their wording
+    for a provider-side empty reply. Seen on OpenRouter's
+    openai/gpt-oss-20b:free while choosing a primary model.
+    """
+    choices = getattr(response, "choices", None)
+    if not choices:
+        raise ValueError("LLM response contained no choices")
+    text = getattr(choices[0].message, "content", None)
+    if not text or not text.strip():
+        raise ValueError(
+            f"LLM returned an empty message (finish_reason={getattr(choices[0], 'finish_reason', None)})"
+        )
+    return text
+
+
 REASONING_PROMPT = """Analyze this user question and plan the SQL query. Consider:
 1. Which table(s) to query (expenditures, summary tables, contractor_profiles, salary_data, etc.)
 2. Whether this is a follow-up that references prior context
@@ -480,7 +514,7 @@ REASONING_PROMPT = """Analyze this user question and plan the SQL query. Conside
 Return a short analysis (3-5 sentences max) of your query plan, ending with the CHART line. Do NOT write SQL."""
 
 
-def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None) -> tuple[str, dict, object]:
+def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None, fallback_model: str = None) -> tuple[str, dict, object]:
     """Think about the query before generating SQL. Returns (reasoning, usage_dict, raw_response)."""
     def _make_call(c, m):
         def _call():
@@ -495,7 +529,7 @@ def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, qu
                 max_tokens=300,
             )
         return _call
-    raw = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client)
+    raw = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
     response = raw.parse()
     usage = {}
     if hasattr(response, "usage") and response.usage:
@@ -504,10 +538,10 @@ def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, qu
             "completion_tokens": response.usage.completion_tokens or 0,
             "total_tokens": response.usage.total_tokens or 0,
         }
-    return response.choices[0].message.content.strip(), usage, raw
+    return _message_text(response).strip(), usage, raw
 
 
-def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, reasoning: str = None, fallback_client: openai.OpenAI = None) -> tuple[str, dict, object]:
+def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, reasoning: str = None, fallback_client: openai.OpenAI = None, fallback_model: str = None) -> tuple[str, dict, object]:
     """Ask the model to generate SQL. Returns (sql, usage_dict, raw_response)."""
     def _make_call(c, m):
         def _call():
@@ -525,7 +559,7 @@ def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question
                 max_tokens=2048,
             )
         return _call
-    raw = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client)
+    raw = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
     response = raw.parse()
     usage = {}
     if hasattr(response, "usage") and response.usage:
@@ -534,7 +568,7 @@ def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question
             "completion_tokens": response.usage.completion_tokens or 0,
             "total_tokens": response.usage.total_tokens or 0,
         }
-    return strip_sql_fences(response.choices[0].message.content), usage, raw
+    return strip_sql_fences(_message_text(response)), usage, raw
 
 
 def interpret_results(
@@ -555,11 +589,11 @@ def interpret_results(
             )
         return _call
     response = _call_with_model_fallback(_make_call, client, model)
-    return response.choices[0].message.content.strip()
+    return _message_text(response).strip()
 
 
 def interpret_results_stream(
-    client: openai.OpenAI, model: str, system_prompt: str, question: str, sql: str, results: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None, documents: str = ""
+    client: openai.OpenAI, model: str, system_prompt: str, question: str, sql: str, results: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None, documents: str = "", fallback_model: str = None
 ):
     """Stream interpretation chunks as a generator.
 
@@ -584,7 +618,7 @@ def interpret_results_stream(
                 stream=True,
             )
         return _call
-    stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client)
+    stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
@@ -636,7 +670,7 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
     Return ONLY the rewritten answer, nothing else.""")
 
 
-def refine_interpretation_stream(client, model, question, sql, results, draft, on_retry=None, fallback_client=None, extra_facts=None, documents=""):
+def refine_interpretation_stream(client, model, question, sql, results, draft, on_retry=None, fallback_client=None, extra_facts=None, documents="", fallback_model=None):
     """Stream a refined (plain-language, consistency- and accuracy-checked)
     rewrite of a draft interpretation.
 
@@ -676,7 +710,7 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
                 stream=True,
             )
         return _call
-    stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client)
+    stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
     for chunk in stream:
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
@@ -818,8 +852,25 @@ def execute_sql_safe(con: duckdb.DuckDBPyConnection, sql: str) -> tuple[pd.DataF
     return result_df, result_str
 
 
-def _primary_api_key() -> str:
-    """The key the main client talks to the provider with.
+# OpenRouter is the primary provider whenever OPENROUTER_API_KEY is set: it
+# still has genuinely free models, which Cerebras no longer does. Cerebras
+# pay-as-you-go stays as the fallback, so the two clients need SEPARATE base
+# URLs and model ids — see _call_with_model_fallback's fallback_model.
+DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Benchmarked 2026-08-18 on the real NL->SQL task (3 questions, executed against
+# DuckDB): nemotron-3-super 3/3 executable at ~7s, laguna-s-2.1 3/3 at ~17s,
+# gpt-oss-20b 2/3 at ~29s (one reply came back with no content at all),
+# gemma-4-31b 0/3 (the upstream provider 429s).
+DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+DEFAULT_FALLBACK_MODEL = "gpt-oss-120b"
+
+
+def _openrouter_key() -> str:
+    return os.environ.get("OPENROUTER_API_KEY", "")
+
+
+def _cerebras_key() -> str:
+    """Cerebras: the free key if one still works, else the pay-as-you-go key.
 
     Cerebras retired its always-free tier in July 2026 (an expired $5 trial now
     402s on every call), so a deployment may carry only the paid key. Falling
@@ -833,19 +884,49 @@ def _primary_api_key() -> str:
     )
 
 
+def _primary_api_key() -> str:
+    """The key the main client talks to its provider with."""
+    return _openrouter_key() or _cerebras_key()
+
+
 def get_primary_tier() -> str:
-    """'free' or 'paid' — which tier the main client's key belongs to."""
+    """Which key the main client uses: 'openrouter' (free), 'free' or 'paid' (Cerebras).
+
+    Surfaced in dev mode and the debug event, so it names the provider rather
+    than just a tier — 'free' would be ambiguous now that two providers are in
+    play.
+    """
+    if _openrouter_key():
+        return "openrouter"
     return "free" if os.environ.get("CEREBRAS_API_KEY") else "paid"
+
+
+def get_primary_model() -> str:
+    """Model id for the primary client (provider-specific slug)."""
+    if _openrouter_key():
+        return os.environ.get("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)
+    return os.environ.get("MODEL", DEFAULT_FALLBACK_MODEL)
+
+
+def get_fallback_model() -> str:
+    """Model id for the Cerebras fallback client. Never an OpenRouter slug."""
+    return os.environ.get("MODEL", DEFAULT_FALLBACK_MODEL)
 
 
 def make_client(base_url: str = None, api_key: str = None) -> openai.OpenAI:
     """Create an OpenAI-compatible client. Disables built-in retries — we handle them in _call_with_retry."""
     import httpx
+    headers = None
+    if not api_key and not base_url and _openrouter_key():
+        base_url = os.environ.get("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL)
+        # OpenRouter attributes traffic to the site named in these headers.
+        headers = {"HTTP-Referer": "https://louisville.raylytics.io", "X-Title": "Ask Lou"}
     return openai.OpenAI(
         api_key=api_key or _primary_api_key(),
         base_url=base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL),
         max_retries=0,
         timeout=httpx.Timeout(60.0, connect=10.0),
+        default_headers=headers,
     )
 
 
@@ -858,7 +939,7 @@ def make_paid_client(base_url: str = None, api_key: str = None) -> openai.OpenAI
     """
     import httpx
     paid_key = api_key or os.environ.get("CEREBRAS_PAID_API_KEY", "")
-    if not paid_key or (api_key is None and paid_key == _primary_api_key()):
+    if not paid_key or (api_key is None and paid_key == _cerebras_key() and not _openrouter_key()):
         return None
     return openai.OpenAI(
         api_key=paid_key,
