@@ -30,20 +30,17 @@ MAX_RETRIES = 3
 RETRY_BASE_DELAY = 16  # seconds, matches Gemini's suggested retry delay
 
 
-# Track which tier was used on the last call (for dev mode display)
+# Which tier served the last call. DISPLAY ONLY (dev mode / the debug event):
+# it is written by every concurrent request, so nothing may branch on it.
+# Anything that needs to know who served THIS call passes a provenance dict to
+# _call_with_retry.
 _last_tier_used = "free"
-# Whether that call was served by the fallback client rather than the primary.
-_last_call_via_fallback = False
 
 
 def get_last_tier_used() -> str:
     """Return which tier was used on the most recent LLM call."""
     return _last_tier_used
 
-
-def last_call_used_fallback() -> bool:
-    """True when the most recent call was served by the fallback provider."""
-    return _last_call_via_fallback
 
 
 def is_quota_error(e: Exception) -> bool:
@@ -106,7 +103,7 @@ class EmptyCompletionError(RuntimeError):
     """
 
 
-def _call_with_retry(fn, on_retry=None, fallback_fn=None):
+def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
     """Run an LLM call, falling over to the fallback provider when the primary can't serve.
 
     One classification point, deliberately: an earlier version special-cased the
@@ -121,14 +118,23 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
       * empty completion — the other provider, now. It will not fill itself in.
       * ordinary rate limit — one more try on the primary (per-minute windows
         clear), then the other provider, then the rest of the ladder.
+
+    provenance: optional dict, filled with {"used_fallback": bool}. Per call, so
+    a caller can tell who served IT — SSE requests run on threadpool threads, and
+    a module global would let a concurrent call answer that question wrongly.
     """
-    global _last_tier_used, _last_call_via_fallback
+    global _last_tier_used
+
+    def _served(via_fallback):
+        global _last_tier_used
+        _last_tier_used = "paid" if via_fallback else get_primary_tier()
+        if provenance is not None:
+            provenance["used_fallback"] = via_fallback
 
     if fallback_fn and _free_tier_is_exhausted():
         try:
             result = fallback_fn()
-            _last_tier_used = "paid"
-            _last_call_via_fallback = True
+            _served(True)
             return result
         except Exception as paid_err:
             # Fallback is unusable too — clear the latch so the primary is
@@ -140,8 +146,7 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             result = fn()
-            _last_tier_used = get_primary_tier()
-            _last_call_via_fallback = False
+            _served(False)
             return result
         except Exception as e:
             exhausted = is_quota_error(e) or is_daily_cap_error(e)
@@ -162,8 +167,7 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None):
                     on_retry(attempt, MAX_RETRIES, 0)
                 try:
                     result = fallback_fn()
-                    _last_tier_used = "paid"
-                    _last_call_via_fallback = True
+                    _served(True)
                     if exhausted:
                         # Only for credit/allowance exhaustion. Latching on an
                         # ordinary 429 would route 15 minutes of traffic to the
@@ -373,6 +377,7 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
     resolved from the PRIMARY provider's catalogue. Left unset, both clients
     share one catalogue and the fallback follows the replacement as before.
     """
+    global _last_tier_used
     model = get_active_model(model)
     fb_model = fallback_model or model
     fallback_fn = make_call(fallback_client, fb_model) if fallback_client else None
@@ -385,6 +390,21 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
         already = get_active_model(model)
         replacement = already if already != model else _resolve_fallback_model(client, model)
         if not replacement:
+            # No replacement the provider offers (or models.list() failed). The
+            # other provider is a whole second chance sitting right here, and a
+            # model_not_found never reaches it through _call_with_retry — that
+            # is neither an exhaustion nor a rate limit, so it re-raises first.
+            # Without this, retiring the pinned free slug killed every question
+            # while a funded Cerebras key stood idle.
+            if fallback_fn:
+                log.warning("No replacement for '%s' at the primary provider; using the fallback provider", model)
+                try:
+                    result = fallback_fn()
+                    _last_tier_used = "paid"
+                    return result
+                except Exception as fallback_err:
+                    log.warning("Fallback provider failed after model_not_found: %s", fallback_err)
+                    raise e from fallback_err
             raise
         log.warning("Model '%s' not found at provider; retrying with '%s'", model, replacement)
         if fallback_client and fallback_model is None:
@@ -392,15 +412,18 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
             # fallback too: rebind it to the replacement. A cross-provider
             # fallback keeps its own pinned model.
             fallback_fn = make_call(fallback_client, replacement)
-        result = _call_with_retry(make_call(client, replacement), on_retry=on_retry, fallback_fn=fallback_fn)
-        # Record only when the REPLACEMENT served the call. If the other
+        provenance = {}
+        result = _call_with_retry(make_call(client, replacement), on_retry=on_retry,
+                                  fallback_fn=fallback_fn, provenance=provenance)
+        # Record only when the REPLACEMENT served THIS call. If the other
         # provider's fallback rescued it, the replacement is unproven — pinning
         # it process-wide would put a failing round trip in front of every later
-        # question and advertise it in /api/health.
-        if not last_call_used_fallback():
-            _record_model_fallback(model, replacement)
-        else:
+        # question and advertise it in /api/health. Read from the per-call dict,
+        # not a global: a concurrent request would answer for the wrong call.
+        if provenance.get("used_fallback"):
             log.warning("Replacement model '%s' did not serve the call (fallback provider did); not recording it", replacement)
+        else:
+            _record_model_fallback(model, replacement)
         return result
 
 

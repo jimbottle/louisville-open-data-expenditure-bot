@@ -60,6 +60,13 @@ def reset_fallback_state(monkeypatch):
     monkeypatch.setattr(aa, "_active_model", None)
     monkeypatch.setattr(aa, "_model_fallback_event", None)
     monkeypatch.delenv("MODEL_FALLBACKS", raising=False)
+    # The fake catalogues in this file are Cerebras-shaped bare ids. With an
+    # OpenRouter key in the environment the resolver looks for 'vendor/x:free'
+    # slugs, matches nothing, and every test here fails on the developer's
+    # shell rather than on the code.
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
+    aa._mark_free_tier_exhausted(False)
 
 
 def test_healthy_model_passes_through():

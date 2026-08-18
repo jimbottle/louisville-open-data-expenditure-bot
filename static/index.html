@@ -411,18 +411,13 @@
     width: 100%;
     max-width: 800px;
     height: 360px;
-    /* Revealed by JS once the chart has drawn at its final size. A chart that
-       renders while its container is still settling shows a 300x150 canvas
-       stranded in the corner of the box; better to show nothing for one frame. */
-    opacity: 0;
-    transition: opacity 0.18s ease;
   }
 
-  .agent .chart-block.ready {
-    opacity: 1;
-  }
-
-  /* Holds its place in the turn's order without occupying the screen. */
+  /* Holds its place in the turn's order without occupying the screen. The
+     chart is built, measured and drawn in one synchronous step when this class
+     comes off, so the half-laid-out canvas is never painted — no opacity gate
+     needed, and nothing depends on a transition or a frame callback that a
+     hidden tab would never run. */
   .agent .chart-block.pending {
     display: none;
   }
@@ -1190,13 +1185,23 @@ async function streamAnswer(question, opts = {}) {
       try {
         const chart = build();
         const box = chart.canvas.parentNode;
+        // All in one task, deliberately: the browser paints only after this
+        // returns, so the pre-resize canvas is never on screen. The earlier
+        // version split this across requestAnimationFrame callbacks, which a
+        // hidden or occluded tab never runs — a turn finishing while the user
+        // was in another tab came back to 360px of space around an invisible
+        // chart, unscrolled. Reading offsetHeight forces the layout that the
+        // display change invalidated, so resize() measures the real box.
         box.classList.remove('pending');
-        // One frame to lay the (now displayed) box out, one to draw into it,
-        // then fade in — so the first thing the user sees is the finished chart.
-        requestAnimationFrame(() => {
-          try { chart.resize(); } catch (e) {}
-          requestAnimationFrame(() => box.classList.add('ready'));
-        });
+        void box.offsetHeight;
+        try { chart.resize(); } catch (e) {}
+        // The box went from display:none to 360px ABOVE the interpretation, the
+        // error text, and any "Try again" button, so the turn has to be
+        // re-pinned. The stream's own scroll only runs on the interpretation
+        // path: after an error, or after Stop, nothing re-scrolled and the
+        // actionable control ended up below the fold (Chrome and Firefox paper
+        // over it with scroll anchoring; Safari has none).
+        scrollBottom();
       } catch (e) {
         console.warn('Chart render skipped:', e && e.message ? e.message : e);
       }

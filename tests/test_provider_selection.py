@@ -199,3 +199,89 @@ def test_switch_is_not_recorded_when_the_other_provider_served_the_call(monkeypa
     assert out == "answer from cerebras"
     assert aa.get_active_model("dead/model:free") == "dead/model:free", "unproven model must not be pinned"
     assert aa.get_model_fallback_event() is None
+
+
+def test_no_replacement_model_uses_the_other_provider(monkeypatch):
+    """OpenRouter retires the pinned slug and offers no other free one. That used
+    to kill every question with a service error while a funded Cerebras key sat
+    idle — a model_not_found never reaches the fallback through _call_with_retry."""
+    import httpx
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setattr(aa, "_resolve_fallback_model", lambda c, m: None)
+
+    def mk(client, model):
+        def _call():
+            if client == "primary":
+                raise openai.NotFoundError(
+                    "model_not_found",
+                    response=httpx.Response(404, request=httpx.Request("POST", "https://api.test/v1")),
+                    body={"code": "model_not_found"},
+                )
+            return f"answer from {model}"
+        return _call
+
+    out = aa._call_with_model_fallback(
+        mk, "primary", "dead/model:free",
+        fallback_client="cerebras", fallback_model="gpt-oss-120b",
+    )
+    assert out == "answer from gpt-oss-120b"
+    assert aa.get_active_model("dead/model:free") == "dead/model:free"
+
+
+def test_no_replacement_and_no_fallback_still_raises(monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setattr(aa, "_resolve_fallback_model", lambda c, m: None)
+
+    def mk(client, model):
+        def _call():
+            raise openai.NotFoundError(
+                "model_not_found",
+                response=httpx.Response(404, request=httpx.Request("POST", "https://api.test/v1")),
+                body={"code": "model_not_found"},
+            )
+        return _call
+
+    with pytest.raises(openai.NotFoundError):
+        aa._call_with_model_fallback(mk, "primary", "dead/model:free")
+
+
+def test_a_failing_fallback_keeps_the_model_not_found_classification(monkeypatch):
+    """app.py reads the surfaced exception; the fallback's own error would
+    misroute the message."""
+    import httpx
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setattr(aa, "_resolve_fallback_model", lambda c, m: None)
+
+    def mk(client, model):
+        def _call():
+            if client == "primary":
+                raise openai.NotFoundError(
+                    "model_not_found",
+                    response=httpx.Response(404, request=httpx.Request("POST", "https://api.test/v1")),
+                    body={"code": "model_not_found"},
+                )
+            raise RuntimeError("cerebras unreachable")
+        return _call
+
+    with pytest.raises(openai.NotFoundError) as exc:
+        aa._call_with_model_fallback(mk, "primary", "dead/model:free",
+                                     fallback_client="cerebras", fallback_model="gpt-oss-120b")
+    assert isinstance(exc.value.__cause__, RuntimeError)
+
+
+def test_provenance_is_per_call_not_a_shared_global():
+    """SSE requests run on threadpool threads: one call's provenance must not be
+    answerable by another's."""
+    a, b = {}, {}
+    aa._call_with_retry(lambda: "primary served", provenance=a, fallback_fn=lambda: "fallback served")
+
+    def broken():
+        raise aa.EmptyCompletionError("empty")
+
+    aa._call_with_retry(broken, provenance=b, fallback_fn=lambda: "fallback served")
+    assert a == {"used_fallback": False}
+    assert b == {"used_fallback": True}
