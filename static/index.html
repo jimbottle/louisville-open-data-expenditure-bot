@@ -186,6 +186,7 @@
 
   .message.agent {
     align-self: flex-start;
+    width: 100%;
     max-width: 90%;
     display: flex;
     flex-direction: column;
@@ -409,7 +410,21 @@
     padding: 16px;
     width: 100%;
     max-width: 800px;
-    min-height: 350px;
+    height: 360px;
+    /* Revealed by JS once the chart has drawn at its final size. A chart that
+       renders while its container is still settling shows a 300x150 canvas
+       stranded in the corner of the box; better to show nothing for one frame. */
+    opacity: 0;
+    transition: opacity 0.18s ease;
+  }
+
+  .agent .chart-block.ready {
+    opacity: 1;
+  }
+
+  /* Holds its place in the turn's order without occupying the screen. */
+  .agent .chart-block.pending {
+    display: none;
   }
 
   .agent .reasoning-block {
@@ -787,7 +802,7 @@
 
     .agent .chart-block {
       max-width: 100%;
-      min-height: 250px;
+      height: 260px;
     }
 
     .agent .sql-block,
@@ -1163,6 +1178,31 @@ async function streamAnswer(question, opts = {}) {
   // as soon as the first content arrives: interpreting and refining happen
   // after the results table renders, and that is the stretch where the answer
   // looks complete but is still being written.
+  // Chart constructors queued during the stream, run once the turn is over.
+  // Drawing mid-stream put a half-laid-out chart on screen: the card is still
+  // growing as blocks arrive, so the canvas sized itself against a layout that
+  // no longer existed a moment later.
+  const pendingCharts = [];
+
+  const drawPendingCharts = () => {
+    while (pendingCharts.length) {
+      const build = pendingCharts.shift();
+      try {
+        const chart = build();
+        const box = chart.canvas.parentNode;
+        box.classList.remove('pending');
+        // One frame to lay the (now displayed) box out, one to draw into it,
+        // then fade in — so the first thing the user sees is the finished chart.
+        requestAnimationFrame(() => {
+          try { chart.resize(); } catch (e) {}
+          requestAnimationFrame(() => box.classList.add('ready'));
+        });
+      } catch (e) {
+        console.warn('Chart render skipped:', e && e.message ? e.message : e);
+      }
+    }
+  };
+
   let processingLine = document.createElement('div');
   processingLine.className = 'processing-line';
   processingLine.setAttribute('role', 'status');
@@ -1354,7 +1394,10 @@ async function streamAnswer(question, opts = {}) {
           try {
           if (typeof Chart === 'undefined') throw new Error('Chart.js unavailable');
           chartDiv = document.createElement('div');
-          chartDiv.className = 'chart-block';
+          // `pending` = display:none, so the slot holds its place in the turn's
+          // order without showing an empty box while the answer is still being
+          // written. The chart itself is drawn once the turn ends.
+          chartDiv.className = 'chart-block pending';
           const canvas = document.createElement('canvas');
           // Text alternative for screen readers (the canvas itself is opaque to
           // them): include the values, not just the labels, so the data is conveyed.
@@ -1379,7 +1422,10 @@ async function streamAnswer(question, opts = {}) {
           const borderColors = event.chart_type === 'pie'
             ? colors.slice(0, event.labels.length)
             : '#1a56db';
-          new Chart(canvas, {
+          // The y-axis title was set to the chart title verbatim, so the two
+          // overlapped in the corner of the box. The title states the measure
+          // and the y ticks carry the units, so the axis title added nothing.
+          pendingCharts.push(() => new Chart(canvas, {
             type: event.chart_type,
             data: {
               labels: event.labels,
@@ -1393,14 +1439,36 @@ async function streamAnswer(question, opts = {}) {
             },
             options: {
               responsive: true,
-              maintainAspectRatio: true,
+              // No grow-in animation: the chart is revealed only once it is
+              // drawn, so an animation would just put a half-height chart on
+              // screen — the thing this deferral exists to avoid.
+              animation: false,
+              // The box has a fixed height, so the canvas fills it. With an
+              // aspect ratio instead, the canvas height came from its width —
+              // and the width came from the (shrink-to-fit) card, which was
+              // sized by the canvas. That loop left the chart stuck at 300x150.
+              maintainAspectRatio: false,
               plugins: {
                 legend: { display: event.chart_type === 'pie' },
                 title: { display: !!event.title, text: event.title || '' },
               },
               scales: event.chart_type === 'pie' ? {} : {
-                x: { title: { display: !!event.label_axis, text: event.label_axis || '' } },
-                y: { title: { display: !!event.title, text: event.title || '' }, beginAtZero: true, ticks: { callback: function(v) {
+                x: {
+                  title: { display: !!event.label_axis, text: event.label_axis || '' },
+                  ticks: {
+                    autoSkip: true,
+                    maxTicksLimit: 12,
+                    maxRotation: 45,
+                    minRotation: 0,
+                    // Payee and project names run long enough to collide with
+                    // each other and with the axis title even when rotated.
+                    callback: function(v) {
+                      const l = String(this.getLabelForValue(v));
+                      return l.length > 18 ? l.slice(0, 17) + '\u2026' : l;
+                    },
+                  },
+                },
+                y: { title: { display: false }, beginAtZero: true, ticks: { callback: function(v) {
                   // Count measures (e.g. "employees", "agencies") are plain
                   // numbers, not dollars — only prefix $ for currency.
                   const money = event.value_kind !== 'count';
@@ -1412,7 +1480,7 @@ async function streamAnswer(question, opts = {}) {
                 }}},
               },
             }
-          });
+          }));
           } catch (chartErr) {
             // Degrade to a chartless answer: drop any half-built chart box and
             // keep processing the rest of the stream (interpretation, sources).
@@ -1549,6 +1617,9 @@ async function streamAnswer(question, opts = {}) {
     // Invocation-local: run always so a superseded turn can't orphan its spinner.
     clearProcessing();
     clearWaiting();
+    // Draw against the settled layout. Runs on the error path too: a chart
+    // with no interpretation is still worth showing.
+    drawPendingCharts();
     // ALL shared teardown lives in this finally, NOT after the try: an early
     // `return` from the try (non-SSE HTTP error, supersede) runs the finally
     // then exits the function, skipping any post-try code — a reset placed there
