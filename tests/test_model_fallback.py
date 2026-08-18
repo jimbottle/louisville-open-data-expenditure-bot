@@ -67,6 +67,7 @@ def reset_fallback_state(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_MODEL", raising=False)
     aa._mark_primary_unusable(False)
+    aa._mark_catalogue_unavailable(False)
 
 
 def test_healthy_model_passes_through():

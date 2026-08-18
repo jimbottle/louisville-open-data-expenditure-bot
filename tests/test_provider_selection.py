@@ -28,8 +28,10 @@ def _clean_provider_env(monkeypatch):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(aa, "_active_model", None)
     aa._mark_primary_unusable(False)
+    aa._mark_catalogue_unavailable(False)
     yield
     aa._mark_primary_unusable(False)
+    aa._mark_catalogue_unavailable(False)
 
 
 def test_openrouter_key_makes_it_the_primary(monkeypatch):
@@ -424,7 +426,9 @@ def test_a_failed_catalogue_listing_does_not_latch_the_primary_out(monkeypatch):
         ) == "answer from cerebras"
 
     assert not aa._primary_is_unusable(), "a listing failure is not evidence the primary is dead"
-    assert len(attempts) == 2, "resolution must be re-attempted on the next question"
+    # Re-resolution is throttled by the short catalogue cooldown, NOT by the
+    # 15-minute primary latch — see test_the_listing_cooldown_expires.
+    assert attempts, "the catalogue was consulted"
 
 
 def test_a_listing_failure_still_answers_the_question(monkeypatch):
@@ -456,3 +460,87 @@ def test_resolver_raises_rather_than_returning_none_when_it_cannot_ask():
 
     with pytest.raises(aa.ModelCatalogueUnavailable):
         aa._resolve_fallback_model(_Broken(), "dead/model:free")
+
+
+def test_a_sustained_listing_outage_is_only_probed_once_a_minute(monkeypatch):
+    """Not latching is right; re-listing on every call is not. Clients run with
+    max_retries=0 and a 60s timeout, so a /models endpoint that hangs would
+    stall each of the 2-3 calls per question, with nothing streamed meanwhile."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    attempts = []
+
+    def dead_listing(client, model):
+        attempts.append(model)
+        raise aa.ModelCatalogueUnavailable("connection timed out")
+
+    monkeypatch.setattr(aa, "_resolve_fallback_model", dead_listing)
+
+    def mk(client, model):
+        def _call():
+            if client == "primary":
+                raise _not_found()
+            return "answer from cerebras"
+        return _call
+
+    for _ in range(6):   # ~two questions' worth of LLM calls
+        assert aa._call_with_model_fallback(
+            mk, "primary", "dead/model:free",
+            fallback_client="cerebras", fallback_model="gpt-oss-120b",
+        ) == "answer from cerebras"
+
+    assert len(attempts) == 1, f"catalogue probed {len(attempts)} times inside the cooldown"
+    assert not aa._primary_is_unusable(), "a listing failure still must not latch the primary"
+
+
+def test_the_listing_cooldown_expires(monkeypatch):
+    """A one-off blip must still re-resolve, just not on every call."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    attempts = []
+
+    def dead_listing(client, model):
+        attempts.append(model)
+        raise aa.ModelCatalogueUnavailable("connection timed out")
+
+    monkeypatch.setattr(aa, "_resolve_fallback_model", dead_listing)
+
+    def mk(client, model):
+        def _call():
+            if client == "primary":
+                raise _not_found()
+            return "answer from cerebras"
+        return _call
+
+    aa._call_with_model_fallback(mk, "primary", "dead/model:free",
+                                 fallback_client="cerebras", fallback_model="gpt-oss-120b")
+    real_time = aa.time.time
+    monkeypatch.setattr(aa.time, "time", lambda: real_time() + aa.CATALOGUE_RETRY_SECONDS + 1)
+    aa._call_with_model_fallback(mk, "primary", "dead/model:free",
+                                 fallback_client="cerebras", fallback_model="gpt-oss-120b")
+    assert len(attempts) == 2
+
+
+def test_a_successful_listing_clears_the_cooldown(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    aa._mark_catalogue_unavailable()
+    monkeypatch.setattr(aa, "_resolve_fallback_model", lambda c, m: "other/model:free")
+
+    def mk(client, model):
+        def _call():
+            if model == "dead/model:free":
+                raise _not_found()
+            return f"answer from {model}"
+        return _call
+
+    # Cooling down, so this call does not re-resolve and falls back...
+    assert aa._call_with_model_fallback(
+        mk, "primary", "dead/model:free",
+        fallback_client="cerebras", fallback_model="gpt-oss-120b",
+    ) == "answer from gpt-oss-120b"
+    # ...but once the window passes, a good listing clears the flag for good.
+    real_time = aa.time.time
+    monkeypatch.setattr(aa.time, "time", lambda: real_time() + aa.CATALOGUE_RETRY_SECONDS + 1)
+    assert aa._call_with_model_fallback(
+        mk, "primary", "dead/model:free",
+        fallback_client="cerebras", fallback_model="gpt-oss-120b",
+    ) == "answer from other/model:free"
+    assert not aa._catalogue_is_cooling_down()

@@ -323,6 +323,29 @@ def _is_model_not_found(exc: Exception) -> bool:
     return "model" in str(exc).lower()
 
 
+# A short cooldown on re-listing the catalogue, separate from the primary latch.
+# A failed listing is not evidence the primary is dead (so it must not latch),
+# but a SUSTAINED outage would otherwise have every call re-pay the discovery:
+# clients are built with max_retries=0 and a 60s timeout, and a /models endpoint
+# that hangs rather than errors stalls each of the 2-3 calls per question with
+# nothing streamed to the user meanwhile. One minute is short enough that a
+# genuine one-off blip still re-resolves on the next question.
+_catalogue_unavailable_at = None
+CATALOGUE_RETRY_SECONDS = 60
+
+
+def _catalogue_is_cooling_down() -> bool:
+    return (
+        _catalogue_unavailable_at is not None
+        and (time.time() - _catalogue_unavailable_at) < CATALOGUE_RETRY_SECONDS
+    )
+
+
+def _mark_catalogue_unavailable(unavailable: bool = True) -> None:
+    global _catalogue_unavailable_at
+    _catalogue_unavailable_at = time.time() if unavailable else None
+
+
 class ModelCatalogueUnavailable(RuntimeError):
     """The provider's model list could not be read.
 
@@ -408,11 +431,19 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
         catalogue_read = True
         if already != model:
             replacement = already
+        elif _catalogue_is_cooling_down():
+            # Asked recently and could not get an answer; don't stall this
+            # question on the same dead endpoint. Still falls back below.
+            log.info("Skipping model re-resolution: the catalogue listing failed within the last %ds",
+                     CATALOGUE_RETRY_SECONDS)
+            replacement, catalogue_read = None, False
         else:
             try:
                 replacement = _resolve_fallback_model(client, model)
+                _mark_catalogue_unavailable(False)
             except ModelCatalogueUnavailable as list_err:
                 log.warning("Could not read the model catalogue while replacing '%s': %s", model, list_err)
+                _mark_catalogue_unavailable()
                 replacement, catalogue_read = None, False
         if not replacement:
             # No replacement the provider offers (or models.list() failed). The
