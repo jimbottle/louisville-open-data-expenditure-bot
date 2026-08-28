@@ -1,0 +1,305 @@
+{
+  "Version": "2012-10-17",
+  "Comment": "The ceiling for everything the Lou migration may create. Used twice: attached to role lou-deploy, AND passed to `cdk bootstrap --cloudformation-execution-policies` so CloudFormation itself cannot exceed it. Scoped to lou-* / Lou* names because account ${AWS_ACCOUNT_ID} is shared with an unrelated Airflow workload. Where Resource is \"*\" it is because the AWS action does not support resource-level permissions; each such case is called out in its Sid and in infra/iam/README.md.",
+  "Statement": [
+    {
+      "Sid": "CloudFormationOnLouStacksOnly",
+      "Effect": "Allow",
+      "Action": "cloudformation:*",
+      "Resource": [
+        "arn:aws:cloudformation:us-east-1:${AWS_ACCOUNT_ID}:stack/Lou*/*",
+        "arn:aws:cloudformation:us-east-1:${AWS_ACCOUNT_ID}:stack/CDKToolkit-Lou/*"
+      ]
+    },
+    {
+      "Sid": "CloudFormationReadOnlyGlobal",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:DescribeStacks",
+        "cloudformation:ListStacks",
+        "cloudformation:GetTemplateSummary",
+        "cloudformation:ValidateTemplate"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LambdaOnLouFunctions",
+      "Effect": "Allow",
+      "Action": "lambda:*",
+      "Resource": [
+        "arn:aws:lambda:us-east-1:${AWS_ACCOUNT_ID}:function:lou-*",
+        "arn:aws:lambda:us-east-1:${AWS_ACCOUNT_ID}:function:lou-*:*"
+      ]
+    },
+    {
+      "Sid": "LambdaListAndPublicLayerRead",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:ListFunctions",
+        "lambda:GetAccountSettings",
+        "lambda:GetLayerVersion"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DynamoDBOnLouTables",
+      "Effect": "Allow",
+      "Action": "dynamodb:*",
+      "Resource": [
+        "arn:aws:dynamodb:us-east-1:${AWS_ACCOUNT_ID}:table/lou-*",
+        "arn:aws:dynamodb:us-east-1:${AWS_ACCOUNT_ID}:table/lou-*/index/*"
+      ]
+    },
+    {
+      "Sid": "DynamoDBListOnly",
+      "Effect": "Allow",
+      "Action": ["dynamodb:ListTables", "dynamodb:DescribeLimits"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "S3OnLouAndCdkAssetBuckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::lou-*",
+        "arn:aws:s3:::lou-*/*",
+        "arn:aws:s3:::cdk-lou0-assets-${AWS_ACCOUNT_ID}-us-east-1",
+        "arn:aws:s3:::cdk-lou0-assets-${AWS_ACCOUNT_ID}-us-east-1/*"
+      ]
+    },
+    {
+      "Sid": "S3ListAllBucketsIsAccountLevelOnly",
+      "Effect": "Allow",
+      "Action": ["s3:ListAllMyBuckets", "s3:GetBucketLocation"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EcrOnLouAndCdkImageRepos",
+      "Effect": "Allow",
+      "Action": "ecr:*",
+      "Resource": [
+        "arn:aws:ecr:us-east-1:${AWS_ACCOUNT_ID}:repository/lou-*",
+        "arn:aws:ecr:us-east-1:${AWS_ACCOUNT_ID}:repository/cdk-lou0-container-assets-${AWS_ACCOUNT_ID}-us-east-1"
+      ]
+    },
+    {
+      "Sid": "EcrAuthTokenHasNoResourceScope",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "LogsOnLouGroups",
+      "Effect": "Allow",
+      "Action": "logs:*",
+      "Resource": [
+        "arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:/aws/lambda/lou-*",
+        "arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:/aws/lambda/lou-*:*",
+        "arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:/lou/*",
+        "arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:/lou/*:*"
+      ]
+    },
+    {
+      "Sid": "LogsDescribeIsAccountLevelOnly",
+      "Effect": "Allow",
+      "Action": ["logs:DescribeLogGroups", "logs:DescribeLogStreams"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchAlarmsOnLouOnly",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:EnableAlarmActions",
+        "cloudwatch:DisableAlarmActions",
+        "cloudwatch:TagResource"
+      ],
+      "Resource": "arn:aws:cloudwatch:us-east-1:${AWS_ACCOUNT_ID}:alarm:lou-*"
+    },
+    {
+      "Sid": "CloudWatchReadIsAccountLevelOnly",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SchedulerOnLouSchedules",
+      "Effect": "Allow",
+      "Action": "scheduler:*",
+      "Resource": [
+        "arn:aws:scheduler:us-east-1:${AWS_ACCOUNT_ID}:schedule/lou-*/*",
+        "arn:aws:scheduler:us-east-1:${AWS_ACCOUNT_ID}:schedule-group/lou-*"
+      ]
+    },
+    {
+      "Sid": "SsmReadLouParametersOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:DescribeParameters",
+        "ssm:PutParameter",
+        "ssm:AddTagsToResource"
+      ],
+      "Resource": "arn:aws:ssm:us-east-1:${AWS_ACCOUNT_ID}:parameter/lou/*"
+    },
+    {
+      "Sid": "KmsDecryptForSsmSecureStringsOnly",
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt", "kms:DescribeKey"],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": { "kms:ViaService": "ssm.us-east-1.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "CloudFrontHasNoResourceLevelPermissionsSeeReadme",
+      "Effect": "Allow",
+      "Action": [
+        "cloudfront:CreateDistribution",
+        "cloudfront:UpdateDistribution",
+        "cloudfront:DeleteDistribution",
+        "cloudfront:GetDistribution",
+        "cloudfront:GetDistributionConfig",
+        "cloudfront:ListDistributions",
+        "cloudfront:TagResource",
+        "cloudfront:CreateOriginAccessControl",
+        "cloudfront:GetOriginAccessControl",
+        "cloudfront:UpdateOriginAccessControl",
+        "cloudfront:DeleteOriginAccessControl",
+        "cloudfront:ListOriginAccessControls",
+        "cloudfront:CreateInvalidation",
+        "cloudfront:GetInvalidation",
+        "cloudfront:CreateCachePolicy",
+        "cloudfront:GetCachePolicy",
+        "cloudfront:DeleteCachePolicy",
+        "cloudfront:CreateResponseHeadersPolicy",
+        "cloudfront:GetResponseHeadersPolicy",
+        "cloudfront:DeleteResponseHeadersPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "WafV2ForCloudFrontSeeReadme",
+      "Effect": "Allow",
+      "Action": [
+        "wafv2:CreateWebACL",
+        "wafv2:UpdateWebACL",
+        "wafv2:DeleteWebACL",
+        "wafv2:GetWebACL",
+        "wafv2:ListWebACLs",
+        "wafv2:AssociateWebACL",
+        "wafv2:DisassociateWebACL",
+        "wafv2:TagResource",
+        "wafv2:ListTagsForResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IamOnLouPathRolesOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:UpdateRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou/*"
+    },
+    {
+      "Sid": "EveryRoleCreatedMustCarryTheBoundary",
+      "Effect": "Deny",
+      "Action": ["iam:CreateRole", "iam:PutRolePolicy", "iam:AttachRolePolicy"],
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou/*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouPermissionsBoundary"
+        }
+      }
+    },
+    {
+      "Sid": "CannotEditOrDetachTheBoundaryItself",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeletePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
+        "iam:DeleteRolePermissionsBoundary"
+      ],
+      "Resource": [
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouPermissionsBoundary",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouServicePolicy"
+      ]
+    },
+    {
+      "Sid": "PassOnlyLouRolesAndOnlyToTheseServices",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou/*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "lambda.amazonaws.com",
+            "scheduler.amazonaws.com",
+            "edgelambda.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AssumeOnlyLousOwnCdkBootstrapRoles",
+      "Comment": "cdk deploy works by assuming the bootstrap roles. The lou0 qualifier means these are Lou's own set -- it cannot assume a default-qualifier bootstrap role that another workload in this account may create later.",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/cdk-lou0-*-${AWS_ACCOUNT_ID}-us-east-1"
+    },
+    {
+      "Sid": "NeverTouchAnythingOutsideLou",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:DeleteUser",
+        "iam:CreateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:AttachUserPolicy",
+        "iam:PutUserPolicy",
+        "iam:CreateAccountAlias",
+        "organizations:*",
+        "account:*",
+        "ec2:*",
+        "rds:*",
+        "eks:*",
+        "emr:*",
+        "sagemaker:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NoVpcOrNatEverThisArchitectureHasNone",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:CreateNatGateway",
+        "ec2:CreateVpc",
+        "ec2:CreateVpcEndpoint",
+        "ec2:AllocateAddress"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

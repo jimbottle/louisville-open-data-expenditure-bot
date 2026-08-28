@@ -15,3 +15,6 @@ data_cincinnati/
 
 # Seeder drafts are regenerable artifacts, never the curated map
 *.draft.csv
+
+# Rendered IAM policies contain the AWS account ID (repo is public)
+infra/iam/rendered/

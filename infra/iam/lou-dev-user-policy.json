@@ -1,0 +1,32 @@
+{
+  "Version": "2012-10-17",
+  "Comment": "Attached to IAM user lou-dev. The user itself can do NOTHING except become lou-deploy. All real permission lives on the role, so a leaked long-lived access key is worth only what MFA-gated assumption allows.",
+  "Statement": [
+    {
+      "Sid": "AssumeTheDeployRole",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou-deploy",
+      "Condition": {
+        "Bool": { "aws:MultiFactorAuthPresent": "true" }
+      }
+    },
+    {
+      "Sid": "ManageOwnMFAAndCredentials",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateVirtualMFADevice",
+        "iam:EnableMFADevice",
+        "iam:ResyncMFADevice",
+        "iam:ListMFADevices",
+        "iam:ListVirtualMFADevices",
+        "iam:ChangePassword",
+        "iam:GetUser"
+      ],
+      "Resource": [
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:user/lou-dev",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:mfa/lou-dev"
+      ]
+    }
+  ]
+}

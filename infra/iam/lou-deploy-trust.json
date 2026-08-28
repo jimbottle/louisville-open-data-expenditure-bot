@@ -1,0 +1,16 @@
+{
+  "Version": "2012-10-17",
+  "Comment": "Trust policy for role lou-deploy. Only the lou-dev user may assume it, and only with MFA. Note this does NOT trust the account root, so airflow-user cannot assume it even though it shares the account. Session length is capped by the role's --max-session-duration (set to 3600 at create time), not by a condition here.",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::${AWS_ACCOUNT_ID}:user/lou-dev"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "Bool": { "aws:MultiFactorAuthPresent": "true" }
+      }
+    }
+  ]
+}
