@@ -199,6 +199,64 @@ curl -s https://api.cerebras.ai/v1/models -H "Authorization: Bearer $CEREBRAS_PA
 
 `gpt-oss-120b` is a reasoning model: its chain-of-thought comes back in a separate `reasoning` field, the final answer is in `message.content`/`delta.content` (what the app reads), so reasoning never pollutes output as long as `max_tokens` leaves room after the reasoning tokens.
 
+## AWS interaction policy (migration in progress)
+
+The Lambda migration is tracked as bd epic `louisville-open-data-ru6`; the
+analysis and cost model are in `LOU_MIGRATION_COMPAT.md`. Agents have
+**standing authority to read AWS state** and **no authority to spend money
+without a human in the loop**. Three tiers, enforced by
+`.claude/settings.local.json` and stated here so the intent survives:
+
+**Tier 1 — auto-allowed (read-only, zero cost).** `describe-*`, `list-*`,
+`get-*` on Lambda, CloudFormation, DynamoDB, S3, CloudFront, ECR, IAM, Logs,
+CloudWatch, Scheduler, WAF; `sts get-caller-identity`; and local IaC
+evaluation (`cdk synth|diff|ls`, `terraform validate|plan`) which renders
+templates and deploys nothing. Inspect freely — never guess at cloud state
+that can simply be read.
+
+**Tier 2 — ALWAYS ASK FIRST, EVERY TIME (anything that can appear on a bill).**
+Confirmed preference, 2026-08-28: per-command approval, not per-session
+batching. Not allowlisted, so it falls through to a normal permission prompt.
+Do not batch these into a larger command to slip them past review, and do not
+treat one approval as covering the next. Before asking, state **what will be
+created, in which account and principal, and the expected monthly cost**:
+
+- Any `create-*`, `put-*`, `update-*`, `run-*`, `deploy` verb.
+- `cdk deploy` / `cdk bootstrap`, `terraform apply`.
+- `s3 cp` / `s3 sync` of the 531 MB dataset — storage plus egress.
+- `ecr` image pushes (~600 MB/image; free tier is 500 MB and only for 12 months).
+- Anything creating a NAT Gateway, VPC endpoint, Aurora cluster, or
+  provisioned-capacity resource. **These are out of architecture** — the plan
+  is explicitly no-VPC/no-NAT because a NAT alone (~$32/mo) exceeds the entire
+  cost envelope. Treat a proposed NAT as a design bug, not a purchase decision.
+- `ce get-cost-and-usage` — the Cost Explorer API bills **$0.01 per request**.
+  Small, but it is the one "read" that is not free, so it is Tier 2 on principle.
+
+**Tier 3 — denied outright, no prompt.** Reading secret values back
+(`ssm get-parameter`, `secretsmanager get-secret-value`) — keys are proven by
+application behavior, never echoed, hashed, or printed (see the key-handling
+memory). Also denied: `s3 rm`/`rb`, `dynamodb delete-table`,
+`cloudformation delete-stack`, `cdk destroy`, `terraform destroy`,
+`iam delete-*`, `iam create-access-key`. Teardown and credential minting are
+human actions performed deliberately, not agent actions.
+
+**Account discipline.** Target account is **012146975534** (`us-east-1`),
+shared with an unrelated Airflow workload — decided 2026-08-28.
+
+- Deploy as a **dedicated `lou-deploy` role**, scoped to Lou's resources.
+  **Never** as `arn:aws:iam::012146975534:user/airflow-user`, the workstation's
+  `default` profile: it is a long-lived key belonging to another workload.
+  Until that role exists (`louisville-open-data-n0b`), provision nothing.
+- Confirm `aws sts get-caller-identity` before every mutating operation and
+  name the account **and principal** in the request.
+- Because the account is shared, isolation is by convention and must be
+  enforced: prefix every resource `lou-` and tag everything
+  `Project=lou,ManagedBy=cdk`. Scope IaC to its own stack so a rollback cannot
+  reach Airflow resources. Never issue a destructive command without a
+  `lou-` prefix on the named resource.
+- Cost attribution needs the tags to be right from the first deploy —
+  retro-tagging does not fix historical Cost Explorer data.
+
 ## Build & Test
 
 ```bash
@@ -209,6 +267,32 @@ python -m pytest -q
 uvicorn app:app --host 127.0.0.1 --port 8000
 # then open http://127.0.0.1:8000  (DEV ONLY — see "Where the bot runs" above)
 ```
+
+### Prebuilt database artifact
+
+Startup has two paths. By default the app rebuilds everything from the CSVs in
+`DATA_DIR` (~5s, ~1.9GB RSS for Louisville) — fine for dev. Set `PREBUILT_DB`
+and it instead opens a finished DuckDB file read-only (~0.5s, ~400MB, 112MB on
+disk), which is what production should do:
+
+```bash
+python data_model.py --materialize data/lou.duckdb   # offline, ~8s; run in CI
+PREBUILT_DB=data/lou.duckdb uvicorn app:app --port 8000
+```
+
+The build is atomic (writes `<path>.building`, then renames), so an interrupted
+run cannot leave a half-populated artifact the app would open and serve from.
+`PREBUILT_DB` pointing at a missing file **fails at boot on purpose** rather
+than falling back to the CSV rebuild — on a container sized for the artifact,
+that rebuild is exactly what exhausts memory and overruns the health-check
+start period (the 2026-08-11 outage).
+
+Rebuild the artifact after any `refresh_data.py` run: it is a snapshot, and a
+stale one serves stale numbers with no other symptom. `tests/test_prebuilt_db.py`
+asserts the artifact is byte-identical to the CSV path on schema, year context,
+and the summary tables, and that the serving connection cannot reach the
+filesystem (`read_csv` of an arbitrary path and `COPY TO` are both blocked —
+`read_only=True` alone does not stop either).
 
 ## Architecture Overview
 

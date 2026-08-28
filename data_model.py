@@ -298,19 +298,98 @@ def _build_summaries(con, cfg: CityConfig) -> None:
     print(f"Summary tables created: {', '.join(built)}")
 
 
-def load_all_data(data_dir: str = "data", config: CityConfig | None = None) -> duckdb.DuckDBPyConnection:
-    """Load all of a city's datasets into DuckDB per its config pack."""
-    cfg = config or CONFIG
-    con = duckdb.connect()
+def _ingest(con: duckdb.DuckDBPyConnection, cfg: CityConfig, data_dir: str) -> None:
+    """Build every table from the city pack's CSVs into an open connection.
 
+    Shared by the in-memory path (load_all_data) and the artifact build
+    (build_database), so the two can never drift into producing different
+    databases.
+    """
     _load_expenditures(con, cfg, data_dir)
     _apply_canonicalization(con, cfg)
     _apply_data_quality(con, cfg)
     _load_enrichment(con, cfg, data_dir)
     _build_summaries(con, cfg)
 
-    # Lock down DuckDB — disable external file access and make read-only safe
+
+def _lock_down(con: duckdb.DuckDBPyConnection) -> None:
+    """Disable external file access, so LLM-generated SQL cannot reach the
+    filesystem (read_csv of an arbitrary path, COPY TO, etc.).
+
+    IRREVERSIBLE for the life of the connection: once set, even ATTACH of a
+    new file fails with PermissionException. It must therefore be applied only
+    on a *serving* connection — never on the build path, which has to write the
+    artifact. Verified to still apply, and still block both escapes, on a
+    read-only connection opened over a prebuilt file.
+    """
     con.execute("SET enable_external_access = false")
+
+
+def load_all_data(data_dir: str = "data", config: CityConfig | None = None) -> duckdb.DuckDBPyConnection:
+    """Load all of a city's datasets into an in-memory DuckDB per its config pack.
+
+    The original path: rebuilds everything from CSV on every call (~6s and
+    ~1.9GB for Louisville). Kept for local dev, the tests, and refresh_data.py.
+    Production serving should prefer a prebuilt artifact — see load_prebuilt.
+    """
+    cfg = config or CONFIG
+    con = duckdb.connect()
+    _ingest(con, cfg, data_dir)
+    _lock_down(con)
+    return con
+
+
+def build_database(out_path: str, data_dir: str = "data",
+                   config: CityConfig | None = None) -> str:
+    """Build the analytical database from CSVs into a DuckDB file at out_path.
+
+    The offline half of the split: run once in CI, ship the result. Writes to a
+    temporary sibling and renames, so an interrupted build cannot leave a
+    half-populated artifact that would load and serve wrong answers.
+
+    Deliberately does NOT lock the connection down — see _lock_down.
+    """
+    cfg = config or CONFIG
+    tmp = f"{out_path}.building"
+    for stale in (tmp, f"{tmp}.wal"):
+        if os.path.exists(stale):
+            os.remove(stale)
+
+    con = duckdb.connect(tmp)
+    try:
+        _ingest(con, cfg, data_dir)
+    except BaseException:
+        # Clean up the partial build before propagating. Without this a failed
+        # or interrupted run leaves a multi-hundred-MB .building file on disk —
+        # which the next build would silently delete, hiding that anything went
+        # wrong, while a container just loses the space.
+        con.close()
+        for junk in (tmp, f"{tmp}.wal"):
+            if os.path.exists(junk):
+                os.remove(junk)
+        raise
+    con.close()
+
+    os.replace(tmp, out_path)
+    log.info("Built %s (%.0f MB) from %s", out_path,
+             os.path.getsize(out_path) / 1e6, data_dir)
+    return out_path
+
+
+def load_prebuilt(db_path: str) -> duckdb.DuckDBPyConnection:
+    """Open a prebuilt artifact read-only, locked down for serving.
+
+    The serving half of the split. Two independent protections: read_only=True
+    stops any write to the artifact, and _lock_down stops the filesystem
+    escapes that read-only alone would still permit.
+    """
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(
+            f"No prebuilt database at {db_path!r}. Build one with: "
+            f"python data_model.py --materialize {db_path}"
+        )
+    con = duckdb.connect(db_path, read_only=True)
+    _lock_down(con)
     return con
 
 
@@ -1314,3 +1393,45 @@ def get_data_dictionary_text() -> str:
             lines.append(f"| `{col}` | {semantic} | {doc} |")
         lines.append("")
     return "\n".join(lines)
+
+
+def _main() -> int:
+    """CLI for the offline build step: materialize the analytical DB to a file.
+
+    Run in CI (and before a container build) so the serving process opens a
+    finished artifact instead of rebuilding from CSV. See LOU_MIGRATION_COMPAT.md.
+    """
+    import argparse
+    import time
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--materialize", metavar="PATH", required=True,
+                    help="write the built DuckDB database to this path")
+    ap.add_argument("--data-dir", default=os.environ.get("DATA_DIR", "data"),
+                    help="directory holding the city pack's CSVs (default: %(default)s)")
+    args = ap.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    t0 = time.time()
+    path = build_database(args.materialize, args.data_dir)
+    build_s = time.time() - t0
+
+    # Prove the artifact serves before calling the build good: an empty or
+    # truncated database opens fine and then answers every question wrong.
+    t0 = time.time()
+    con = load_prebuilt(path)
+    rows = con.execute("SELECT COUNT(*) FROM expenditures").fetchone()[0]
+    tables = len(con.execute("SHOW TABLES").fetchall())
+    open_s = time.time() - t0
+    con.close()
+
+    if not rows:
+        print(f"FAILED: {path} has 0 expenditure rows", flush=True)
+        return 1
+    print(f"Built {path} — {os.path.getsize(path) / 1e6:.0f} MB, {tables} tables, "
+          f"{rows:,} expenditure rows (build {build_s:.1f}s, open {open_s:.2f}s)")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

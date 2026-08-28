@@ -85,12 +85,17 @@ from data_model import (
     measure_kind,
     chart_window,
     load_all_data,
+    load_prebuilt,
     year_context,
 )
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
 DATA_DIR = os.environ.get("DATA_DIR", "data")
+# Path to a prebuilt DuckDB artifact (python data_model.py --materialize <path>).
+# Set it and startup opens that file read-only instead of rebuilding from CSV;
+# leave it unset for the CSV path used by local dev and refresh_data.py.
+PREBUILT_DB = os.environ.get("PREBUILT_DB", "")
 # Primary model: an OpenRouter free model when OPENROUTER_API_KEY is set
 # (override with OPENROUTER_MODEL), otherwise the Cerebras model from MODEL.
 MODEL = get_primary_model()
@@ -474,7 +479,22 @@ def startup():
             log.error("Document corpus at %s is UNQUERYABLE (%s: %s) — answers "
                       "will carry no citations", RAG_DB, type(e).__name__, e)
 
-    con = load_all_data(DATA_DIR)
+    # Prefer a prebuilt artifact when one is configured: opening a finished
+    # database is ~0.4s against ~6s to rebuild it from 531MB of CSVs, and it
+    # holds ~415MB rather than ~1.9GB. PREBUILT_DB unset keeps the original
+    # CSV path, which is what local dev and refresh_data.py use.
+    # Build one with: python data_model.py --materialize <path>
+    t_load = time.time()
+    if PREBUILT_DB:
+        # Deliberately NOT falling back to the CSV rebuild when the artifact is
+        # missing: on a container sized for the prebuilt path that rebuild is
+        # what exhausts memory and blows the health-check start period. Fail
+        # loudly at boot instead of degrading into the 2026-08-11 outage.
+        con = load_prebuilt(PREBUILT_DB)
+        log.info("Loaded prebuilt database %s in %.2fs", PREBUILT_DB, time.time() - t_load)
+    else:
+        con = load_all_data(DATA_DIR)
+        log.info("Built database from CSVs in %s in %.1fs", DATA_DIR, time.time() - t_load)
     # Compact schema for the system prompt (sent on every LLM call, so token
     # size matters); the full verbose version is still available at /api/schema.
     schema_desc = get_compact_schema_description(con)
