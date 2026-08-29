@@ -30,6 +30,40 @@ Two ceilings, deliberately different sizes: **LouServicePolicy** is what may be
 boundary is what makes granting `iam:CreateRole` safe — without it, a principal
 that can create roles can create an admin role and assume it.
 
+## Naming rules the policies depend on
+
+Isolation is by name, so these are not cosmetic — a resource named outside the
+pattern is simply denied (fail closed).
+
+| Resource | Pattern | Example |
+|---|---|---|
+| Lambda, DynamoDB, ECR, alarms, schedules | `lou-*` | `lou-ask`, `lou-response-cache` |
+| CloudFormation stacks | `Lou*` | `LouStack` |
+| IAM roles | path `/lou/` | `/lou/lou-lambda-exec` |
+| SSM parameters | `/lou/*` | `/lou/prod/OPENROUTER_API_KEY` |
+| Log groups | `/aws/lambda/lou-*` or `/lou/*` | `/aws/lambda/lou-ask` |
+| **S3 buckets** | **`lou-<purpose>-<ACCOUNT_ID>-us-east-1`** | `lou-data-012345678901-us-east-1` |
+
+**S3 is the special case.** Bucket ARNs (`arn:aws:s3:::name`) contain no account
+ID, and the bucket namespace is global across *all* AWS accounts — so
+`arn:aws:s3:::lou-*` would also match a `lou-`-prefixed bucket owned by someone
+else entirely. Two defenses:
+
+1. Bucket names carry the account ID and region, the same convention CDK uses
+   for its own assets bucket.
+2. An `S3ResourceAccountPin` **Deny** on `aws:ResourceAccount != <account>` in
+   both policies. This is the control that actually holds — it survives a
+   misnamed bucket, and it is what closes the "someone registers `lou-evil` and
+   your role has `s3:*` against it" hole. `StringNotEqualsIfExists` so that
+   account-level calls which do not populate the key (`ListAllMyBuckets`) are
+   not caught by it.
+
+In CDK, set the bucket name explicitly rather than letting it auto-generate:
+
+```python
+bucket_name=f"lou-data-{Stack.of(self).account}-{Stack.of(self).region}"
+```
+
 ---
 
 ## Step 0 — Prerequisites

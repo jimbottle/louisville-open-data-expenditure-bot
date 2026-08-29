@@ -46,9 +46,26 @@
     },
     {
       "Sid": "ReadBuildInputsFromItsOwnBuckets",
+      "Comment": "Account-suffixed for the same reason as the service policy: S3 bucket ARNs have no account field and the name namespace is global, so arn:aws:s3:::lou-* alone would also match another customer's bucket.",
       "Effect": "Allow",
       "Action": ["s3:GetObject", "s3:ListBucket"],
-      "Resource": ["arn:aws:s3:::lou-*", "arn:aws:s3:::lou-*/*"]
+      "Resource": [
+        "arn:aws:s3:::lou-*-${AWS_ACCOUNT_ID}-us-east-1",
+        "arn:aws:s3:::lou-*-${AWS_ACCOUNT_ID}-us-east-1/*"
+      ],
+      "Condition": {
+        "StringEquals": { "aws:ResourceAccount": "${AWS_ACCOUNT_ID}" }
+      }
+    },
+    {
+      "Sid": "S3ResourceAccountPin",
+      "Comment": "The runtime must never reach a bucket outside this account, whatever it is named.",
+      "Effect": "Deny",
+      "Action": "s3:*",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIfExists": { "aws:ResourceAccount": "${AWS_ACCOUNT_ID}" }
+      }
     },
     {
       "Sid": "EmitItsOwnMetrics",

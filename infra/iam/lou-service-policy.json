@@ -58,14 +58,28 @@
     },
     {
       "Sid": "S3OnLouAndCdkAssetBuckets",
+      "Comment": "S3 bucket ARNs carry NO account ID and bucket names are globally unique, so a bare arn:aws:s3:::lou-* would also match a lou-prefixed bucket owned by a different AWS customer. Buckets are therefore named lou-<purpose>-<account>-<region>, matching the convention CDK already uses for its own assets bucket. See also the S3ResourceAccountPin deny below, which is the control that actually holds if a bucket is ever misnamed.",
       "Effect": "Allow",
       "Action": "s3:*",
       "Resource": [
-        "arn:aws:s3:::lou-*",
-        "arn:aws:s3:::lou-*/*",
+        "arn:aws:s3:::lou-*-${AWS_ACCOUNT_ID}-us-east-1",
+        "arn:aws:s3:::lou-*-${AWS_ACCOUNT_ID}-us-east-1/*",
         "arn:aws:s3:::cdk-lou0-assets-${AWS_ACCOUNT_ID}-us-east-1",
         "arn:aws:s3:::cdk-lou0-assets-${AWS_ACCOUNT_ID}-us-east-1/*"
-      ]
+      ],
+      "Condition": {
+        "StringEquals": { "aws:ResourceAccount": "${AWS_ACCOUNT_ID}" }
+      }
+    },
+    {
+      "Sid": "S3ResourceAccountPin",
+      "Comment": "Belt and braces for the global S3 namespace: deny every S3 action against a bucket owned by any other account, whatever it is called. IfExists so that account-level calls which do not populate aws:ResourceAccount (ListAllMyBuckets) are not caught.",
+      "Effect": "Deny",
+      "Action": "s3:*",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIfExists": { "aws:ResourceAccount": "${AWS_ACCOUNT_ID}" }
+      }
     },
     {
       "Sid": "S3ListAllBucketsIsAccountLevelOnly",
