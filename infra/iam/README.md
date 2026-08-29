@@ -229,6 +229,10 @@ aws iam create-role --profile lou --role-name escalate-should-fail \
 
 # The architecture forbids these outright
 aws ec2 create-vpc --profile lou --cidr-block 10.0.0.0/16
+
+# A bucket without the account suffix — this is the invariant that regressed
+# twice (see the Naming rules section). It must be denied, NOT created.
+aws s3api create-bucket --profile lou --bucket lou-badname-should-fail
 ```
 
 And one that should **succeed**:
