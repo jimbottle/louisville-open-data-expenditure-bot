@@ -1,0 +1,122 @@
+{
+  "Version": "2012-10-17",
+  "Comment": "Part 2 of 2 of the deploy-time ceiling. This half is the GUARDRAILS: IAM and STS grants plus every Deny. It is deliberately small and should change rarely -- these are the statements that stop privilege escalation (the permissions boundary must be attached to any role created, and cannot itself be edited), confine IAM writes to the /lou/ path in an account shared with Airflow, pin S3 to this account despite the global bucket namespace, and ban VPC/NAT which the cost model depends on. An explicit Deny here overrides any Allow in LouDeployServices, which is why the split is safe.",
+  "Statement": [
+    {
+      "Sid": "S3ResourceAccountPin",
+      "Comment": "Belt and braces for the global S3 namespace: deny every S3 action against a bucket owned by any other account, whatever it is called. IfExists so that account-level calls which do not populate aws:ResourceAccount (ListAllMyBuckets) are not caught.",
+      "Effect": "Deny",
+      "Action": "s3:*",
+      "Resource": "*",
+      "Condition": {
+        "StringNotEqualsIfExists": {
+          "aws:ResourceAccount": "${AWS_ACCOUNT_ID}"
+        }
+      }
+    },
+    {
+      "Sid": "IamOnLouPathRolesOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:UpdateRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies"
+      ],
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou/*"
+    },
+    {
+      "Sid": "EveryRoleCreatedMustCarryTheBoundary",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePolicy",
+        "iam:AttachRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou/*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouPermissionsBoundary"
+        }
+      }
+    },
+    {
+      "Sid": "CannotEditOrDetachTheBoundaryItself",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeletePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
+        "iam:DeleteRolePermissionsBoundary"
+      ],
+      "Resource": [
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouPermissionsBoundary",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouServicePolicy"
+      ]
+    },
+    {
+      "Sid": "PassOnlyLouRolesAndOnlyToTheseServices",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou/*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "lambda.amazonaws.com",
+            "scheduler.amazonaws.com",
+            "edgelambda.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "AssumeOnlyLousOwnCdkBootstrapRoles",
+      "Comment": "cdk deploy works by assuming the bootstrap roles. The lou0 qualifier means these are Lou's own set -- it cannot assume a default-qualifier bootstrap role that another workload in this account may create later.",
+      "Effect": "Allow",
+      "Action": "sts:AssumeRole",
+      "Resource": "arn:aws:iam::${AWS_ACCOUNT_ID}:role/cdk-lou0-*-${AWS_ACCOUNT_ID}-us-east-1"
+    },
+    {
+      "Sid": "NeverTouchAnythingOutsideLou",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:DeleteUser",
+        "iam:CreateAccessKey",
+        "iam:DeleteAccessKey",
+        "iam:AttachUserPolicy",
+        "iam:PutUserPolicy",
+        "iam:CreateAccountAlias",
+        "organizations:*",
+        "account:*",
+        "ec2:*",
+        "rds:*",
+        "eks:*",
+        "emr:*",
+        "sagemaker:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "NoVpcOrNatEverThisArchitectureHasNone",
+      "Effect": "Deny",
+      "Action": [
+        "ec2:CreateNatGateway",
+        "ec2:CreateVpc",
+        "ec2:CreateVpcEndpoint",
+        "ec2:AllocateAddress"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

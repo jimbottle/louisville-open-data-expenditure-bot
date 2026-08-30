@@ -25,10 +25,20 @@ IAM_DIR = os.path.join(REPO, "infra", "iam")
 
 PLACEHOLDER = "${AWS_ACCOUNT_ID}"
 
-# The two policies that grant permissions. The trust policy and the user policy
-# are checked separately: they have different shapes.
-GRANTING_POLICIES = ["lou-service-policy.json", "lou-permissions-boundary.json"]
+# The deploy-time ceiling is TWO managed policies, not one: IAM caps a managed
+# policy at 6144 characters (whitespace excluded) and the combined document was
+# 6680. Statements may move between these two files freely, so every
+# deploy-side assertion below runs against their UNION rather than naming a
+# file — otherwise a future re-split silently stops testing a control.
+DEPLOY_POLICIES = ["lou-deploy-services.json", "lou-deploy-guardrails.json"]
+BOUNDARY = "lou-permissions-boundary.json"
+
+# Policies that grant permissions, checked for account scoping.
+GRANTING_POLICIES = DEPLOY_POLICIES + [BOUNDARY]
 ALL_POLICIES = GRANTING_POLICIES + ["lou-dev-user-policy.json", "lou-deploy-trust.json"]
+
+# IAM managed-policy size limit; whitespace is not counted toward it.
+IAM_POLICY_SIZE_LIMIT = 6144
 
 
 def _load(name: str) -> dict:
@@ -52,6 +62,16 @@ def _actions(stmt: dict) -> list:
 
 def _condition_text(stmt: dict) -> str:
     return json.dumps(stmt.get("Condition", {}))
+
+
+def _deploy_statements() -> list:
+    """Every statement of the deploy-time ceiling, across both policy files.
+
+    Both are attached to lou-deploy and both are passed to cdk bootstrap, so
+    IAM evaluates them together — and an explicit Deny in either overrides an
+    Allow in the other. Tests therefore assert on the union.
+    """
+    return [s for name in DEPLOY_POLICIES for s in _statements(_load(name))]
 
 
 # ── Structural sanity ────────────────────────────────────────────────────────
@@ -93,23 +113,32 @@ def test_every_s3_arn_is_account_scoped_by_name(name):
     )
 
 
-@pytest.mark.parametrize("name", GRANTING_POLICIES)
-def test_s3_access_is_denied_outside_this_account(name):
-    """Defence in depth for the above: the name convention still fails OPEN if
-    a bucket is ever misnamed. A Deny on aws:ResourceAccount does not."""
+@pytest.mark.parametrize("policy_set", ["deploy", "boundary"])
+def test_s3_access_is_denied_outside_this_account(policy_set):
+    """Defence in depth for the naming rule above: the convention still fails
+    OPEN if a bucket is ever misnamed. A Deny on aws:ResourceAccount does not.
+
+    Asserted per EVALUATION CONTEXT, not per file. The two deploy policies are
+    attached together and IAM evaluates them as one identity policy, so the pin
+    need only appear once across their union. The permissions boundary is a
+    SEPARATE context — effective permission is the intersection of identity
+    policy and boundary — so it needs its own copy, and inheriting one from the
+    deploy side would not help the Lambda execution role at all.
+    """
+    stmts = _deploy_statements() if policy_set == "deploy" else _statements(_load(BOUNDARY))
     pins = [
-        s for s in _statements(_load(name))
+        s for s in stmts
         if s.get("Effect") == "Deny"
         and any(a == "s3:*" or a.startswith("s3:") for a in _actions(s))
         and "aws:ResourceAccount" in _condition_text(s)
     ]
     assert pins, (
-        f"{name}: no Deny pinning s3 actions to aws:ResourceAccount. Without it, "
-        "a misnamed bucket silently regains cross-account reach."
+        f"{policy_set}: no Deny pinning s3 actions to aws:ResourceAccount. "
+        "Without it, a misnamed bucket silently regains cross-account reach."
     )
     for p in pins:
         assert "StringNotEqualsIfExists" in _condition_text(p), (
-            f"{name} [{p.get('Sid')}]: use StringNotEqualsIfExists, not "
+            f"{policy_set} [{p.get('Sid')}]: use StringNotEqualsIfExists, not "
             "StringNotEquals — a plain StringNotEquals also fires when the key "
             "is absent, which breaks account-level calls like ListAllMyBuckets."
         )
@@ -141,13 +170,13 @@ def test_created_roles_must_carry_the_permissions_boundary():
     path straight to admin. What closes it is the Deny requiring the boundary
     on every role it creates. Remove that and iam:CreateRole becomes iam:*."""
     denies = [
-        s for s in _statements(_load("lou-service-policy.json"))
+        s for s in _deploy_statements()
         if s.get("Effect") == "Deny"
         and "iam:PermissionsBoundary" in _condition_text(s)
         and any(a == "iam:CreateRole" for a in _actions(s))
     ]
     assert denies, (
-        "lou-service-policy.json: nothing forces LouPermissionsBoundary onto "
+        "deploy policies: nothing forces LouPermissionsBoundary onto "
         "roles created by the deploy principal — iam:CreateRole is then an "
         "unbounded privilege-escalation path."
     )
@@ -156,9 +185,9 @@ def test_created_roles_must_carry_the_permissions_boundary():
 
 def test_the_boundary_itself_cannot_be_edited_or_detached():
     """A boundary the holder can rewrite is not a boundary."""
-    txt = json.dumps(_load("lou-service-policy.json"))
+    txt = json.dumps([_load(n) for n in DEPLOY_POLICIES])
     protecting = [
-        s for s in _statements(_load("lou-service-policy.json"))
+        s for s in _deploy_statements()
         if s.get("Effect") == "Deny"
         and any("LouPermissionsBoundary" in r for r in _resources(s))
     ]
@@ -172,7 +201,7 @@ def test_the_boundary_itself_cannot_be_edited_or_detached():
 def test_iam_writes_are_confined_to_the_lou_path():
     """Isolation in a shared account is by name/path, so IAM writes must not
     reach roles belonging to the co-tenant Airflow workload."""
-    for stmt in _statements(_load("lou-service-policy.json")):
+    for stmt in _deploy_statements():
         if stmt.get("Effect") != "Allow":
             continue
         writes = [a for a in _actions(stmt)
@@ -190,7 +219,7 @@ def test_iam_writes_are_confined_to_the_lou_path():
 def test_passrole_is_restricted_to_lou_roles_and_named_services():
     """Unrestricted iam:PassRole lets a principal hand any role to a service it
     controls, which is escalation by another route."""
-    passers = [s for s in _statements(_load("lou-service-policy.json"))
+    passers = [s for s in _deploy_statements()
                if s.get("Effect") == "Allow" and "iam:PassRole" in _actions(s)]
     assert passers, "no iam:PassRole grant found (the stack needs one)"
     for s in passers:
@@ -230,7 +259,7 @@ def test_architecture_forbids_vpc_and_nat():
     """The cost model depends on there being no NAT Gateway (~$32/mo against a
     ~$0.15 envelope). Denying it in IAM makes that a guardrail, not a habit."""
     denied = set()
-    for s in _statements(_load("lou-service-policy.json")):
+    for s in _deploy_statements():
         if s.get("Effect") == "Deny":
             denied.update(_actions(s))
     assert "ec2:CreateNatGateway" in denied
@@ -264,3 +293,31 @@ def test_the_deploy_role_is_not_assumable_by_the_whole_account():
             "lou-deploy trusts the account root — any principal in the shared account could assume it"
         assert "user/lou-dev" in principals
         assert "MultiFactorAuthPresent" in _condition_text(s)
+
+
+# ── Size limits (the failure that split this policy in two) ──────────────────
+
+@pytest.mark.parametrize("name", ALL_POLICIES)
+def test_policy_fits_the_iam_size_limit(name):
+    """`aws iam create-policy` returns LimitExceeded above 6144 characters, and
+    IAM does NOT count whitespace — so reformatting cannot rescue an oversize
+    policy, only moving statements out of it can. This is measured on the
+    TEMPLATE, which is larger than the rendered output (render.sh strips the
+    Comment keys and the placeholder is longer than a real account ID), so
+    passing here means the rendered policy passes with room to spare."""
+    raw = open(os.path.join(IAM_DIR, name)).read()
+    size = len(re.sub(r"\s", "", raw))
+    assert size <= IAM_POLICY_SIZE_LIMIT, (
+        f"{name}: {size} chars exceeds the IAM managed-policy limit of "
+        f"{IAM_POLICY_SIZE_LIMIT} by {size - IAM_POLICY_SIZE_LIMIT}. Whitespace "
+        "is not counted, so move statements to another policy."
+    )
+
+
+def test_the_two_deploy_policies_do_not_overlap():
+    """The split is by concern, not arbitrary. A Sid appearing in both files
+    would mean a statement was copied rather than moved, so an edit to one copy
+    would silently leave the other stale."""
+    sids = [s.get("Sid") for n in DEPLOY_POLICIES for s in _statements(_load(n))]
+    dupes = {x for x in sids if sids.count(x) > 1}
+    assert not dupes, f"Sid present in both deploy policies: {dupes}"

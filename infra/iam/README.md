@@ -1,8 +1,17 @@
 # Least-privilege IAM setup for the Lou migration
 
-Creates one **user** (`lou-dev`), one **role** (`lou-deploy`), and two managed
+Creates one **user** (`lou-dev`), one **role** (`lou-deploy`), and three managed
 policies, scoped to only what the migration in `LOU_MIGRATION_COMPAT.md`
 actually needs. Tracked as `louisville-open-data-n0b`.
+
+> **Why three policies and not two.** IAM caps a managed policy at **6,144
+> characters** and does *not* count whitespace, so reformatting cannot rescue an
+> oversize policy. The deploy ceiling came to 6,680, so it is split by concern:
+> `LouDeployServices` (what may be built — the half that grows as deploys
+> surface missing actions) and `LouDeployGuardrails` (IAM/STS grants and every
+> Deny — deliberately small, changes rarely). Both are attached together and
+> IAM evaluates them as one identity policy, and an explicit Deny in either
+> overrides an Allow in the other, so the split is safe.
 
 **Why this is tighter than usual:** the target account is *shared* with an
 unrelated Airflow workload. Isolation is by convention (`lou-*` names,
@@ -16,17 +25,18 @@ you (admin, one time)      creates the policies, user, role; runs cdk bootstrap
         │
    lou-dev  (IAM user)     can do NOTHING but assume lou-deploy, MFA required
         │  sts:AssumeRole
-   lou-deploy  (IAM role)  LouServicePolicy — the deploy-time ceiling
+   lou-deploy  (IAM role)  LouDeployServices + LouDeployGuardrails
         │  sts:AssumeRole
    cdk-lou0-* roles        created by bootstrap, Lou's own qualifier
         │
-   CloudFormation          executes as cfn-exec-role, ALSO capped by LouServicePolicy
+   CloudFormation          executes as cfn-exec-role, capped by the SAME two policies
         │  creates, with LouPermissionsBoundary forced on
    lou-lambda-exec         the runtime ceiling — logs, its own tables, its own secrets
 ```
 
-Two ceilings, deliberately different sizes: **LouServicePolicy** is what may be
-*built*; **LouPermissionsBoundary** is what the running function may *do*. The
+Two ceilings, deliberately different sizes: **LouDeployServices +
+LouDeployGuardrails** is what may be *built*; **LouPermissionsBoundary** is what
+the running function may *do*. The
 boundary is what makes granting `iam:CreateRole` safe — without it, a principal
 that can create roles can create an admin role and assume it.
 
@@ -51,12 +61,20 @@ else entirely. Two defenses:
 
 1. Bucket names carry the account ID and region, the same convention CDK uses
    for its own assets bucket.
-2. An `S3ResourceAccountPin` **Deny** on `aws:ResourceAccount != <account>` in
-   both policies. This is the control that actually holds — it survives a
-   misnamed bucket, and it is what closes the "someone registers `lou-evil` and
+2. An `S3ResourceAccountPin` **Deny** on `aws:ResourceAccount != <account>`,
+   present in `LouDeployGuardrails` **and** independently in
+   `LouPermissionsBoundary`. This is the control that actually holds — it
+   survives a misnamed bucket, and closes the "someone registers `lou-evil` and
    your role has `s3:*` against it" hole. `StringNotEqualsIfExists` so that
    account-level calls which do not populate the key (`ListAllMyBuckets`) are
    not caught by it.
+
+   It appears in both because they are **separate evaluation contexts**: the
+   two deploy policies are attached together and evaluated as one identity
+   policy, but a permissions boundary is intersected with the identity policy
+   rather than merged into it — so a pin on the deploy side does nothing for
+   the Lambda execution role. `tests/test_iam_policies.py` asserts this per
+   context, not per file.
 
 In CDK, set the bucket name explicitly rather than letting it auto-generate:
 
@@ -94,7 +112,8 @@ Worth one pass, since a wrong condition key fails *open* (the condition is
 ignored) rather than erroring:
 
 ```bash
-for f in infra/iam/rendered/lou-service-policy.json \
+for f in infra/iam/rendered/lou-deploy-services.json \
+         infra/iam/rendered/lou-deploy-guardrails.json \
          infra/iam/rendered/lou-permissions-boundary.json; do
   aws accessanalyzer validate-policy --policy-type IDENTITY_POLICY \
     --policy-document "file://$f" --query 'findings[].{Type:findingType,Detail:findingDetails}'
@@ -106,9 +125,9 @@ done
 > billed check, other Access Analyzer APIs are — so it falls under "ask first"
 > per the AWS interaction policy in `CLAUDE.md`.
 
-## Step 2 — Create the two managed policies
+## Step 2 — Create the three managed policies
 
-Boundary first: `LouServicePolicy` references it by ARN in a Deny.
+Boundary first: `LouDeployGuardrails` references it by ARN in a Deny.
 
 ```bash
 aws iam create-policy \
@@ -117,10 +136,19 @@ aws iam create-policy \
   --description "Runtime ceiling for roles created by the Lou stack"
 
 aws iam create-policy \
-  --policy-name LouServicePolicy \
-  --policy-document file://infra/iam/rendered/lou-service-policy.json \
-  --description "Deploy-time ceiling for the Lou migration"
+  --policy-name LouDeployServices \
+  --policy-document file://infra/iam/rendered/lou-deploy-services.json \
+  --description "Deploy-time ceiling, part 1 of 2: services Lou is built from"
+
+aws iam create-policy \
+  --policy-name LouDeployGuardrails \
+  --policy-document file://infra/iam/rendered/lou-deploy-guardrails.json \
+  --description "Deploy-time ceiling, part 2 of 2: IAM grants and every Deny"
 ```
+
+> If you already created `LouServicePolicy` from an earlier revision, delete it
+> first — it is superseded by these two:
+> `aws iam delete-policy --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouServicePolicy`
 
 ## Step 3 — Create the role `lou-deploy`
 
@@ -134,8 +162,15 @@ aws iam create-role \
 
 aws iam attach-role-policy \
   --role-name lou-deploy \
-  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouServicePolicy
+  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployServices
+
+aws iam attach-role-policy \
+  --role-name lou-deploy \
+  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployGuardrails
 ```
+
+Both are required. `LouDeployServices` alone grants no IAM and carries none of
+the Deny guardrails; `LouDeployGuardrails` alone can build nothing.
 
 ## Step 4 — Create the user `lou-dev`
 
@@ -195,7 +230,7 @@ anything else in this account.
 npx cdk bootstrap aws://<ACCOUNT_ID>/us-east-1 \
   --qualifier lou0 \
   --toolkit-stack-name CDKToolkit-Lou \
-  --cloudformation-execution-policies arn:aws:iam::<ACCOUNT_ID>:policy/LouServicePolicy \
+  --cloudformation-execution-policies arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployServices,arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployGuardrails \
   --custom-permissions-boundary LouPermissionsBoundary \
   --trust <ACCOUNT_ID>
 ```
@@ -274,13 +309,14 @@ npx cdk deploy --profile lou 2>&1 | grep -i "not authorized\|AccessDenied"
 ```
 
 Read the action out of the error, add exactly that action to the matching
-statement in `lou-service-policy.json`, re-render, and update the policy:
+statement in `lou-deploy-services.json` (missing actions almost always belong
+there rather than in the guardrails), re-render, and update the policy:
 
 ```bash
 ./infra/iam/render.sh
 aws iam create-policy-version \
-  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouServicePolicy \
-  --policy-document file://infra/iam/rendered/lou-service-policy.json \
+  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployServices \
+  --policy-document file://infra/iam/rendered/lou-deploy-services.json \
   --set-as-default
 ```
 
@@ -292,7 +328,7 @@ Commit the template change so the policy stays reviewable in git.
 npx cdk destroy --profile lou                 # Lou's own stacks
 aws cloudformation delete-stack --stack-name CDKToolkit-Lou
 aws iam delete-user --user-name lou-dev       # delete access keys first
-aws iam delete-role --role-name lou-deploy
+aws iam delete-role --role-name lou-deploy    # detach both policies first
 ```
 
 Because everything is `lou-*` / `Lou*` / `/lou/`, teardown cannot reach the

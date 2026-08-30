@@ -26,7 +26,7 @@ if ! printf '%s' "$AWS_ACCOUNT_ID" | grep -Eq '^[0-9]{12}$'; then
   exit 1
 fi
 
-for f in lou-dev-user-policy lou-deploy-trust lou-service-policy lou-permissions-boundary; do
+for f in lou-dev-user-policy lou-deploy-trust lou-deploy-services lou-deploy-guardrails lou-permissions-boundary; do
   # Drop the "Comment" keys: they document intent here but IAM rejects them.
   python3 - "$f.json" "$OUT/$f.json" "$AWS_ACCOUNT_ID" <<'PY'
 import json, sys
@@ -40,6 +40,11 @@ json.dump(doc, open(dst, "w"), indent=2)
 PY
   echo "  rendered $OUT/$f.json"
 done
+
+# IAM caps a managed policy at 6144 characters, EXCLUDING whitespace — so
+# minifying does not help, only removing content does. Catch an oversize policy
+# here rather than as a LimitExceeded error halfway through the setup steps.
+python3 ./check_size.py "$OUT" || exit 1
 
 echo
 echo "Done. Next: follow infra/iam/README.md from step 2."
