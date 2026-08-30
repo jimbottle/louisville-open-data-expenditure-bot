@@ -183,19 +183,50 @@ def test_created_roles_must_carry_the_permissions_boundary():
     assert any("StringNotEquals" in _condition_text(d) for d in denies)
 
 
-def test_the_boundary_itself_cannot_be_edited_or_detached():
-    """A boundary the holder can rewrite is not a boundary."""
-    txt = json.dumps([_load(n) for n in DEPLOY_POLICIES])
-    protecting = [
-        s for s in _deploy_statements()
-        if s.get("Effect") == "Deny"
-        and any("LouPermissionsBoundary" in r for r in _resources(s))
-    ]
-    assert protecting, "nothing prevents editing/deleting LouPermissionsBoundary"
-    guarded = {a for s in protecting for a in _actions(s)}
-    for action in ("iam:CreatePolicyVersion", "iam:DeleteRolePermissionsBoundary"):
-        assert action in guarded, f"{action} not denied on the boundary policy"
-    assert "LouPermissionsBoundary" in txt
+def _managed_policy_name(filename: str) -> str:
+    """lou-deploy-services.json -> LouDeployServices.
+
+    The filename is the source of truth, so a rename cannot leave the guard
+    below silently pointing at a policy ARN that no longer exists — which is
+    exactly what happened when the combined LouServicePolicy was split.
+    """
+    stem = os.path.splitext(filename)[0]
+    return "".join(part.capitalize() for part in stem.split("-"))
+
+
+def test_every_constraining_policy_is_protected_from_edits():
+    """A ceiling the holder can rewrite is not a ceiling.
+
+    The Deny must name EVERY policy that constrains the deploy principal: the
+    permissions boundary and BOTH halves of the deploy policy. Deriving the
+    expected set from the filenames means a future rename or re-split fails
+    here instead of quietly pointing the guard at a dead ARN.
+    """
+    expected = {_managed_policy_name(n) for n in DEPLOY_POLICIES + [BOUNDARY]}
+
+    protecting = [s for s in _deploy_statements() if s.get("Effect") == "Deny"
+                  and any(":policy/" in r for r in _resources(s))]
+    assert protecting, "nothing prevents editing the policies that constrain the deploy role"
+
+    guarded_arns = {r for s in protecting for r in _resources(s)}
+    guarded_names = {r.split(":policy/")[-1] for r in guarded_arns}
+
+    missing = expected - guarded_names
+    assert not missing, (
+        f"these constraining policies are not protected from edits: {sorted(missing)}. "
+        "The deploy principal could rewrite its own ceiling."
+    )
+
+    stale = guarded_names - expected
+    assert not stale, (
+        f"the edit guard names policies that no longer exist: {sorted(stale)}. "
+        "A dead ARN protects nothing — update it to the current policy names."
+    )
+
+    guarded_actions = {a for s in protecting for a in _actions(s)}
+    for action in ("iam:CreatePolicyVersion", "iam:DeletePolicy",
+                   "iam:SetDefaultPolicyVersion", "iam:DeleteRolePermissionsBoundary"):
+        assert action in guarded_actions, f"{action} is not denied on the ceiling policies"
 
 
 def test_iam_writes_are_confined_to_the_lou_path():

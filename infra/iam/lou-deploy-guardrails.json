@@ -51,6 +51,7 @@
     },
     {
       "Sid": "CannotEditOrDetachTheBoundaryItself",
+      "Comment": "A ceiling the holder can rewrite is not a ceiling. This must name EVERY policy that constrains the deploy principal -- the boundary and BOTH halves of the deploy policy. Keep it in sync with the policy names: a rename that misses this statement silently points it at an ARN that does not exist, which is how the retired LouServicePolicy entry survived the split. tests/test_iam_policies.py derives the expected set from the policy filenames so that cannot recur.",
       "Effect": "Deny",
       "Action": [
         "iam:DeletePolicy",
@@ -61,7 +62,8 @@
       ],
       "Resource": [
         "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouPermissionsBoundary",
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouServicePolicy"
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouDeployServices",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouDeployGuardrails"
       ]
     },
     {
