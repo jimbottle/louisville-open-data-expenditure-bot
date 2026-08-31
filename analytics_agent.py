@@ -674,59 +674,22 @@ def _message_text(response) -> str:
     return text
 
 
-REASONING_PROMPT = """Analyze this user question and plan the SQL query. Consider:
-1. Which table(s) to query (expenditures, summary tables, contractor_profiles, salary_data, etc.)
-2. Whether this is a follow-up that references prior context
-3. Whether to use agency_canonical or agency, and whether to filter by fiscal year
-4. Any data quality concerns (offsetting entries, artifacts)
-5. What columns and aggregations are needed
-6. Whether the results would benefit from a chart visualization. If yes, on the LAST line write exactly: CHART: type (where type is bar, line, or pie). Use line for time series, bar for comparisons/rankings, pie for proportional breakdowns. If no chart is appropriate (single values, text-heavy, individual records), write: CHART: none
+def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, context: str = None, fallback_client: openai.OpenAI = None, fallback_model: str = None) -> tuple[str, dict, object]:
+    """Ask the model to generate SQL. Returns (sql, usage_dict, raw_response).
 
-Return a short analysis (3-5 sentences max) of your query plan, ending with the CHART line. Do NOT write SQL."""
-
-
-def reason_about_query(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, fallback_client: openai.OpenAI = None, fallback_model: str = None) -> tuple[str, dict, object]:
-    """Think about the query before generating SQL. Returns (reasoning, usage_dict, raw_response)."""
-    def _make_call(c, m):
-        def _call():
-            messages = [{"role": "system", "content": system_prompt + "\n\n" + REASONING_PROMPT}]
-            if history:
-                messages.extend(history[-6:])
-            messages.append({"role": "user", "content": question})
-            raw = c.with_raw_response.chat.completions.create(
-                model=m,
-                messages=messages,
-                temperature=0.2,
-                max_tokens=300,
-            )
-            # Checked here, inside the retry/fallback envelope, so a provider
-            # that answers with no content is failed over rather than surfacing
-            # to the user as if the question were at fault.
-            _message_text(raw.parse())
-            return raw
-        return _call
-    raw = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
-    response = raw.parse()
-    usage = {}
-    if hasattr(response, "usage") and response.usage:
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens or 0,
-            "completion_tokens": response.usage.completion_tokens or 0,
-            "total_tokens": response.usage.total_tokens or 0,
-        }
-    return _message_text(response).strip(), usage, raw
-
-
-def generate_sql(client: openai.OpenAI, model: str, system_prompt: str, question: str, on_retry=None, history: list = None, reasoning: str = None, fallback_client: openai.OpenAI = None, fallback_model: str = None) -> tuple[str, dict, object]:
-    """Ask the model to generate SQL. Returns (sql, usage_dict, raw_response)."""
+    context: per-question material appended to the user turn — the vocabulary
+    block from grounding.grounding_block. It rides in the user message, not
+    the system prompt, because it changes with every question and the system
+    prompt's hash is the response-cache version.
+    """
     def _make_call(c, m):
         def _call():
             messages = [{"role": "system", "content": system_prompt}]
             if history:
                 messages.extend(history[-6:])
             user_content = question
-            if reasoning:
-                user_content = f"Question: {question}\n\nQuery plan:\n{reasoning}\n\nNow write ONLY the SQL query based on this plan."
+            if context:
+                user_content = f"{question}\n\n{context}"
             messages.append({"role": "user", "content": user_content})
             raw = c.with_raw_response.chat.completions.create(
                 model=m,
@@ -833,8 +796,9 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       them. Never introduce a citation the draft did not make, and never let a
       document change, explain away, or override a figure.
     - KEEP a draft saying spending records cannot be linked to council
-      legislation; never cut it as jargon or swap it for the name of a
-      field that would hold the link.
+      legislation ONLY when the question asked about legislation (never cut
+      it as jargon or swap in a field name then). When the question did not
+      ask about legislation, DELETE that sentence: it is boilerplate there.
     - NEVER total or net a long list yourself: arithmetic is only allowed
       over a handful of values you can verify digit by digit. If the results
       have no total row, do not state an overall total — describe individual

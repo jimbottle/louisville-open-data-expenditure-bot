@@ -407,3 +407,185 @@ def test_daily_cap_says_it_resets_rather_than_asking_for_money(client, monkeypat
     assert errors == [app.DAILY_CAP_MSG]
     assert errors[0] != app.QUOTA_MSG
     assert errors[0] != app.RATE_LIMIT_MSG
+
+
+# ── Vocabulary grounding + verify-and-repair ─────────────────────────────────
+# The production failure these guard: a SUM over a filter that matched no rows
+# came back as one NaN row, sailed past the `len == 0` check, and was
+# interpreted as "no recorded vehicle spending" (real figure ~$1.6M).
+
+NARROW_SQL = (
+    "SELECT ROUND(SUM(extended_amount), 2) AS total_spend FROM expenditures "
+    "WHERE agency_canonical = 'Louisville Fire' AND fiscal_year = 2024 "
+    "AND spend_category ILIKE '%Vehicle%' AND is_data_artifact = FALSE"
+)
+REPAIRED_SQL = (
+    "SELECT ROUND(SUM(extended_amount), 2) AS total_spend FROM expenditures "
+    "WHERE agency_canonical = 'Louisville Fire' AND fiscal_year = 2024 "
+    "AND (spend_category ILIKE '%Automotive%' OR spend_category ILIKE '%Vehicle%') "
+    "AND is_data_artifact = FALSE"
+)
+GENUINE_EMPTY_SQL = (
+    "SELECT ROUND(SUM(extended_amount), 2) AS total_spend FROM expenditures "
+    "WHERE agency_canonical = 'Louisville Fire' AND fiscal_year = 2031"
+)
+
+
+def _fake_generate_sql_sequence(*sqls):
+    """Returns each SQL in turn and records every call's question/context."""
+    calls = []
+
+    def _gen(client, model, system, question, **kw):
+        calls.append({"question": question, "context": kw.get("context")})
+        sql = sqls[min(len(calls) - 1, len(sqls) - 1)]
+        return sql, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}, _FakeResp()
+    _gen.calls = calls
+    return _gen
+
+
+def test_first_sql_request_carries_the_vocabulary_block(client, monkeypatch):
+    import app
+    gen = _fake_generate_sql_sequence(REAL_SQL)
+    monkeypatch.setattr(app, "generate_sql", gen)
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("draft"))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("final"))
+    _post(client, "How much did Louisville Fire spend on vehicles in fiscal year 2024?", dev_mode=True)
+    ctx = gen.calls[0]["context"]
+    assert ctx and ctx.startswith("## Data vocabulary matched to this question")
+    assert "Automotive" in ctx and "spend_category" in ctx
+
+
+def test_null_aggregate_is_repaired_with_the_real_vocabulary(client, monkeypatch):
+    import app
+    gen = _fake_generate_sql_sequence(NARROW_SQL, REPAIRED_SQL)
+    monkeypatch.setattr(app, "generate_sql", gen)
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("draft"))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("Louisville Fire spent $1.6M."))
+    events = _events(_post(client, "How much did Louisville Fire spend on vehicles in FY2024?", dev_mode=True))
+    types = _types(events)
+
+    # Two SQL generations: the original, then a repair whose prompt names the
+    # narrow filter and the real category family.
+    assert len(gen.calls) == 2
+    repair_prompt = gen.calls[1]["question"]
+    assert "returned nothing" in repair_prompt and "%Vehicle%" in repair_prompt
+    assert "Automotive" in repair_prompt
+    # The repaired query is what was executed and shown.
+    assert types.count("sql") == 2
+    results = next(e for e in events if e["type"] == "results")
+    assert results["row_count"] == 1 and "NaN" not in results["content"]
+    # The answer streams (not the empty-result path) and the reader is told.
+    assert "interpretation" in types and "error" not in types
+    info = [e for e in events if e["type"] == "info"]
+    assert info and "re-checked the data's own category names" in info[0]["content"]
+    # The self-correction is part of the answer's provenance, after the answer.
+    assert types.index("info") > types.index("interpretation")
+    assert types[-1] == "done"
+
+
+def test_genuine_empty_result_is_not_retried(client, monkeypatch):
+    import app
+    gen = _fake_generate_sql_sequence(GENUINE_EMPTY_SQL, REPAIRED_SQL)
+    monkeypatch.setattr(app, "generate_sql", gen)
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("no data for 2031"))
+    events = _events(_post(client, "What did Louisville Fire spend in 2031?", dev_mode=True))
+    assert len(gen.calls) == 1  # every filter matched a real value: nothing to repair
+    assert _types(events).count("sql") == 1
+    assert "info" not in _types(events)
+    # A NULL aggregate takes the empty-result path, not the "here is NaN" one.
+    assert "no data for 2031" in "".join(e.get("content", "") for e in events if e["type"] == "interpretation")
+
+
+def test_failed_repair_falls_through_to_the_empty_path(client, monkeypatch):
+    import app
+    gen = _fake_generate_sql_sequence(NARROW_SQL, GENUINE_EMPTY_SQL)  # repair also empty
+    monkeypatch.setattr(app, "generate_sql", gen)
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("nothing matched"))
+    events = _events(_post(client, "How much did Louisville Fire spend on vehicles in FY2024?", dev_mode=True))
+    types = _types(events)
+    assert len(gen.calls) == 2
+    assert types.count("sql") == 1  # the failed repair is not shown as the query
+    assert "info" not in types and "error" not in types
+    logs = " ".join(e["content"] for e in events if e["type"] == "log")
+    assert "Repaired query also returned nothing" in logs
+    assert types[-1] == "done"
+
+
+def test_repair_exception_never_becomes_a_user_error(client, monkeypatch):
+    import app
+    n = {"calls": 0}
+
+    def _gen(client_, model, system, question, **kw):
+        n["calls"] += 1
+        if n["calls"] == 1:
+            return NARROW_SQL, {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}, _FakeResp()
+        raise RuntimeError("provider hiccup")
+    monkeypatch.setattr(app, "generate_sql", _gen)
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("nothing matched"))
+    events = _events(_post(client, "How much did Louisville Fire spend on vehicles in FY2024?", dev_mode=True))
+    types = _types(events)
+    assert "error" not in types and "interpretation" in types and types[-1] == "done"
+    assert any("Repair attempt failed" in e["content"] for e in events if e["type"] == "log")
+
+
+def test_empty_explanation_prompt_carries_the_findings_without_the_rewrite_order(client, monkeypatch):
+    import app
+    seen = {}
+
+    def _stream(client_, model, system, question, sql, results, **kw):
+        seen["question"] = question
+        yield "explained"
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql_sequence(NARROW_SQL, GENUINE_EMPTY_SQL))
+    monkeypatch.setattr(app, "interpret_results_stream", _stream)
+    _post(client, "How much did Louisville Fire spend on vehicles in FY2024?", dev_mode=True)
+    assert "checked against the data's vocabulary" in seen["question"]
+    assert "Automotive" in seen["question"]
+    assert "Rewrite the query" not in seen["question"]
+    assert "no SQL" in seen["question"]
+
+
+# ── Off-topic guard ──────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("reply", [
+    "I’m sorry, but I can only help with data-related questions.",   # 'WITH' in prose
+    "-- The question is not about spending",
+    "",
+    "/* nothing to query */",
+])
+def test_prose_or_comment_replies_take_the_off_topic_path(client, monkeypatch, reply):
+    """The guard used to look for SQL keywords ANYWHERE in the reply, so a
+    refusal containing the word 'with' was executed as SQL, failed, and came
+    back from the error-retry as SELECT '<the refusal>' AS message."""
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(reply))
+    events = _events(_post(client, "Tell me a joke about cats.", dev_mode=True))
+    types = _types(events)
+    assert "sql" not in types and "results" not in types and "error" not in types
+    assert any("doesn't appear to be answerable" in e.get("content", "")
+               for e in events if e["type"] == "interpretation")
+
+
+@pytest.mark.parametrize("reply", [
+    "SELECT 1", "  -- assumed FY2025\nSELECT 1", "WITH t AS (SELECT 1) SELECT * FROM t",
+    "(SELECT 1) UNION ALL (SELECT 2)", "/* c */ select 1",
+])
+def test_looks_like_sql_accepts_real_statements(reply):
+    import app
+    assert app._looks_like_sql(reply)
+
+
+# ── Retrieved-document topic gate ────────────────────────────────────────────
+
+def test_documents_sharing_no_content_word_with_the_question_are_dropped(client):
+    import app
+    hits = [
+        {"file_no": "O-274-22", "text": "AN ORDINANCE AMENDING THE FISCAL YEAR 2022-2023 CAPITAL BUDGET BY CHANGING THE DUE DATE FOR A PAVING PLAN"},
+        {"file_no": "O-088-21", "text": "AN ORDINANCE APPROPRIATING $1,300,000 FOR FIRE FLEET REPLACEMENT VEHICLES"},
+    ]
+    kept = app._on_topic_hits("How much did Louisville Fire spend on vehicles in FY2024?", hits)
+    assert [h["file_no"] for h in kept] == ["O-088-21"]
+    # Synonyms count: "vehicles" reaches a document that only says "fleet".
+    kept = app._on_topic_hits("vehicles", [{"file_no": "x", "text": "FIRE FLEET REPLACEMENT"}])
+    assert kept
+    # A question with no content words keeps everything (nothing to judge by).
+    assert app._on_topic_hits("Which agencies spend the most?", hits) == hits

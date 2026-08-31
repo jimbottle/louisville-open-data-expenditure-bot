@@ -298,6 +298,34 @@ def _build_summaries(con, cfg: CityConfig) -> None:
     print(f"Summary tables created: {', '.join(built)}")
 
 
+def _trim_text_columns(con, tables: list) -> None:
+    """Strip leading/trailing whitespace from every VARCHAR column that has any.
+
+    The source CSVs carry padded variants of categorical values — Louisville
+    has 68,602 expenditure rows whose spend_category is 'Automotive Fuel' with
+    trailing spaces, next to the clean value — so an equality filter on the
+    clean string silently dropped a third of a category. Run BEFORE
+    canonicalization so the curated maps match the clean values, and only on
+    columns that actually need it (an UPDATE over 2.2M rows is not free).
+    """
+    for table in tables:
+        if not _table_exists(con, table):
+            continue
+        qt = _ident_quote(table)
+        padded = []
+        for name, typ, *_ in con.execute(f"DESCRIBE {qt}").fetchall():
+            if "VARCHAR" not in typ.upper():
+                continue
+            q = _ident_quote(name)
+            n = con.execute(f"SELECT COUNT(*) FROM {qt} WHERE {q} <> TRIM({q})").fetchone()[0]
+            if n:
+                padded.append((name, n))
+        if padded:
+            con.execute(f"UPDATE {qt} SET " + ", ".join(
+                f"{_ident_quote(c)} = TRIM({_ident_quote(c)})" for c, _ in padded))
+            print(f"{table}: trimmed whitespace in " + ", ".join(f"{c} ({n:,} rows)" for c, n in padded))
+
+
 def _ingest(con: duckdb.DuckDBPyConnection, cfg: CityConfig, data_dir: str) -> None:
     """Build every table from the city pack's CSVs into an open connection.
 
@@ -306,10 +334,16 @@ def _ingest(con: duckdb.DuckDBPyConnection, cfg: CityConfig, data_dir: str) -> N
     databases.
     """
     _load_expenditures(con, cfg, data_dir)
+    _trim_text_columns(con, [cfg.expenditures.get("table", "expenditures")])
     _apply_canonicalization(con, cfg)
     _apply_data_quality(con, cfg)
     _load_enrichment(con, cfg, data_dir)
+    _trim_text_columns(con, list(cfg.enrichment_tables.keys()))
     _build_summaries(con, cfg)
+    # The vocabulary the prompt cannot carry (see grounding.py). Built last so
+    # it sees canonical columns and the data-quality flags.
+    from grounding import build_value_index
+    build_value_index(con, cfg)
 
 
 def _lock_down(con: duckdb.DuckDBPyConnection) -> None:

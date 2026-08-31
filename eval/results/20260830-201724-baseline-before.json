@@ -1,0 +1,414 @@
+{
+ "label": "baseline-before",
+ "model": "gpt-oss-120b",
+ "provider": "paid",
+ "when": "2026-08-30T20:17:24",
+ "cases": 23,
+ "sql_pass": 20,
+ "answer_pass": 20,
+ "both_pass": 19,
+ "repairs": 0,
+ "repair_tries": 0,
+ "mean_seconds": 7.2,
+ "total_seconds": 166.9,
+ "results": [
+  {
+   "id": "fire-vehicles-fy2024",
+   "tags": [
+    "vocabulary"
+   ],
+   "question": "How much did the Louisville Fire department spend on vehicles in fiscal year 2024?",
+   "sql_ok": false,
+   "sql_note": "served query returned nothing",
+   "answer_ok": false,
+   "answer_note": "contains 'no vehicle'; does not state 1,581,197.96",
+   "seconds": 7.8,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_vehicle_spend\nFROM expenditures\nWHERE fiscal_year = 2024\n  AND agency_canonical = 'Louisville Fire'\n  AND (spend_category ILIKE '%vehicle%' OR expenditure_category ILIKE '%vehicle%')\n  AND is_data_artifact = FALSE;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_vehicle_spend\nFROM expenditures\nWHERE fiscal_year = 2024\n  AND agency_canonical = 'Louisville Fire'\n  AND (spend_category ILIKE '%vehicle%' OR expenditure_category ILIKE '%vehicle%')\n  AND is_data_artifact = FALSE;",
+   "answer": "The Louisville Fire department recorded $0 in vehicle spending for fiscal year\u202f2024. The expenditures dataset contains no vehicle\u2011related records for that department and year. Spending records are not linked to specific council legislation.\n\nOrdinance O-274-22 amended the FY2022\u20112023 capital budget."
+  },
+  {
+   "id": "fuel-fy2025",
+   "tags": [
+    "vocabulary"
+   ],
+   "question": "How much did Louisville Metro spend on fuel in FY2025?",
+   "sql_ok": true,
+   "sql_note": "8,206,675.49 \u2248 8,206,675.49",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 6.8,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "-- Assuming FY2025 is the most recent complete fiscal year\nSELECT ROUND(SUM(extended_amount), 2) AS total_fuel_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND is_data_artifact = FALSE\n  AND spend_category ILIKE '%fuel%'\n  AND extended_amount IS NOT NULL;",
+   "first_sql": "-- Assuming FY2025 is the most recent complete fiscal year\nSELECT ROUND(SUM(extended_amount), 2) AS total_fuel_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND is_data_artifact = FALSE\n  AND spend_category ILIKE '%fuel%'\n  AND extended_amount IS NOT NULL;",
+   "answer": "Louisville Metro spent $8.2M on fuel in FY\u202f2025. Spending records cannot be linked to council legislation. The related legislation listed does not pertain to fuel spending, so it is not cited."
+  },
+  {
+   "id": "arp-total",
+   "tags": [
+    "vocabulary",
+    "year"
+   ],
+   "question": "How much has Louisville spent from the American Rescue Plan?",
+   "sql_ok": true,
+   "sql_note": "37,636,175.82 \u2248 37,636,175.82",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 6.6,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fund = 'ARP'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fund = 'ARP'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL;",
+   "answer": "Louisville has spent $37.6\u202fM from the American Rescue Plan.  \n\nSpending records cannot be directly linked to specific council resolutions or ordinances.  \n\nResolution R-062-22 authorized the mayor to accept a grant of $133,559.78 from the American Rescue Plan."
+  },
+  {
+   "id": "cares-total",
+   "tags": [
+    "vocabulary",
+    "year"
+   ],
+   "question": "How much CARES Act coronavirus relief money did the city spend?",
+   "sql_ok": true,
+   "sql_note": "73,831,305.34 \u2248 73,831,305.34",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 6.8,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_cares_spend\nFROM expenditures\nWHERE fund = 'CARES Coronavirus Relief Fund (CRF)'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_cares_spend\nFROM expenditures\nWHERE fund = 'CARES Coronavirus Relief Fund (CRF)'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL;",
+   "answer": "The city has spent $73.8\u202fmillion from the CARES Coronavirus Relief Fund.\n\nSpending records cannot be directly linked to specific council resolutions.\n\nResolution R-011-21 authorized the mayor to accept $5,430,961 of CARES Act funding for the Emergency Solutions Grant program."
+  },
+  {
+   "id": "seagrave-total",
+   "tags": [
+    "entity",
+    "year"
+   ],
+   "question": "How much has the city paid Seagrave Fire Apparatus in total?",
+   "sql_ok": true,
+   "sql_note": "12,030,691.29 \u2248 12,030,691.29",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.1,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_paid_to_seagrave\nFROM expenditures\nWHERE payee_canonical ILIKE '%SEAGRAVE%'\n  AND is_data_artifact = FALSE;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_paid_to_seagrave\nFROM expenditures\nWHERE payee_canonical ILIKE '%SEAGRAVE%'\n  AND is_data_artifact = FALSE;",
+   "answer": "The city has paid Seagrave Fire Apparatus $12,030,691.29. FY2026 expenditure data is incomplete, so the amount reflects spending recorded up to the latest available data."
+  },
+  {
+   "id": "lge-total",
+   "tags": [
+    "entity",
+    "year"
+   ],
+   "question": "How much has Louisville Metro paid LG&E over the years?",
+   "sql_ok": true,
+   "sql_note": "345,725,377.26 \u2248 345,725,377.26",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 6.7,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE payee_canonical = 'Louisville Gas & Electric Company'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE payee_canonical = 'Louisville Gas & Electric Company'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL;",
+   "answer": "Louisville Metro has paid Louisville Gas & Electric Company a total of $345.73\u202fM.  \nThis total includes partial data for fiscal year 2026; FY2025 is the most recent year with complete expenditure data.  \nSpending records cannot be linked to council legislation.  \n\nOrdinance O-083-22 established paid leave for Louisville Metro government employees who are victims of a crime or domestic violence.  \nResolution R-089-22 amended the paid and unpaid time\u2011off benefits chapter of the Metro Council employee handbook by creating a new section on the same leave."
+  },
+  {
+   "id": "paving-vendors",
+   "tags": [
+    "vocabulary"
+   ],
+   "question": "Which vendors were paid the most for road paving?",
+   "sql_ok": true,
+   "sql_note": "all present",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.1,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "-- Assuming fiscal_year = 2025 as the most recent complete year\nSELECT\n    payee_canonical,\n    ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND is_data_artifact = FALSE\n  AND agency_canonical = 'Public Works & Assets'\n  AND (spend_category ILIKE '%paving%' OR expenditure_category ILIKE '%paving%')\n  AND payee_canonical IS NOT NULL\nGROUP BY payee_canonical\nORDER BY total_spend DESC\nLIMIT 10",
+   "first_sql": "-- Assuming fiscal_year = 2025 as the most recent complete year\nSELECT\n    payee_canonical,\n    ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND is_data_artifact = FALSE\n  AND agency_canonical = 'Public Works & Assets'\n  AND (spend_category ILIKE '%paving%' OR expenditure_category ILIKE '%paving%')\n  AND payee_canonical IS NOT NULL\nGROUP BY payee_canonical\nORDER BY total_spend DESC\nLIMIT 10",
+   "answer": "1. Hall Contracting of Kentucky Inc \u2013 $21.85\u202fM  \n2. Louisville Paving Company Inc \u2013 $7.30\u202fM  \n3. PACE CONTRACTING LLC \u2013 $4.93\u202fM  \n4. OPENGOV INC \u2013 $502.98\u202fK  \n5. STRAND ASSOCIATES INC \u2013 $492.19\u202fK  \n6. Riverside Paving & Contracting Co Inc \u2013 $223.12\u202fK  \n7. International Cybernetics Company LP \u2013 $221.43\u202fK  \n8. Guardian Retention Systems LLC \u2013 $138.38\u202fK  \n9. Eden Fence Inc \u2013 $130.45\u202fK  \n10. Michael Baker International Inc \u2013 $74.06\u202fK  \n\nThese are the top ten vendors paid for road paving by the Public Works & Assets department in fiscal year\u202f2025, the most recent complete year of expenditure data. Spending records cannot be linked to council legislation.\n\nRelated city legislation: CIF060221PW20 authorized $13,000 for a right\u2011of\u2011way easement; CIF101922PW15C authorized $83,403.11 for paving projects on Glenrock Road, Hedges Road, Huckleb\u200berry Court, and Laramie Court; CIF120821PW19B authorized $12,774.35 to pave the Metro\u2011owned portion of Old Station Road."
+  },
+  {
+   "id": "top-agencies-all-time",
+   "tags": [
+    "summary"
+   ],
+   "question": "Which agencies have spent the most money across all fiscal years?",
+   "sql_ok": true,
+   "sql_note": "top 5 match",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.3,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT agency AS agency_canonical, ROUND(total_spend, 2) AS total_spend\nFROM summary_agency_spend\nWHERE agency IS NOT NULL\nORDER BY total_spend DESC;",
+   "first_sql": "SELECT agency AS agency_canonical, ROUND(total_spend, 2) AS total_spend\nFROM summary_agency_spend\nWHERE agency IS NOT NULL\nORDER BY total_spend DESC;",
+   "answer": "The agencies with the highest total spending are:\n\n1. Public Works & Assets \u2013 $1,035.7M  \n2. Economic Development \u2013 $390.4M  \n3. Facilities & Fleet Management \u2013 $368.8M  \n4. Community Services & Revitalization \u2013 $351.4M  \n5. Office of Housing & Community Development \u2013 $348.6M  \n6. OMB Finance \u2013 $319.9M  \n7. Develop Louisville \u2013 $288.1M  \n8. Parks & Recreation \u2013 $276.3M  \n9. Louisville Metro Police Department \u2013 $263.6M  \n10. Public Health & Wellness \u2013 $262.4M  \n\nThese are the top 10 agencies out of 61 agencies listed in the data.  \n\nSpending records cannot be linked to council legislation.  \n\nOrdinance [O-338-22] authorized year\u2011end operating budget transfers between various agencies for fiscal year\u202f2021\u20112022."
+  },
+  {
+   "id": "annual-spend-trend",
+   "tags": [
+    "summary",
+    "year"
+   ],
+   "question": "How has total annual spending changed from 2008 to 2026?",
+   "sql_ok": true,
+   "sql_note": "19 rows",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.2,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "-- FY2026 totals are partial; include for trend overview\nSELECT fiscal_year,\n       ROUND(total_spend, 2) AS total_spend\nFROM summary_annual_spend\nORDER BY fiscal_year ASC;",
+   "first_sql": "-- FY2026 totals are partial; include for trend overview\nSELECT fiscal_year,\n       ROUND(total_spend, 2) AS total_spend\nFROM summary_annual_spend\nORDER BY fiscal_year ASC;",
+   "answer": "Louisville Metro\u2019s total annual spending rose from $244.8\u202fM in FY2008 to a peak of $643.7\u202fM in FY2025, then fell to $439.7\u202fM in FY2026 (partial data). Spending grew modestly through the early 2010s, jumped sharply after FY2021, dipped in FY2023, and accelerated again through FY2025. FY2026 figures are partial because records only cover through March\u202f16\u202f2026. Spending records cannot be linked to specific council legislation. Ordinance [O-274-22] amended the FY2022\u20112023 capital budget deadline for Metro Council members to develop a spending plan for previously funded paving and sidewalk accounts."
+  },
+  {
+   "id": "lmpd-by-year",
+   "tags": [
+    "year"
+   ],
+   "question": "Give me a year-over-year breakdown of LMPD spending",
+   "sql_ok": true,
+   "sql_note": "43,401,681.16 \u2248 43,401,681.16",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.3,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT\n    fiscal_year,\n    ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE agency_canonical = 'Louisville Metro Police Department'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL\nGROUP BY fiscal_year\nORDER BY fiscal_year ASC;",
+   "first_sql": "SELECT\n    fiscal_year,\n    ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE agency_canonical = 'Louisville Metro Police Department'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL\nGROUP BY fiscal_year\nORDER BY fiscal_year ASC;",
+   "answer": "LMPD spending by fiscal year is:\n\n2008 \u2013 $9.78\u202fM  \n2009 \u2013 $9.06\u202fM  \n2010 \u2013 $12.15\u202fM  \n2011 \u2013 $8.16\u202fM  \n2012 \u2013 $6.62\u202fM  \n2013 \u2013 $8.76\u202fM  \n2014 \u2013 $8.19\u202fM  \n2015 \u2013 $9.16\u202fM  \n2016 \u2013 $10.44\u202fM  \n2017 \u2013 $10.90\u202fM  \n2018 \u2013 $11.16\u202fM  \n2019 \u2013 $12.13\u202fM  \n2020 \u2013 $12.42\u202fM  \n2021 \u2013 $11.63\u202fM  \n2022 \u2013 $19.37\u202fM  \n2023 \u2013 $8.47\u202fM  \n2024 \u2013 $27.40\u202fM  \n2025 \u2013 $43.40\u202fM (most recent complete year)  \n2026 \u2013 $24.35\u202fM (partial data as of\u202f2026\u201103\u201116)\n\nSpending records cannot be directly linked to council legislation. Resolution [R-037-21] approved a $37,500 contract for consulting services to establish an LMPD DNA laboratory."
+  },
+  {
+   "id": "parks-fy2025",
+   "tags": [
+    "year"
+   ],
+   "question": "How much did Parks & Recreation spend in FY2025?",
+   "sql_ok": true,
+   "sql_note": "43,399,384.03 \u2248 43,399,384.03",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 6.5,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE agency_canonical = 'Parks & Recreation'\n  AND fiscal_year = 2025\n  AND extended_amount IS NOT NULL\n  AND is_data_artifact = FALSE;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE agency_canonical = 'Parks & Recreation'\n  AND fiscal_year = 2025\n  AND extended_amount IS NOT NULL\n  AND is_data_artifact = FALSE;",
+   "answer": "Parks & Recreation spent $43.4M in FY2025. FY2025 is the most recent fiscal year with complete expenditure data; FY2026 data is partial. The spending records cannot be linked to specific city legislation."
+  },
+  {
+   "id": "library-latest-year",
+   "tags": [
+    "year"
+   ],
+   "question": "How much did the library spend last year?",
+   "sql_ok": true,
+   "sql_note": "20,326,652.59 \u2248 20,326,652.59",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 6.8,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND agency_canonical = 'Louisville Free Public Library'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND agency_canonical = 'Louisville Free Public Library'\n  AND is_data_artifact = FALSE\n  AND extended_amount IS NOT NULL;",
+   "answer": "The Louisville Free Public Library spent $20.3\u202fM in FY\u202f2025. FY\u202f2025 is the most recent fiscal year with complete expenditure data. Spending records cannot be linked to council legislation."
+  },
+  {
+   "id": "tech-fy2025",
+   "tags": [
+    "vocabulary",
+    "year"
+   ],
+   "question": "How much did Louisville spend on technology in FY2025?",
+   "sql_ok": true,
+   "sql_note": "22,414,255.52 \u2248 22,414,255.52",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.2,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT 'Metro Technology Services department' AS spend_view, ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND agency_canonical = 'Metro Technology Services'\n  AND is_data_artifact = FALSE\nUNION ALL\nSELECT 'Computer, software and cloud purchases (all departments)' AS spend_view, ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND (spend_category LIKE 'Computer%' OR spend_category ILIKE '%Software%' OR spend_category = 'Cloud Computing Services')\n  AND is_data_artifact = FALSE\nORDER BY total_spend DESC;",
+   "first_sql": "SELECT 'Metro Technology Services department' AS spend_view, ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND agency_canonical = 'Metro Technology Services'\n  AND is_data_artifact = FALSE\nUNION ALL\nSELECT 'Computer, software and cloud purchases (all departments)' AS spend_view, ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND (spend_category LIKE 'Computer%' OR spend_category ILIKE '%Software%' OR spend_category = 'Cloud Computing Services')\n  AND is_data_artifact = FALSE\nORDER BY total_spend DESC;",
+   "answer": "Louisville spent $34.7\u202fM on computer, software and cloud purchases across all departments in FY2025, and $22.4\u202fM on the Metro Technology Services department in the same year. These amounts are reported separately; because the Metro Technology Services spending may be included in the broader computer\u2011software\u2011cloud total, we cannot provide a combined figure without risking double\u2011counting. FY2025 expenditure data are complete. Spending records cannot be linked to council legislation. The MAP020321PWRep document authorized the reallocation of $408,835.47 of unused MAP and MAP MATCH funds for paving and sidewalk projects."
+  },
+  {
+   "id": "mayor-and-chief-pay",
+   "tags": [
+    "entity"
+   ],
+   "question": "How much does the mayor make? What about the police chief?",
+   "sql_ok": true,
+   "sql_note": "all present",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 6.6,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT \n    Employee_Name, \n    jobTitle, \n    ROUND(YTD_Total, 2) AS YTD_Total\nFROM salary_data\nWHERE CalYear = 2025\n  AND jobTitle IN ('Mayor', 'Police Chief')\n  AND YTD_Total IS NOT NULL\nORDER BY jobTitle;",
+   "first_sql": "SELECT \n    Employee_Name, \n    jobTitle, \n    ROUND(YTD_Total, 2) AS YTD_Total\nFROM salary_data\nWHERE CalYear = 2025\n  AND jobTitle IN ('Mayor', 'Police Chief')\n  AND YTD_Total IS NOT NULL\nORDER BY jobTitle;",
+   "answer": "Mayor Craig Greenberg \u2013 $158,115.58 YTD for 2025.  \nPolice Chief Paul\u202fLouis\u202fHumphrey \u2013 $267,811.04 YTD for 2025.  \n\nThese amounts reflect only the regular, overtime, incentive and other pay components recorded in the salary data; benefits are not included. The figures come from the most recent complete fiscal year (2025). Salary records are not linked to any council legislation."
+  },
+  {
+   "id": "highest-paid-positions",
+   "tags": [
+    "summary"
+   ],
+   "question": "What are the highest paid positions in Louisville Metro government?",
+   "sql_ok": true,
+   "sql_note": "top 3 match",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.5,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT job_title, department, ROUND(avg_total_comp, 2) AS avg_total_comp, ROUND(max_total_comp, 2) AS max_total_comp, employee_count FROM summary_top_salaries WHERE calendar_year = (SELECT MAX(calendar_year) FROM summary_top_salaries) AND job_title IS NOT NULL ORDER BY avg_total_comp DESC LIMIT 10",
+   "first_sql": "SELECT job_title, department, ROUND(avg_total_comp, 2) AS avg_total_comp, ROUND(max_total_comp, 2) AS max_total_comp, employee_count FROM summary_top_salaries WHERE calendar_year = (SELECT MAX(calendar_year) FROM summary_top_salaries) AND job_title IS NOT NULL ORDER BY avg_total_comp DESC LIMIT 10",
+   "answer": "The highest\u2011paid position in Louisville Metro government is the Police Chief of the Louisville Metro Police Department, with total compensation of $267,811.\n\n1. Police Chief \u2013 Louisville Metro Police Department \u2013 $267,811 avg / $267,811 max \u2013 1 employee  \n2. Director \u2013 Louisville Zoo \u2013 $213,466 avg / $213,466 max \u2013 1 employee  \n3. Deputy Police Chief \u2013 Louisville Metro Police Department \u2013 $202,892 avg / $204,679 max \u2013 2 employees  \n4. Fire Chief \u2013 Louisville Fire \u2013 $197,516 avg / $197,516 max \u2013 1 employee  \n5. Deputy Mayor \u2013 Chief of Staff General Counsel \u2013 Mayor Office \u2013 $193,777 avg / $193,777 max \u2013 1 employee  \n6. Asst Police Chief \u2013 Lt Colonel \u2013 Louisville Metro Police Department \u2013 $192,593 avg / $192,593 max \u2013 4 employees  \n7. Inspector General \u2013 Office of Inspector General \u2013 $182,969 avg / $182,969 max \u2013 1 employee  \n8. Chief Information Officer \u2013 Metro Technology Services \u2013 $178,711 avg / $178,711 max \u2013 1 employee  \n9. Chief Financial Officer \u2013 OMB Finance \u2013 $176,244 avg / $176,244 max \u2013 1 employee  \n10. Deputy Chief of Staff \u2013 Mayor\u2019s Office \u2013 $174,003 avg / $174,003 max \u2013 1 employee  \n\nThese figures are from the most recent complete year (FY\u202f2025).\n\nRelated city legislation: Ordinance O-083-22 established paid leave for Louisville Metro government employees who are victims of a crime or domestic violence; Resolution R-089-22 amended the employee handbook to add the same leave provision; Neighborhood Development Fund document NDF102021BLC06 appropriated $1,000 for a health and wellness case manager position."
+  },
+  {
+   "id": "police-overtime-2024",
+   "tags": [
+    "vocabulary",
+    "entity"
+   ],
+   "question": "How much overtime pay did police employees receive in 2024?",
+   "sql_ok": true,
+   "sql_note": "23,552,285.59 \u2248 23,552,285.59",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.7,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "-- Assuming police employees are identified by Department = 'Louisville Metro Police Department'\nSELECT ROUND(SUM(Overtime_Rate), 2) AS total_overtime_pay_2024\nFROM salary_data\nWHERE CalYear = 2024\n  AND Department = 'Louisville Metro Police Department'\n  AND Overtime_Rate IS NOT NULL;",
+   "first_sql": "-- Assuming police employees are identified by Department = 'Louisville Metro Police Department'\nSELECT ROUND(SUM(Overtime_Rate), 2) AS total_overtime_pay_2024\nFROM salary_data\nWHERE CalYear = 2024\n  AND Department = 'Louisville Metro Police Department'\n  AND Overtime_Rate IS NOT NULL;",
+   "answer": "Police employees received about $23.6\u202fmillion in overtime pay in 2024. This amount reflects overtime compensation only; benefits are not included. These spending records cannot be directly linked to council legislation. For example, Ordinance [O-080-21] authorized $10,000 for overtime expenses for the police department\u2019s 3rd Division."
+  },
+  {
+   "id": "registered-agents",
+   "tags": [
+    "summary"
+   ],
+   "question": "Who are the registered agents for the top 10 contractors by total spend?",
+   "sql_ok": true,
+   "sql_note": "top 5 match",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.4,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT payee, total_spend, sos_registered_agent\nFROM summary_top_contractors\nORDER BY total_spend DESC\nLIMIT 10",
+   "first_sql": "SELECT payee, total_spend, sos_registered_agent\nFROM summary_top_contractors\nORDER BY total_spend DESC\nLIMIT 10",
+   "answer": "The registered agents for the ten contractors with the highest total spend are:\n\n1. Louisville Gas & Electric Company \u2013 C T CORPORATION SYSTEM, 306 W Main St Suite 512, Frankfort, KY\u202f40601  \n2. Hall Contracting of Kentucky Inc \u2013 Stephen M. Priebe, 3800 Crittenden Drive, Louisville, KY\u202f40209  \n3. Motorola Solutions Inc \u2013 C T CORPORATION SYSTEM, 306 W Main St Suite 512, Frankfort, KY\u202f40601  \n4. Flynn Brothers Contracting Inc \u2013 Steve E. Mossholder, Jr., 4515 Bishop Ln Ste A, Louisville, KY\u202f40218  \n5. Sullivan & Cozart Inc \u2013 Thomas E. Roma, Jr., Manion Stigger, LLP, 2301 River Road Suite 101, Louisville, KY\u202f40206  \n6. Humana Health Plan Inc \u2013 C T CORPORATION SYSTEM, 306 W Main St Suite 512, Frankfort, KY\u202f40601  \n7. Louisville Paving Company Inc \u2013 Luke Fitzgerald, 15415 Shelbyville Road, Louisville, KY\u202f40245  \n8. Genuine Parts Company \u2013 C T CORPORATION SYSTEM, 306 W Main Street Suite 512, Frankfort, KY\u202f40601  \n9. Waste Management of Kentucky LLC \u2013 C T CORPORATION SYSTEM, 306 W Main St Suite 512, Frankfort, KY\u202f40601  \n10. CDW LLC \u2013 Corporation Service Company, 315 High Street, Frankfort, KY\u202f40601"
+  },
+  {
+   "id": "grant-funding",
+   "tags": [
+    "summary"
+   ],
+   "question": "How much grant funding has Louisville received and from which sources?",
+   "sql_ok": true,
+   "sql_note": "1,174,232,849.99 \u2248 1,174,232,849.99",
+   "answer_ok": false,
+   "answer_note": "does not state 1,174,232,849.99",
+   "seconds": 10.9,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT COALESCE(fund, 'TOTAL - ALL GRANT FUNDS') AS fund,\n       ROUND(SUM(total_amount), 2) AS total_amount\nFROM summary_grant_funding\nGROUP BY ROLLUP(fund)\nORDER BY total_amount DESC NULLS LAST",
+   "first_sql": "SELECT COALESCE(fund, 'TOTAL - ALL GRANT FUNDS') AS fund,\n       ROUND(SUM(total_amount), 2) AS total_amount\nFROM summary_grant_funding\nGROUP BY ROLLUP(fund)\nORDER BY total_amount DESC NULLS LAST",
+   "answer": "Louisville has received $1.174\u202fB in grant funding.\n\n1. Grant Fund \u2013 $437.5M  \n2. Federally Funded \u2013 $151.6M  \n3. Pass Thru Federal Other \u2013 $122.9M  \n4. CAP KACA Funding \u2013 $75.3M  \n5. CARES Coronavirus Relief Fund (CRF) \u2013 $73.8M  \n6. Pass Thru Federal \u2013 $45.0M  \n7. CARES\u2011US Treasury \u2013 $38.7M  \n8. Shelter Plus Care \u2013 $22.9M  \n9. CARES \u2013 US Treasury\u202f2 \u2013 $22.9M  \n10. CDBG Capital\u202f2020 \u2013 $21.3M  \n\nThis list includes 10 of the 102 grant funding sources recorded; the remaining sources are not shown. These grant records are not linked to any specific city council legislation."
+  },
+  {
+   "id": "largest-payments",
+   "tags": [
+    "summary"
+   ],
+   "question": "What are the largest single payments ever made and who received them?",
+   "sql_ok": true,
+   "sql_note": "all present",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 6.7,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT payee, agency, ROUND(invoice_amount, 2) AS invoice_amount, invoice_date\nFROM summary_largest_payments\nWHERE invoice_amount > 0\nORDER BY invoice_amount DESC\nLIMIT 10",
+   "first_sql": "SELECT payee, agency, ROUND(invoice_amount, 2) AS invoice_amount, invoice_date\nFROM summary_largest_payments\nWHERE invoice_amount > 0\nORDER BY invoice_amount DESC\nLIMIT 10",
+   "answer": "The ten largest individual payments recorded are:\n\n1. Louisville Arena Authority Inc \u2013 OMB Finance \u2013 $12,000,000 \u2013 2022\u201110\u201131  \n2. Motorola Solutions Inc \u2013 Emergency Services & MetroSafe \u2013 $11,593,676.70 \u2013 2009\u201103\u201113  \n3. Motorola Solutions Inc \u2013 Emergency Services & MetroSafe \u2013 $11,593,676.70 \u2013 2009\u201103\u201113  \n4. Louisville Arena Authority Inc \u2013 OMB Finance \u2013 $10,800,000 \u2013 2023\u201111\u201103  \n5. Louisville Arena Authority Inc \u2013 OMB Finance \u2013 $10,800,000 \u2013 2024\u201110\u201101  \n6. Louisville Arena Authority Inc \u2013 OMB Finance \u2013 $10,800,000 \u2013 2025\u201110\u201121  \n7. SHEEHAN LANDING LP \u2013 Office of Housing & Community Development \u2013 $10,617,313 \u2013 2025\u201107\u201124  \n8. Kentucky Retirement Systems \u2013 OMB Finance \u2013 $7,196,820.86 \u2013 2010\u201106\u201117  \n9. Kentucky Retirement Systems \u2013 OMB Finance \u2013 $7,196,820.86 \u2013 2010\u201106\u201117  \n10. WILLIAM S WETTERER \u2013 Develop Louisville \u2013 $6,801,474.69 \u2013 2023\u201105\u201102  \n\nThe list includes duplicate entries where the same payee received identical amounts on the same date. These payment records are not linked to any specific council legislation."
+  },
+  {
+   "id": "capital-projects",
+   "tags": [
+    "summary"
+   ],
+   "question": "What are the largest capital projects and how much was allocated to each?",
+   "sql_ok": true,
+   "sql_note": "14 rows",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 6.8,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT\n    Project_Na AS project_name,\n    Allocation\nFROM capital_projects\nWHERE Allocation IS NOT NULL\nORDER BY Allocation DESC;",
+   "first_sql": "SELECT\n    Project_Na AS project_name,\n    Allocation\nFROM capital_projects\nWHERE Allocation IS NOT NULL\nORDER BY Allocation DESC;",
+   "answer": "The largest capital projects and their allocations are:\n\n1. Rhodia Brownfields Remediation \u2013 $10,000,000  \n2. Main Library \u2013 $8,000,000  \n3. Algonquin Swimming Pool \u2013 $7,500,000  \n4. Baxter Community Center \u2013 $6,000,000  \n5. Fern Creek Library \u2013 $5,000,000  \n6. Norton Swimming Pool \u2013 $4,500,000  \n7. Chickasaw Park Pond \u2013 $2,500,000  \n8. Windsor Spray Ground \u2013 $1,000,000  \n9. Portland Library \u2013 $800,000  \n10. Parkland Library \u2013 $800,000  \n11. Elliott Park \u2013 $500,000  \n12. Iroquois Tennis Courts \u2013 $500,000  \n13. Berrytown Park \u2013 $200,000  \n14. New Walnut Park \u2013 $0  \n\nSpending records cannot be linked to council legislation.\n\nRelated city legislation: The Capital Infrastructure Fund ordinance [CIF060326PW26] authorized $7,342.01 from District\u202f26 capital infrastructure funds for a new sidewalk at Breckenridge Lane and Taylorsville Road. The resolution [R-083-21] established priority areas for use of the American Rescue Plan coronavirus local fiscal recovery funds."
+  },
+  {
+   "id": "contract-splitting-fy2025",
+   "tags": [
+    "summary"
+   ],
+   "question": "Are there signs of contract splitting in FY2025?",
+   "sql_ok": true,
+   "sql_note": "25 rows",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 7.0,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT\n    payee_canonical,\n    agency_canonical,\n    COUNT(*) AS payments_just_under,\n    ROUND(SUM(invoice_amount), 2) AS total,\n    ROUND(AVG(invoice_amount), 2) AS avg_invoice\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND is_data_artifact = FALSE\n  AND invoice_amount BETWEEN 4000 AND 4999.99\nGROUP BY payee_canonical, agency_canonical\nHAVING COUNT(*) >= 5\nORDER BY payments_just_under DESC, total DESC\nLIMIT 25",
+   "first_sql": "SELECT\n    payee_canonical,\n    agency_canonical,\n    COUNT(*) AS payments_just_under,\n    ROUND(SUM(invoice_amount), 2) AS total,\n    ROUND(AVG(invoice_amount), 2) AS avg_invoice\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND is_data_artifact = FALSE\n  AND invoice_amount BETWEEN 4000 AND 4999.99\nGROUP BY payee_canonical, agency_canonical\nHAVING COUNT(*) >= 5\nORDER BY payments_just_under DESC, total DESC\nLIMIT 25",
+   "answer": "Yes, FY\u202f2025 shows many vendors receiving dozens of invoices just under the $5,000 limit, a pattern that can indicate contract splitting.\n\n1. Louisville Computer Guys Inc \u2013 Parks & Recreation \u2013 120 payments \u2013 $528,000 total \u2013 avg $4,400  \n2. Overdrive Inc \u2013 Louisville Free Public Library \u2013 99 payments \u2013 $439,736 total \u2013 avg $4,442  \n3. Louisville Gas & Electric Company \u2013 Facilities & Fleet Management \u2013 35 payments \u2013 $156,149 total \u2013 avg $4,461  \n4. Strand Associates Inc \u2013 Public Works & Assets \u2013 33 payments \u2013 $146,420 total \u2013 avg $4,437  \n5. Walker Mechanical Contractors Inc \u2013 Department of Corrections \u2013 32 payments \u2013 $141,531 total \u2013 avg $4,423  \n\nThese vendors are among 25 that each had at least five invoices in the $4,000\u2011$4,999.99 range. The concentration of many small\u2011amount invoices suggests a possible effort to keep each payment below a $5,000 threshold, which is a common indicator of contract splitting. The data cannot confirm intent. No legislative records directly link to these expenditures."
+  },
+  {
+   "id": "honest-empty-fy2031",
+   "tags": [
+    "guard"
+   ],
+   "question": "How much did Louisville Fire spend in fiscal year 2031?",
+   "sql_ok": false,
+   "sql_note": "1 rows where none were expected",
+   "answer_ok": false,
+   "answer_note": "answer quotes a dollar figure",
+   "seconds": 6.8,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT COALESCE(ROUND(SUM(extended_amount), 2), 0) AS total_spend\nFROM expenditures\nWHERE agency_canonical = 'Louisville Fire'\n  AND fiscal_year = 2031\n  AND extended_amount IS NOT NULL;",
+   "first_sql": "SELECT COALESCE(ROUND(SUM(extended_amount), 2), 0) AS total_spend\nFROM expenditures\nWHERE agency_canonical = 'Louisville Fire'\n  AND fiscal_year = 2031\n  AND extended_amount IS NOT NULL;",
+   "answer": "Louisville Fire reported $0.00 in spending for fiscal year\u202f2031. The city\u2019s expenditure data only covers fiscal years up to 2026, so FY\u202f2031 is outside the available range and no spending is recorded. Spending records cannot be linked to council legislation.\n\nRelated city legislation:\n- Ordinance O-274-22 amended the 2022\u20112023 capital budget due\u2011date for Metro Council members.\n- Ordinance O-241-21 approved the 2021\u20112022 budget for Louisville Tourism.\n- Ordinance O-125-22 approved the 2022\u20112023 budget for Louisville Tourism."
+  },
+  {
+   "id": "off-topic",
+   "tags": [
+    "guard"
+   ],
+   "question": "Tell me a joke about cats.",
+   "sql_ok": false,
+   "sql_note": "SQL was executed for an off-topic question",
+   "answer_ok": true,
+   "answer_note": "no fabricated figure",
+   "seconds": 6.9,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT 'I\u2019m sorry, but I can only help with data-related queries.' AS message;",
+   "first_sql": "I\u2019m sorry, but I can only help with data-related queries.",
+   "answer": "I can only help with questions about Louisville Metro government data. Spending records cannot be linked to council legislation. Ordinance [O-469-21] was introduced to enhance enforcement of animal licensing and require microchipping of cats and dogs."
+  }
+ ]
+}

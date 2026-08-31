@@ -105,6 +105,10 @@ docker tag louisville-bot:new louisville-bot:latest
 # Rollback: docker stop louisville-bot; docker rm louisville-bot; docker rename louisville-bot-prev louisville-bot; docker start louisville-bot
 ```
 
+> `INTER_CALL_PAUSE_SECONDS` (default 0): seconds to idle between the 2-3 LLM
+> calls of one request. It used to be a fixed 3s + 2s for the Cerebras free
+> tier's per-minute cap; set it only if a provider's RPM cap starts biting.
+
 > ⚠️ **Set `TRUSTED_PROXY_IPS`** to the Docker bridge gateway (the peer the
 > cloudflared tunnel reaches the container from). It is unset by default and the
 > app logs a warning at startup when missing; without it the per-IP rate limit
@@ -263,6 +267,10 @@ shared with an unrelated Airflow workload — decided 2026-08-28.
 # Run the test suite (known-answer + canonicalization invariants)
 python -m pytest -q
 
+# End-to-end accuracy eval against the REAL model (costs ~3 LLM calls/question)
+set -a; source .env; set +a
+python eval/run_eval.py --provider cerebras --label <what-changed>
+
 # Run locally for dev (serves frontend + API same-origin on :8000)
 uvicorn app:app --host 127.0.0.1 --port 8000
 # then open http://127.0.0.1:8000  (DEV ONLY — see "Where the bot runs" above)
@@ -297,7 +305,9 @@ filesystem (`read_csv` of an arbitrary path and `COPY TO` are both blocked —
 ## Architecture Overview
 
 - **`app.py`** — FastAPI backend. Serves the static frontend AND the `/api/ask` SSE endpoint (same origin). Translates NL → SQL via an OpenAI-compatible client (Cerebras), runs it on DuckDB, streams an interpretation. Per-IP rate limit (5/min), persistent stats + response cache, structured SSE events (`status`, `reasoning`, `sql`, `results`, `chart`, `interpretation`, `log`, `debug`, `usage`, `error`, `info`, `done`).
-- **`analytics_agent.py`** — LLM calls (reason → generate SQL → interpret), retry/fallback (free → paid Cerebras), SQL safety guard.
+- **`analytics_agent.py`** — LLM calls (generate SQL → interpret → refine), retry/fallback (OpenRouter → Cerebras), SQL safety guard.
+- **`grounding.py`** — vocabulary grounding. Builds `_value_index` at load time (every categorical column's distinct values with dollar weights) and (a) appends the values a question's words match to the SQL-generation request, (b) diagnoses the string-literal filters of an empty result so `app.py` can regenerate the query once with the real values (the verify-and-repair step). Synonyms/stopwords per city under `grounding:` in city.yaml. Motivated by a confident wrong answer in production — see the module docstring.
+- **`eval/`** — LLM-in-the-loop accuracy eval: `golden.yaml` (questions + reference SQL + checks) and `run_eval.py` (drives the real `/api/ask` path in-process, scores the served SQL and the prose, writes `eval/results/*.md|json`). Run with `--provider cerebras` so it does not spend OpenRouter's shared 50/day free allowance.
 - **`data_model.py`** — generic city data engine: loads CSVs into DuckDB, builds `*_canonical` columns + summary tables, flags offsetting/artifact rows — all driven by a city config pack. Nothing city-specific lives here.
 - **`city_config.py`** + **`cities/<city>/city.yaml`** — city config packs (sources/era mappings, canonical map CSVs, data-quality params, summary SQL, data dictionary). `CITY_CONFIG` env var selects the pack (default: Louisville). Format documented in `docs/canonical-model.md`. `cities/cincinnati/` is a **runnable** second-city pack (loads with `CITY_CONFIG=cities/cincinnati/city.yaml DATA_DIR=data_cincinnati`); `cities/kansas_city/` is still a paper config (not yet runnable).
 - **`static/index.html`** — single-page chat UI (vanilla JS, inline CSS, Chart.js). Self-contained; talks to `/api/ask`.

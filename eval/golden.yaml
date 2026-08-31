@@ -1,0 +1,220 @@
+# Golden questions for the end-to-end eval (eval/run_eval.py).
+#
+# Every case is scored on two things:
+#   sql     — the query the bot SERVED, re-executed locally, passes `check`
+#             against `reference_sql` (computed on the same data, so the
+#             expected values are never hand-typed and go stale).
+#   answer  — the prose the reader saw states the reference number (any
+#             common rendering: 1,581,197.96 / $1.58M / $1.6M) and contains
+#             none of `answer_must_not_contain`.
+#
+# check kinds:
+#   scalar        any numeric cell of the served result is within `tolerance`
+#                 (relative, default 0.01) of the reference scalar
+#   top_labels    the served result's first text column, top-N rows in order,
+#                 equals the reference's (N = reference row count);
+#                 `ordered: false` compares as sets
+#   contains      every string in `contains` appears in some served cell
+#   min_rows      the served result has at least `min_rows` non-null rows
+#   expect_empty  the served result is empty/all-NULL and no error was raised
+#   expect_refusal no SQL was executed (the off-topic guard fired)
+#
+# Tags mark what a case exercises so a regression can be read at a glance:
+#   vocabulary  — a filter literal the prompt never enumerates
+#   summary     — a pre-computed summary table the prompt directs to
+#   year        — fiscal-year defaulting / all-years rules
+#   entity      — a named vendor or person
+#   guard       — the off-topic / honest-empty paths
+
+- id: fire-vehicles-fy2024
+  tags: [vocabulary]
+  question: How much did the Louisville Fire department spend on vehicles in fiscal year 2024?
+  reference_sql: >
+    SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+    WHERE agency_canonical = 'Louisville Fire' AND fiscal_year = 2024 AND is_data_artifact = FALSE
+      AND (spend_category ILIKE '%automotive%' OR spend_category ILIKE '%vehicle%'
+           OR spend_category ILIKE '%fleet%' OR spend_category ILIKE '%truck%')
+  check: scalar
+  tolerance: 0.15   # any reasonable reading of "vehicles" lands within this
+  answer_must_not_contain: ["no recorded", "no vehicle", "did not spend", "no spending"]
+
+- id: fuel-fy2025
+  tags: [vocabulary]
+  question: How much did Louisville Metro spend on fuel in FY2025?
+  reference_sql: >
+    SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+    WHERE fiscal_year = 2025 AND is_data_artifact = FALSE
+      AND (spend_category ILIKE '%fuel%' OR spend_category ILIKE '%gasoline%' OR spend_category ILIKE '%diesel%')
+  check: scalar
+  tolerance: 0.15
+
+- id: arp-total
+  tags: [vocabulary, year]
+  question: How much has Louisville spent from the American Rescue Plan?
+  reference_sql: >
+    SELECT ROUND(SUM(extended_amount), 2) FROM expenditures WHERE fund = 'ARP' AND is_data_artifact = FALSE
+  check: scalar
+  answer_must_not_contain: ["$0", "no spending", "no records"]
+
+- id: cares-total
+  tags: [vocabulary, year]
+  question: How much CARES Act coronavirus relief money did the city spend?
+  # Two defensible readings: the Treasury Coronavirus Relief Fund alone, or
+  # every CARES-labelled fund (CRF + the Treasury tranches + CARES Fires…).
+  reference_sql:
+    - >
+      SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+      WHERE fund = 'CARES Coronavirus Relief Fund (CRF)' AND is_data_artifact = FALSE
+    - >
+      SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+      WHERE fund ILIKE '%cares%' AND is_data_artifact = FALSE
+  check: scalar
+
+- id: seagrave-total
+  tags: [entity, year]
+  question: How much has the city paid Seagrave Fire Apparatus in total?
+  reference_sql: >
+    SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+    WHERE payee_canonical = 'SEAGRAVE FIRE APPARATUS LLC' AND is_data_artifact = FALSE
+  check: scalar
+
+- id: lge-total
+  tags: [entity, year]
+  question: How much has Louisville Metro paid LG&E over the years?
+  reference_sql: >
+    SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+    WHERE payee_canonical = 'Louisville Gas & Electric Company' AND is_data_artifact = FALSE
+  check: scalar
+  tolerance: 0.05
+
+- id: paving-vendors
+  tags: [vocabulary]
+  question: Which vendors were paid the most for road paving?
+  reference_sql: >
+    SELECT payee_canonical FROM expenditures WHERE spend_category ILIKE '%paving%' AND is_data_artifact = FALSE
+    GROUP BY payee_canonical ORDER BY SUM(extended_amount) DESC LIMIT 1
+  check: contains
+  contains: ["Hall Contracting of Kentucky Inc"]
+
+- id: top-agencies-all-time
+  tags: [summary]
+  question: Which agencies have spent the most money across all fiscal years?
+  reference_sql: SELECT agency FROM summary_agency_spend ORDER BY total_spend DESC LIMIT 5
+  check: top_labels
+
+- id: annual-spend-trend
+  tags: [summary, year]
+  question: How has total annual spending changed from 2008 to 2026?
+  reference_sql: SELECT fiscal_year FROM summary_annual_spend
+  check: min_rows
+  min_rows: 15
+
+- id: lmpd-by-year
+  tags: [year]
+  question: Give me a year-over-year breakdown of LMPD spending
+  reference_sql: >
+    SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+    WHERE agency_canonical = 'Louisville Metro Police Department' AND fiscal_year = 2025 AND is_data_artifact = FALSE
+  check: scalar
+  min_rows: 10
+  answer_scalar: false   # a 19-row trend is not expected to quote FY2025 in prose
+
+- id: parks-fy2025
+  tags: [year]
+  question: How much did Parks & Recreation spend in FY2025?
+  reference_sql: >
+    SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+    WHERE agency_canonical = 'Parks & Recreation' AND fiscal_year = 2025 AND is_data_artifact = FALSE
+  check: scalar
+
+- id: library-latest-year
+  tags: [year]
+  question: How much did the library spend last year?
+  reference_sql: >
+    SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+    WHERE agency_canonical = 'Louisville Free Public Library' AND fiscal_year = 2025 AND is_data_artifact = FALSE
+  check: scalar
+
+- id: tech-fy2025
+  tags: [vocabulary, year]
+  question: How much did Louisville spend on technology in FY2025?
+  reference_sql: >
+    SELECT ROUND(SUM(extended_amount), 2) FROM expenditures
+    WHERE fiscal_year = 2025 AND agency_canonical = 'Metro Technology Services' AND is_data_artifact = FALSE
+  check: scalar
+
+- id: mayor-and-chief-pay
+  tags: [entity]
+  question: How much does the mayor make? What about the police chief?
+  reference_sql: >
+    SELECT YTD_Total FROM salary_data WHERE jobTitle = 'Police Chief' AND CalYear = 2025
+  check: contains
+  contains: ["Greenberg", "Humphrey"]
+  answer_scalar: true   # the prose must state the chief's pay; naming is judged by the SQL
+
+- id: highest-paid-positions
+  tags: [summary]
+  question: What are the highest paid positions in Louisville Metro government?
+  reference_sql: >
+    SELECT job_title FROM summary_top_salaries
+    WHERE calendar_year = (SELECT MAX(calendar_year) FROM summary_top_salaries) AND job_title IS NOT NULL
+    ORDER BY avg_total_comp DESC LIMIT 3
+  check: top_labels
+
+- id: police-overtime-2024
+  tags: [vocabulary, entity]
+  question: How much overtime pay did police employees receive in 2024?
+  reference_sql: >
+    SELECT ROUND(SUM(Overtime_Rate), 2) FROM salary_data
+    WHERE Department ILIKE '%police%' AND CalYear = 2024
+  check: scalar
+  tolerance: 0.05
+
+- id: registered-agents
+  tags: [summary]
+  question: Who are the registered agents for the top 10 contractors by total spend?
+  reference_sql: SELECT payee FROM summary_top_contractors ORDER BY total_spend DESC LIMIT 5
+  check: top_labels
+
+- id: grant-funding
+  tags: [summary]
+  question: How much grant funding has Louisville received and from which sources?
+  reference_sql: SELECT ROUND(SUM(total_amount), 2) FROM summary_grant_funding
+  check: scalar
+
+- id: largest-payments
+  tags: [summary]
+  question: What are the largest single payments ever made and who received them?
+  reference_sql: SELECT payee FROM summary_largest_payments ORDER BY invoice_amount DESC LIMIT 1
+  check: contains
+  contains: ["Louisville Arena Authority"]
+  answer_scalar: false
+
+- id: capital-projects
+  tags: [summary]
+  question: What are the largest capital projects and how much was allocated to each?
+  reference_sql: SELECT Project_Na FROM capital_projects
+  check: min_rows
+  min_rows: 5
+
+- id: contract-splitting-fy2025
+  tags: [summary]
+  question: Are there signs of contract splitting in FY2025?
+  reference_sql: SELECT 1
+  check: min_rows
+  min_rows: 5
+  answer_scalar: false
+
+- id: honest-empty-fy2031
+  tags: [guard]
+  question: How much did Louisville Fire spend in fiscal year 2031?
+  reference_sql: SELECT 1
+  check: expect_empty
+  answer_scalar: false
+
+- id: off-topic
+  tags: [guard]
+  question: Tell me a joke about cats.
+  reference_sql: SELECT 1
+  check: expect_refusal
+  answer_scalar: false

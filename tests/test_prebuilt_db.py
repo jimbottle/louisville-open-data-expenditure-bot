@@ -182,12 +182,17 @@ def test_artifact_query_results_match_csv_path(real_artifact, in_memory, sql):
 def test_artifact_omits_internal_helper_tables(real_artifact):
     """The canonicalization helpers are CREATE TEMP TABLE, so they do not
     persist. They must not appear in the artifact (they are prompt noise, and
-    the model must never query them)."""
+    the model must never query them).
+
+    The one underscore table that MUST persist is grounding's `_value_index`:
+    it is serving data (the vocabulary lookups run against it on every
+    question) and the serving connection is read-only, so it cannot be rebuilt
+    at boot. The compact schema still skips it like every `_` table."""
     pre = dm.load_prebuilt(real_artifact)
     try:
         tables = [t[0] for t in pre.execute("SHOW TABLES").fetchall()]
     finally:
         pre.close()
-    assert not [t for t in tables if t.startswith("_")], tables
+    assert [t for t in tables if t.startswith("_")] == ["_value_index"], tables
     assert "expenditures" in tables
     assert "summary_agency_spend" in tables

@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # while LOAD fails (partial download, build/runtime mismatch) is exactly the
 # failure being defended against, and would otherwise ship green.
 RUN python -c "import duckdb; duckdb.connect().execute('INSTALL fts; LOAD fts')"
-COPY analytics_agent.py app.py data_model.py city_config.py rag.py ./
+COPY analytics_agent.py app.py data_model.py city_config.py rag.py grounding.py ./
 COPY cities/ cities/
 COPY static/ static/
 EXPOSE 8000

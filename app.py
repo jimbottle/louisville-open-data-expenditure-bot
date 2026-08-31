@@ -16,6 +16,7 @@ import time
 from datetime import date, datetime
 
 import openai
+import grounding
 import rag
 from fastapi import FastAPI, Request
 
@@ -110,6 +111,37 @@ RAG_SETTINGS = {"min_score": 3.0, "k": 3}
 RAG_DB = ""
 
 RATE_LIMIT_MSG = "Evan buys his inference on the cheap and we just hit the provider's rate limit. Try again in a few minutes."
+
+# Seconds to idle between back-to-back LLM calls on one request. A hold-over
+# from the Cerebras free tier's per-minute cap, when every question paid 5s of
+# dead time to avoid tripping it. OpenRouter's 20/min and the retry ladder
+# make that unnecessary, so the default is zero; set it if a provider's RPM
+# cap starts biting again.
+INTER_CALL_PAUSE = float(os.environ.get("INTER_CALL_PAUSE_SECONDS", "0") or 0)
+
+
+def _pace():
+    if INTER_CALL_PAUSE > 0:
+        time.sleep(INTER_CALL_PAUSE)
+
+
+_SQL_OPENERS = re.compile(r"^\s*(?:\(\s*)*(SELECT|WITH|SHOW|DESCRIBE|EXPLAIN|PIVOT|UNPIVOT|FROM)\b", re.I)
+
+
+def _looks_like_sql(sql: str) -> bool:
+    """True when the model's reply starts a SQL statement once leading
+    comments are removed. A prose refusal, a bare comment, or an empty reply
+    is the off-topic path, never something to execute."""
+    body = re.sub(r"^\s*(--[^\n]*\n|/\*.*?\*/\s*)+", "", sql or "", flags=re.S)
+    return bool(_SQL_OPENERS.match(body))
+
+
+def _is_vacuous(df) -> bool:
+    """True for a result that answers nothing: no rows, or rows whose every
+    cell is NULL. The second shape is what SUM() over a filter that matched
+    no rows returns — one row, one NaN — and it used to sail past the
+    `len == 0` check into an interpretation of "no recorded spending"."""
+    return len(df) == 0 or bool(df.isna().all().all())
 
 # Shown when the LLM account is out of credit (HTTP 402). Deliberately explicit
 # that this is a funding problem on our end: it does NOT clear on its own like a
@@ -585,6 +617,7 @@ and interpret results. You work with Louisville Metro government open data.
 - CONTRACT SPLITTING ("contract splitting", "split purchases", "payments just under a threshold", "structuring"): use EXACTLY this screen, substituting the year asked about, so the same question returns the same answer twice: SELECT payee_canonical, agency_canonical, COUNT(*) AS payments_just_under, ROUND(SUM(invoice_amount), 2) AS total, ROUND(AVG(invoice_amount), 2) AS avg_invoice FROM expenditures WHERE fiscal_year = {last_complete_year} AND is_data_artifact = FALSE AND invoice_amount BETWEEN 4000 AND 4999.99 GROUP BY payee_canonical, agency_canonical HAVING COUNT(*) >= 5 ORDER BY payments_just_under DESC, total DESC LIMIT 25. The $4,000-$4,999.99 band sits just below an apparent $5,000 approval threshold (FY2025 has 1,838 invoices in that band against 1,241 in the $5,000-$5,999.99 band). Do NOT screen on extended_amount or on small average payments generally: that ranks utility accounts first (FY2025 has 26,033 LG&E bills averaging $193 in one agency) and finds nothing about procurement. This is a SCREEN, not a finding: repeated same-size invoices are normal for recurring goods and services, so present the result as patterns worth review and never as evidence of wrongdoing.
 - Use summary tables for quick overviews and the starter questions. For questions asking about specific entities, full breakdowns, "all" of something, outliers, filtering, or any detailed analysis, query the raw `expenditures` table directly. When computing totals or sums, NEVER limit the query to a subset — include all matching rows unless the user explicitly asks for a top-N.
 - When the user asks for a total, sum, or aggregate, do NOT add a LIMIT clause that would exclude data. Only use LIMIT when the user asks for "top N" or the result set would be unreasonably large (>100 rows).
+- Never wrap an aggregate in COALESCE(..., 0) or IFNULL: when nothing matches, the sum must come back NULL so the reader is told there is no data, not that the figure is $0. The same goes for a fiscal year outside FY{first_year}-FY{newest_year}: query it as asked and let the NULL say the data does not cover it.
 
 ## Data Dictionary: Key Field Definitions
 - expenditure_type values: "Operating" / "Metro Government Operations" (day-to-day costs: salaries, supplies, services), "Capital" / "Metro Government Capital" (long-term investments: infrastructure, equipment, construction). The "Metro Government" prefix appears in 2008-2017 data; 2018+ uses shorter names. Treat "Operating" = "Metro Government Operations" and "Capital" = "Metro Government Capital".
@@ -615,7 +648,7 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
 - When the question asks about quantitative values or when entities are ranked by a numeric metric, include those numbers in the response. Not every answer needs dollar amounts — only include them when they're relevant to what was asked.
 - Never add together rows that are different VIEWS of the same spending (e.g. a department total and a category total, where one purchase can appear in both). Report such figures separately; summing them double-counts. Only add rows that are mutually exclusive slices.
 - If results are empty, explain what that likely means. Say only what you know: describing the data as having a column it does not have, and sending the reader off to query it, is worse than saying the data cannot answer the question.
-- Expenditure records carry no legislative identifier of any kind — no resolution, ordinance or matter field exists in any table, and council file numbers appear nowhere in the spending data. When asked how a specific resolution or ordinance relates to spending, say exactly that: the spending records cannot be linked to legislation. Never name a field that would hold it and never suggest a question that searches for one.
+- Expenditure records carry no legislative identifier of any kind — no resolution, ordinance or matter field exists in any table, and council file numbers appear nowhere in the spending data. When asked how a specific resolution or ordinance relates to spending, say exactly that: the spending records cannot be linked to legislation. Never name a field that would hold it and never suggest a question that searches for one. When the question did NOT ask about legislation, do not bring it up: no sentence about what the records can or cannot be linked to, and no mention of legislation at all beyond a citation that explains a figure.
 - If the data shows something notable or unexpected, call it out.
 - Keep responses under 200 words unless the user asked for detail.
 - Use semantic column names (e.g., "Agency" not "agency", "Extended Amount" not "extended_amount").
@@ -659,7 +692,7 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
         (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CITY_FACTS)
          + CITATION_FORMAT + TRUNCATION_NOTE + TRUNCATION_COUNTS
          + TRUNCATION_COUNTS_WITH_TOTALS + TOTALS_MOVED_NOTE
-         + str(MAX_DISPLAY_ROWS)).encode()
+         + str(MAX_DISPLAY_ROWS) + grounding.GROUNDING_VERSION).encode()
     ).hexdigest()[:8]
     stale = [k for k in response_cache if not k.startswith(CACHE_VERSION + ":")]
     if stale:
@@ -944,11 +977,49 @@ def _retrieve_documents(question: str) -> list:
     if not RAG_DB or not os.path.exists(RAG_DB):
         return []
     try:
-        return rag.retrieve(question, k=RAG_SETTINGS["k"], db_path=RAG_DB,
+        hits = rag.retrieve(question, k=RAG_SETTINGS["k"], db_path=RAG_DB,
                             min_score=RAG_SETTINGS["min_score"])
     except Exception as e:
         log.warning("Document retrieval failed (answering without it): %s", e)
         return []
+    return _on_topic_hits(question, hits)
+
+
+def _on_topic_hits(question: str, hits: list) -> list:
+    """Keep only documents that share a content word with the question.
+
+    BM25 over short ordinance titles rewards the vocabulary every spending
+    question carries — "budget", "fiscal year", "capital", "fund" — so a
+    generic budget-amendment ordinance outscores everything and was being
+    cited under answers about fire trucks and salaries. Requiring one of the
+    question's own terms (or a synonym: "vehicles" reaches "fleet") in the
+    document text drops that noise while keeping "American Rescue Plan" ->
+    R-062-22 and "CARES" -> R-011-21. The model still judges what survives."""
+    if not hits:
+        return hits
+    terms = grounding.question_terms(question, CONFIG)
+    if not terms:
+        return hits
+    syn = grounding.synonyms_for(CONFIG)
+    tokens = set()
+    for t in terms:
+        tokens.add(t)
+        tokens.update(x.lower() for x in syn.get(t, []))
+    kept = []
+    for h in hits:
+        text = (h.get("text") or "").lower()
+        if any(_term_in_text(tok, text) for tok in tokens):
+            kept.append(h)
+    if len(kept) < len(hits):
+        log.info("Dropped %d retrieved document(s) sharing no content word with the question",
+                 len(hits) - len(kept))
+    return kept
+
+
+def _term_in_text(token: str, text: str) -> bool:
+    if len(token) <= grounding.BOUNDARY_TOKEN_LENGTH:
+        return re.search(r"\b" + re.escape(token) + r"\b", text) is not None
+    return token in text
 
 
 def humanize_prose(text: str) -> str:
@@ -1099,27 +1170,41 @@ async def ask(request: Request):
                 events.append(send("log", {"content": retry_logs.pop(0)}))
             return events
 
-        # The separate "reason" LLM call was removed: it re-sent the full system
-        # prompt (~11K tokens) just to produce a small chart hint, roughly 45% of
-        # per-question tokens. Chart type is now inferred from the result shape
-        # (see the chart block); off-topic questions are caught by the non-SQL
-        # check right after generation.
+        # There is deliberately no separate "reason" LLM call: it re-sent the
+        # full system prompt (~11K tokens) for a chart hint, ~45% of per-question
+        # tokens. Chart type is inferred from the result shape; off-topic
+        # questions are caught by the non-SQL check right after generation.
         log.info("Question: %s", question)
-        reasoning = None
+
+        # Vocabulary grounding: the real values the question's words match
+        # (see grounding.py). Cheap (a few ms on the index), no LLM call, and
+        # the difference between filtering on 'Automotive Parts & Accessories'
+        # and guessing '%Vehicle%'.
+        vocab = ""
+        try:
+            with db_lock:
+                vocab = grounding.grounding_block(con, question, CONFIG)
+        except Exception as e:
+            log.warning("Vocabulary grounding failed (continuing without it): %s", e)
+        if vocab:
+            yield send("debug", {"content": "Vocabulary grounding:\n" + vocab.split("\n", 2)[-1]})
 
         # Generate SQL
         yield send("log", {"content": "Generating SQL query..."})
         yield send("status", {"content": "Writing the query…"})
         t_start = time.time()
         try:
-            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry, history=history, reasoning=reasoning, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
+            sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry, history=history, context=vocab, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
             track_usage(sql_usage.get("prompt_tokens", 0), sql_usage.get("completion_tokens", 0))
             update_limits_from_headers(raw_resp)
             log.info("SQL generated in %.1fs (%d tokens)", time.time() - t_start, sql_usage.get("total_tokens", 0))
 
-            # Check if SQL is actually a query or just a comment (off-topic guard)
-            sql_stripped = sql.strip().lstrip("-").strip()
-            if not sql_stripped or sql_stripped.startswith("The question") or not any(kw in sql.upper() for kw in ["SELECT", "WITH", "SHOW", "DESCRIBE"]):
+            # Off-topic guard: is this SQL at all? Judged on the first
+            # statement token, not on a keyword appearing anywhere — the
+            # refusal "I can only help WITH data-related questions" used to
+            # pass as a query, fail to execute, and come back from the
+            # error-retry as SELECT '<the refusal>' AS message.
+            if not _looks_like_sql(sql):
                 log.info("Model returned non-SQL response (likely off-topic)")
                 yield send("interpretation", {"content": "This question doesn't appear to be answerable from the Louisville Metro expenditure data. Try asking about government spending, agency budgets, contractor payments, employee salaries, or capital projects."})
                 yield send("done", {})
@@ -1206,6 +1291,56 @@ async def ask(request: Request):
                 return
         t_exec = time.time() - t_start
 
+        # Verify-and-repair: an empty (or all-NULL) result is checked against
+        # the data's vocabulary before it is believed. A filter that matched
+        # nothing — or matched the narrow corner of a wider family — earns ONE
+        # regeneration with the real values spelled out; a result whose
+        # filters all matched is a genuine empty and is left alone.
+        repair_note = ""
+        repair_hint = ""
+        diagnoses = []
+        if _is_vacuous(result_df):
+            try:
+                with db_lock:
+                    diagnoses = grounding.diagnose_filters(con, sql, CONFIG, question=question)
+                repair_hint = grounding.format_repair_hint(diagnoses, CONFIG)
+            except Exception as e:
+                log.warning("Filter diagnosis failed: %s", e)
+                repair_hint = ""
+        if repair_hint:
+            log.info("Empty result; repairing SQL with vocabulary hint")
+            yield send("log", {"content": "Query matched nothing. Checking its filters against the data's vocabulary and retrying..."})
+            yield send("status", {"content": "Checking the data's vocabulary and retrying…"})
+            yield send("debug", {"content": "Repair hint:\n" + repair_hint})
+            t_start = time.time()
+            try:
+                repair_prompt = (f"Question: {question}\n\nThis query ran but returned nothing:\n{sql}\n\n"
+                                 f"{repair_hint}")
+                new_sql, repair_usage, raw_resp = generate_sql(client, MODEL, sql_system, repair_prompt, on_retry=on_retry, history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
+                track_usage(repair_usage.get("prompt_tokens", 0), repair_usage.get("completion_tokens", 0))
+                update_limits_from_headers(raw_resp)
+                sql_usage = {k: sql_usage.get(k, 0) + repair_usage.get(k, 0)
+                             for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+                if new_sql.strip() and new_sql.strip().rstrip(";") != sql.strip().rstrip(";"):
+                    with db_lock:
+                        new_df, new_str = execute_sql_safe(con, new_sql)
+                    if not _is_vacuous(new_df):
+                        sql, result_df, result_str = new_sql, new_df, new_str
+                        repair_note = ("Note: my first query used a label that does not appear in the "
+                                       "data, so I re-checked the data's own category names and re-ran it.")
+                        yield send("log", {"content": f"Repaired query returned {len(result_df)} rows."})
+                        yield send("sql", {"content": sql})
+                    else:
+                        yield send("log", {"content": "Repaired query also returned nothing; keeping the original."})
+                else:
+                    yield send("log", {"content": "Model kept the original query."})
+                yield send("debug", {"content": f"Repair pass in {time.time() - t_start:.1f}s"})
+            except Exception as e:
+                # The repair is best-effort: a failure here falls through to
+                # the honest empty-result path, never to an error.
+                log.warning("SQL repair attempt failed: %s", e)
+                yield send("log", {"content": f"Repair attempt failed ({type(e).__name__}); keeping the original result."})
+
         display_str = result_str if dev_mode else humanize_text(result_str)
         yield send("results", {"content": display_str, "row_count": len(result_df), "humanized": not dev_mode})
 
@@ -1268,18 +1403,23 @@ async def ask(request: Request):
             yield send("debug", {"content": f"Retrieved {len(doc_hits)} document(s): " +
                                  ", ".join(f"{h['file_no']} ({h['score']:.1f})" for h in doc_hits)})
 
-        # Brief pause to avoid back-to-back RPM hits
-        time.sleep(3)
+        _pace()
 
         # Interpret results (streaming)
-        if len(result_df) == 0:
-            # Ask the model to explain why and suggest alternatives
+        if _is_vacuous(result_df):
+            # Ask the model to explain why and suggest alternatives. When the
+            # filters were checked against the vocabulary, the model gets that
+            # finding too, so it explains what IS in the data rather than
+            # speculating about what might be.
+            findings = grounding.format_repair_hint(diagnoses, CONFIG, instruct=False)
+            checked = (f"\n\nThe query's filters were checked against the data's vocabulary:\n{findings}"
+                       if findings else "")
             empty_prompt = f"""The user asked: "{question}"
 
-The SQL query returned 0 rows:
-{sql}
+The SQL query returned no data:
+{sql}{checked}
 
-Explain in plain text (no markdown) why this likely returned no results based on what you know about the data structure. Then suggest 1-2 rephrased questions that would likely return results. Keep it under 100 words."""
+Explain in plain text (no markdown, no SQL) why this likely returned no results based on what you know about the data structure. Then suggest 1-2 rephrased questions that would likely return results. Keep it under 100 words."""
             empty_served = []
             try:
                 for chunk in interpret_results_stream(
@@ -1388,7 +1528,7 @@ Explain in plain text (no markdown) why this likely returned no results based on
             # here must NEVER lose the answer — the draft is the fallback.
             yield send("log", {"content": "Refining the answer..."})
             yield send("debug", {"content": f"Draft interpretation in {t_draft:.1f}s | ~{interp_tokens} chunks"})
-            time.sleep(2)  # RPM pacing between back-to-back LLM calls
+            _pace()
             refine_counter = {"n": 0}
             yield from refine_events_with_fallback(
                 refine_interpretation_stream(
@@ -1409,6 +1549,10 @@ Explain in plain text (no markdown) why this likely returned no results based on
         # response — and only for documents the answer actually cited.
         for evt in _sources_event(doc_hits, "".join(served_text), send):
             yield evt
+        if repair_note:
+            # Visible to every reader, after the answer: the self-correction is
+            # part of the answer's provenance, not a dev-only log line.
+            yield send("info", {"content": repair_note})
         track_usage(0, interp_tokens)
         log.info("Request complete — %d chunks streamed", interp_tokens)
 

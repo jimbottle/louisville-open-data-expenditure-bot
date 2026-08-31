@@ -404,7 +404,7 @@ def test_the_zero_row_path_emits_the_footer_too():
     but skipped the footer, so a citation there shipped with no link — on the
     one path with no results table to fall back on either."""
     src = read_repo_file("app.py")
-    branch = src[src.index("if len(result_df) == 0:"):src.index('yield send("log", {"content": "Interpreting results..."})')]
+    branch = src[src.index("if _is_vacuous(result_df):"):src.index('yield send("log", {"content": "Interpreting results..."})')]
     assert "_sources_event(doc_hits" in branch, "zero-row path skips the citation footer"
     assert branch.index("_sources_event") < branch.index('send("done"')
 
@@ -431,7 +431,7 @@ def test_the_app_wires_documents_into_all_three_llm_calls():
     the failure names the branch that lost it and a fourth legitimate call site
     doesn't fail the test for the wrong reason."""
     src = read_repo_file("app.py")
-    zero_row = src[src.index("if len(result_df) == 0:"):
+    zero_row = src[src.index("if _is_vacuous(result_df):"):
                    src.index('yield send("log", {"content": "Interpreting results..."})')]
     draft = src[src.index('yield send("log", {"content": "Interpreting results..."})'):
                 src.index("refine_events_with_fallback(")]

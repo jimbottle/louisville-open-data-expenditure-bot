@@ -70,6 +70,44 @@ data_facts:
 # appropriation record, so it is the "why" behind the numbers. Per-city because
 # every Legistar city has its own client name and matter type ids; a pack that
 # omits this block falls back to rag.py's Louisville defaults.
+# Vocabulary grounding (see grounding.py). The engine indexes the categorical
+# columns by profile and carries a generic English synonym table; this block
+# adds Louisville's own shorthand and the words that are noise here.
+grounding:
+  stopwords: [louisville, lou, metro, jefferson, kentucky, ky]
+  # Contact/location columns that pass the engine's profile but are not
+  # vocabulary anyone filters on.
+  exclude_columns:
+    # Keyed by the RAW payee spelling, so its totals are per-variant: the
+    # 'LG&E' profile carries $171M against $345.7M for the canonical vendor.
+    # Grounding must steer vendor questions to payee_canonical instead.
+    - contractor_profiles.payee
+    - active_contractors.CITY
+    - active_contractors.STATE
+    - contractor_profiles.CITY
+    - contractor_profiles.STATE
+    - contractor_profiles.sos_principal_office
+    - contractor_profiles.sos_standing
+    - contractor_profiles.sos_status
+    - contractor_profiles.sos_managed_by
+    - hr_requisitions.RECRUITER
+    - hr_requisitions.STANDARD_HOURS
+    - hr_requisitions.INACTIVE_CODE
+    - hr_requisitions.PERSON_HIRED
+  synonyms:
+    lmpd: [police]
+    police: [lmpd]
+    tarc: [transit]
+    lge: ["gas & electric", "gas and electric"]
+    arpa: [arp]
+    "american rescue plan": [arp]
+    "rescue plan": [arp]
+    "cares act": [cares]
+    cares: [coronavirus]
+    library: [library]
+    zoo: [zoo]
+    mayor: [mayor]
+
 rag:
   legistar_client: louisville
   # Resolution, Ordinance, Capital Infrastructure Fund, Neighborhood
