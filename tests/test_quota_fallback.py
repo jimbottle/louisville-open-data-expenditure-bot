@@ -391,3 +391,77 @@ def test_empty_completion_without_a_fallback_raises_its_own_type():
 
     with pytest.raises(aa.EmptyCompletionError):
         aa._call_with_retry(primary)
+
+
+# ── Provider-side failures cross to the fallback (seen live 2026-08-31) ──────
+# OpenRouter answered HTTP 200 and then delivered "Upstream error from Nvidia:
+# Service temporarily overloaded" as an in-stream error payload, which the SDK
+# raises as a bare APIError. The generic branch re-raised it without ever
+# trying the funded Cerebras fallback.
+
+def _upstream_overloaded():
+    req = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    resp = httpx.Response(502, request=req)
+    return openai.APIError("Upstream error from Nvidia: Service temporarily overloaded",
+                           request=req, body=None)
+
+
+def test_generic_provider_error_fails_over_to_the_fallback():
+    calls = {"primary": 0, "fallback": 0}
+
+    def primary():
+        calls["primary"] += 1
+        raise _upstream_overloaded()
+
+    def fallback():
+        calls["fallback"] += 1
+        return "answer"
+
+    assert aa._call_with_retry(primary, fallback_fn=fallback) == "answer"
+    assert calls == {"primary": 1, "fallback": 1}   # immediate, no retry ladder
+    assert not aa._primary_is_unusable()            # transient: never latched
+
+
+def test_bad_primary_key_fails_over_to_the_fallback():
+    req = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    resp = httpx.Response(401, request=req)
+    err = openai.AuthenticationError("invalid api key", response=resp, body=None)
+
+    def primary():
+        raise err
+
+    assert aa._call_with_retry(primary, fallback_fn=lambda: "saved") == "saved"
+
+
+def test_provider_error_with_no_fallback_still_raises():
+    def primary():
+        raise _upstream_overloaded()
+
+    with pytest.raises(openai.APIError):
+        aa._call_with_retry(primary)
+
+
+def test_provider_error_on_both_raises_the_primary_error():
+    def primary():
+        raise _upstream_overloaded()
+
+    def fallback():
+        raise RuntimeError("fallback also down")
+
+    with pytest.raises(openai.APIError) as exc:
+        aa._call_with_retry(primary, fallback_fn=fallback)
+    assert "overloaded" in str(exc.value)
+
+
+def test_model_not_found_is_not_treated_as_a_provider_error():
+    # NotFoundError must reach _call_with_model_fallback's own resolution path.
+    req = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    resp = httpx.Response(404, request=req)
+    err = openai.NotFoundError("model_not_found", response=resp, body={"code": "model_not_found"})
+    assert not aa.is_provider_error(err)
+
+    def primary():
+        raise err
+
+    with pytest.raises(openai.NotFoundError):
+        aa._call_with_retry(primary, fallback_fn=lambda: "no")

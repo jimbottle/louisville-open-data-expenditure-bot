@@ -1486,24 +1486,45 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
         draft_truncated = False
         draft_error = None
         last_beat = time.time()
+        # The draft accumulates server-side (the reader sees only the refined
+        # stream), so a stream that DIES mid-draft can be retried whole on the
+        # fallback provider without the reader ever seeing a seam. Attempt 1:
+        # normal client with in-call fallback (covers failures at stream
+        # creation); attempt 2: the fallback client alone, for a stream that
+        # failed after it started (observed live: OpenRouter 200s, then sends
+        # an in-stream "Upstream error ... overloaded" mid-answer).
+        attempts = [(client, MODEL, paid_client, FALLBACK_MODEL)]
+        if paid_client is not None:
+            attempts.append((paid_client, FALLBACK_MODEL, None, None))
         try:
-            for chunk in interpret_results_stream(
-                client, MODEL, interpret_system, question, sql, result_str, on_retry=on_retry, history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL,
-                documents=documents,
-            ):
-                draft += chunk
-                interp_tokens += 1
-                now = time.time()
-                if now - last_beat > 8:
-                    last_beat = now
-                    for evt in flush_retry_logs():
-                        yield evt
-                    yield send("status", {"content": "Summarizing the results…"})
-                if now - t_start > stream_timeout:
-                    log.warning("Interpretation stream timed out after %ds", stream_timeout)
-                    track_error("interpretation", f"Stream timeout after {stream_timeout}s")
-                    draft_truncated = True
+            for i, (a_client, a_model, a_fb, a_fb_model) in enumerate(attempts):
+                draft, draft_error = "", None
+                try:
+                    for chunk in interpret_results_stream(
+                        a_client, a_model, interpret_system, question, sql, result_str, on_retry=on_retry, history=history, fallback_client=a_fb, fallback_model=a_fb_model,
+                        documents=documents,
+                    ):
+                        draft += chunk
+                        interp_tokens += 1
+                        now = time.time()
+                        if now - last_beat > 8:
+                            last_beat = now
+                            for evt in flush_retry_logs():
+                                yield evt
+                            yield send("status", {"content": "Summarizing the results…"})
+                        if now - t_start > stream_timeout:
+                            log.warning("Interpretation stream timed out after %ds", stream_timeout)
+                            track_error("interpretation", f"Stream timeout after {stream_timeout}s")
+                            draft_truncated = True
+                            break
                     break
+                except Exception as e:
+                    draft_error = e
+                    if i + 1 < len(attempts):
+                        log.warning("Draft stream failed (%s); retrying whole draft on the fallback provider", e)
+                        yield send("log", {"content": "Summary stream failed; retrying on the backup provider..."})
+                        continue
+                    raise
         except GeneratorExit:
             log.info("Client disconnected during interpretation stream")
             return

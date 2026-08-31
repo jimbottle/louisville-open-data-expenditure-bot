@@ -610,3 +610,46 @@ def test_a_quota_error_makes_health_degraded_with_a_reason(client, monkeypatch):
     # An hour later it clears by itself (the operator has been paged by then).
     app.persistent_stats["errors"]["last_quota_error_time"] -= app.QUOTA_DEGRADE_SECONDS + 1
     assert client.get("/api/health").json()["status"] == "ok"
+
+
+# ── A draft stream that dies mid-flight retries whole on the fallback ────────
+
+def test_mid_stream_draft_failure_retries_on_the_fallback_provider(client, monkeypatch):
+    """OpenRouter 200s, streams half an answer, then errors in-stream. The
+    draft is server-side only, so the whole draft is retried on the fallback
+    and the reader sees one clean answer — not an apology."""
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
+    monkeypatch.setattr(app, "paid_client", object())
+    calls = {"n": 0}
+
+    def _stream(client_, model, system, question, sql, results, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield "half an ans"
+            raise RuntimeError("Upstream error from Nvidia: Service temporarily overloaded")
+        yield "the whole answer, from the fallback"
+    monkeypatch.setattr(app, "interpret_results_stream", _stream)
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("refined answer"))
+    events = _events(_post(client, "How has annual spending changed?", dev_mode=True))
+    types = _types(events)
+    assert calls["n"] == 2
+    assert "error" not in types
+    text = "".join(e.get("content", "") for e in events if e["type"] == "interpretation")
+    assert "refined answer" in text and "trouble summarizing" not in text
+    assert types[-1] == "done"
+
+
+def test_draft_failure_with_no_fallback_still_degrades_honestly(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
+    monkeypatch.setattr(app, "paid_client", None)
+
+    def _stream(*a, **kw):
+        raise RuntimeError("boom")
+        yield
+    monkeypatch.setattr(app, "interpret_results_stream", _stream)
+    events = _events(_post(client, "How has annual spending changed?", dev_mode=True))
+    text = "".join(e.get("content", "") for e in events if e["type"] == "interpretation")
+    assert "trouble summarizing" in text
+    assert _types(events)[-1] == "done"

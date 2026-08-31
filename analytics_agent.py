@@ -109,6 +109,28 @@ class EmptyCompletionError(RuntimeError):
     """
 
 
+def is_provider_error(e: Exception) -> bool:
+    """A failure on the PROVIDER's side that a different provider can dodge:
+    5xx, connection/timeout, a bad key, or OpenRouter's HTTP-200-with-an-error
+    bodies ("Upstream error from Nvidia: Service temporarily overloaded", seen
+    live 2026-08-31 killing the interpretation while a funded Cerebras key sat
+    idle — the generic branch re-raised without ever trying it).
+
+    NotFoundError is deliberately excluded: model_not_found has its own
+    resolution path (_call_with_model_fallback) that must see it first.
+    RateLimitError is excluded: the ladder handles it with its own pacing.
+    """
+    if isinstance(e, (openai.RateLimitError, openai.NotFoundError)):
+        return False
+    if isinstance(e, (openai.APIConnectionError, openai.APITimeoutError,
+                      openai.InternalServerError, openai.AuthenticationError,
+                      openai.PermissionDeniedError)):
+        return True
+    # The SDK raises plain APIError for in-stream error payloads and other
+    # provider-shaped failures; quota-ish ones were classified before this.
+    return isinstance(e, openai.APIError)
+
+
 def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
     """Run an LLM call, falling over to the fallback provider when the primary can't serve.
 
@@ -158,17 +180,21 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
             exhausted = is_quota_error(e) or is_daily_cap_error(e)
             empty = isinstance(e, EmptyCompletionError)
             rate_limited = isinstance(e, openai.RateLimitError)
+            provider_down = not (exhausted or empty or rate_limited) and is_provider_error(e)
 
-            if not (exhausted or empty or rate_limited):
+            if not (exhausted or empty or rate_limited or provider_down):
                 log.error("LLM call failed (attempt %d): %s", attempt, e)
                 raise
 
             # A plain rate limit gets one more shot at the primary first; the
-            # other two are hopeless on this key, so they cross over at once.
-            if (exhausted or empty or attempt > 1) and fallback_fn and not fallback_tried:
+            # others are hopeless on this key right now, so they cross over at
+            # once. A provider-side failure (5xx / upstream overloaded / bad
+            # key) is transient-or-configuration: fall over without latching.
+            if (exhausted or empty or provider_down or attempt > 1) and fallback_fn and not fallback_tried:
                 fallback_tried = True
                 log.info("Primary unavailable (%s), using fallback provider",
-                         "exhausted" if exhausted else ("empty reply" if empty else "rate limited"))
+                         "exhausted" if exhausted else ("empty reply" if empty else (
+                             "provider error" if provider_down else "rate limited")))
                 if on_retry:
                     on_retry(attempt, MAX_RETRIES, 0)
                 try:
@@ -182,7 +208,7 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
                     return result
                 except Exception as fallback_err:
                     log.warning("Fallback provider failed: %s", fallback_err)
-                    if exhausted or empty or attempt == MAX_RETRIES:
+                    if exhausted or empty or provider_down or attempt == MAX_RETRIES:
                         # Raise the PRIMARY's error, not the fallback's: app.py
                         # picks the user-facing message from this exception, and
                         # a Cerebras 402 here would say "the bill is unpaid" for
@@ -190,9 +216,9 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
                         raise e from fallback_err
                     # Ordinary rate limit with attempts left: keep walking the ladder.
 
-            if exhausted or empty:
+            if exhausted or empty or provider_down:
                 log.error("Primary cannot serve (%s) and no fallback answered: %s",
-                          "exhausted" if exhausted else "empty reply", e)
+                          "exhausted" if exhausted else ("empty reply" if empty else "provider error"), e)
                 raise
 
             if attempt == MAX_RETRIES:
