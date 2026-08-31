@@ -122,6 +122,9 @@ RATE_LIMIT_MSG = "Evan buys his inference on the cheap and we just hit the provi
 # make that unnecessary, so the default is zero; set it if a provider's RPM
 # cap starts biting again.
 INTER_CALL_PAUSE = float(os.environ.get("INTER_CALL_PAUSE_SECONDS", "0") or 0)
+# Ceiling on each streamed LLM pass (draft, refine). Tunable for the same
+# reason as the retry ladder: billed idle on a hung stream.
+STREAM_TIMEOUT_SECONDS = float(os.environ.get("STREAM_TIMEOUT_SECONDS", "90") or 90)
 
 
 def _pace():
@@ -1473,7 +1476,7 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
         yield send("status", {"content": "Summarizing the results…"})
         t_start = time.time()
         interp_tokens = 0
-        stream_timeout = 90  # max seconds per LLM stream
+        stream_timeout = STREAM_TIMEOUT_SECONDS  # max seconds per LLM stream
         # The draft interpretation accumulates server-side; the user-visible
         # stream is the refinement pass below (plain language, consistent
         # formatting, numbers checked against the results table). Periodic

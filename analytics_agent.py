@@ -26,8 +26,12 @@ import pandas as pd
 
 log = logging.getLogger("analytics")
 
-MAX_RETRIES = 3
-RETRY_BASE_DELAY = 16  # seconds, matches Gemini's suggested retry delay
+# Retry ladder for ordinary 429s. Env-tunable (louisville-open-data-5pg): on a
+# per-second-billed platform the default 2 x 16s of sleep is real money, and
+# the right value depends on the provider's window. The ladder itself stays —
+# it is what the provider fallback rides on.
+MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "3") or 3)
+RETRY_BASE_DELAY = float(os.environ.get("LLM_RETRY_BASE_DELAY", "16") or 16)  # seconds
 
 
 # Which tier served the last call. DISPLAY ONLY (dev mode / the debug event):
