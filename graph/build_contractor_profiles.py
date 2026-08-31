@@ -183,8 +183,18 @@ def main():
     # Merge on lowercase name match
     payees["payee_lower"] = payees["payee"].str.lower().str.strip()
     contractors["name_lower"] = contractors["FULLNAME"].str.lower().str.strip()
+    # One payee can hold several licenses (Johnson Controls: FIREDETECT and
+    # HVAC). A row-fanning merge would repeat the payee-level total_spend once
+    # per license and double-count any SUM over the table, so the license
+    # fields are collapsed to one row per payee, values joined with "; ".
+    lic_cols = [c for c in contractors.columns if c not in ("name_lower",)]
+    contractors = (
+        contractors.groupby("name_lower", as_index=False)[lic_cols]
+        .agg(lambda col: "; ".join(str(v) for v in col.dropna().astype(str).unique()) or None)
+    )
     merged = payees.merge(contractors, left_on="payee_lower", right_on="name_lower", how="left")
     merged = merged.drop(columns=["payee_lower", "name_lower"], errors="ignore")
+    assert merged["payee"].is_unique, "license merge fanned out payee rows"
 
     licensed = merged["LICENSENO"].notna().sum()
     print(f"  {licensed}/{len(merged)} matched to active contractor licenses")

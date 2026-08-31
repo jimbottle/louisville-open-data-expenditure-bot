@@ -2141,3 +2141,19 @@ def test_largest_payments_excludes_offsetting_rows(con):
         "  AND e.invoice_amount = lp.invoice_amount)"
     ).fetchone()[0]
     assert leaked == 0
+
+
+def test_shipped_contractor_profiles_have_one_row_per_payee():
+    """graph/build_contractor_profiles.py once fanned a payee out once per
+    active-contractor license (Johnson Controls: FIREDETECT + HVAC), repeating
+    the payee-level total_spend so any SUM over the table double-counted it.
+    The shipped file is tracked in git, so the invariant is checked here."""
+    import csv
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "data", "contractor_profiles.csv")
+    if not os.path.exists(path):
+        pytest.skip("data/contractor_profiles.csv not present")
+    with open(path, newline="") as f:
+        payees = [r["payee"] for r in csv.DictReader(f)]
+    assert len(payees) == len(set(payees)), \
+        sorted({p for p in payees if payees.count(p) > 1})
