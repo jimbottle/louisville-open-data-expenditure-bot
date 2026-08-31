@@ -178,8 +178,14 @@ def is_provider_error(e: Exception) -> bool:
     resolution path (_call_with_model_fallback) that must see it first.
     RateLimitError is excluded: the ladder handles it with its own pacing.
     """
-    if isinstance(e, (openai.RateLimitError, openai.NotFoundError)):
+    if isinstance(e, openai.RateLimitError):
         return False
+    if isinstance(e, openai.NotFoundError):
+        # Only a genuine model_not_found belongs to the resolution path. An
+        # upstream 404 ("Provider returned error", code 404, seen live
+        # 2026-08-31 from OpenRouter/Nvidia) is the provider being broken,
+        # and must cross to the fallback like any other provider failure.
+        return not _is_model_not_found(e)
     if isinstance(e, (openai.APIConnectionError, openai.APITimeoutError,
                       openai.InternalServerError, openai.AuthenticationError,
                       openai.PermissionDeniedError)):

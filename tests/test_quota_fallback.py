@@ -511,3 +511,18 @@ def test_stall_guard_disabled_when_zero():
     class _Stream:
         def __iter__(self): return iter("ab")
     assert list(aa._iter_with_stall_guard(_Stream(), stall_seconds=0)) == ["a", "b"]
+
+
+def test_upstream_404_that_is_not_model_not_found_fails_over():
+    """OpenRouter surfaces an upstream breakage as HTTP 404 'Provider returned
+    error' (code 404, not 'model_not_found'). The SDK raises NotFoundError, so
+    the blanket exclusion left it with neither the model-resolution path nor
+    the provider fallback — the call just died."""
+    req = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    resp = httpx.Response(404, request=req)
+    err = openai.NotFoundError(
+        "Error code: 404 - {'error': {'message': 'Provider returned error', 'code': 404, "
+        "'metadata': {'provider_name': 'Nvidia'}}}",
+        response=resp, body={"error": {"message": "Provider returned error", "code": 404}})
+    assert aa.is_provider_error(err)
+    assert aa._call_with_retry(lambda: (_ for _ in ()).throw(err), fallback_fn=lambda: "saved") == "saved"
