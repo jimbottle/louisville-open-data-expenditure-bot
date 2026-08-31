@@ -109,6 +109,64 @@ class EmptyCompletionError(RuntimeError):
     """
 
 
+class StreamStalledError(RuntimeError):
+    """A streamed completion went quiet: no chunk within the stall window.
+
+    The failure mode the plain timeouts miss — observed live 2026-08-31 with
+    OpenRouter's nemotron upstream overloaded: the stream stayed OPEN and
+    dribbled a few tokens a minute, so nothing errored, the 90s cap eventually
+    fired, and the reader got a truncated answer while a fast fallback sat
+    idle. Raised mid-iteration so the caller's fallback path takes over.
+    """
+
+
+# Seconds a streamed completion may go without producing a chunk (including
+# before the FIRST chunk) before it is abandoned. 0 disables the guard.
+STREAM_STALL_SECONDS = float(os.environ.get("STREAM_STALL_SECONDS", "20") or 0)
+
+
+def _iter_with_stall_guard(stream, stall_seconds: float | None = None):
+    """Yield from `stream`, raising StreamStalledError if it goes quiet.
+
+    A sync OpenAI stream blocks in __next__, so the wait happens on a reader
+    thread feeding a queue; the consumer waits at most `stall_seconds` per
+    chunk. On stall the underlying stream is closed (best-effort) and the
+    daemon reader is left to die with it.
+    """
+    stall = STREAM_STALL_SECONDS if stall_seconds is None else stall_seconds
+    if not stall or stall <= 0:
+        yield from stream
+        return
+    import queue as _queue
+    q: "_queue.Queue" = _queue.Queue()
+
+    def _reader():
+        try:
+            for item in stream:
+                q.put(("item", item))
+            q.put(("done", None))
+        except Exception as e:  # surfaced to the consumer in order
+            q.put(("err", e))
+
+    threading.Thread(target=_reader, daemon=True).start()
+    while True:
+        try:
+            kind, val = q.get(timeout=stall)
+        except _queue.Empty:
+            try:
+                stream.close()
+            except Exception:
+                pass
+            raise StreamStalledError(
+                f"LLM stream produced nothing for {stall:.0f}s; abandoning it")
+        if kind == "item":
+            yield val
+        elif kind == "done":
+            return
+        else:
+            raise val
+
+
 def is_provider_error(e: Exception) -> bool:
     """A failure on the PROVIDER's side that a different provider can dodge:
     5xx, connection/timeout, a bad key, or OpenRouter's HTTP-200-with-an-error
@@ -792,7 +850,7 @@ def interpret_results_stream(
             )
         return _call
     stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
-    for chunk in stream:
+    for chunk in _iter_with_stall_guard(stream):
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
@@ -885,7 +943,7 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
             )
         return _call
     stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
-    for chunk in stream:
+    for chunk in _iter_with_stall_guard(stream):
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
@@ -1087,6 +1145,13 @@ def get_fallback_model() -> str:
     return os.environ.get("MODEL", DEFAULT_FALLBACK_MODEL)
 
 
+def _llm_timeout() -> float:
+    """Read timeout for one completion call. Env-tunable: with a fast funded
+    fallback behind the primary, waiting the full default on a struggling
+    free-tier provider is worse than failing over sooner."""
+    return float(os.environ.get("LLM_TIMEOUT_SECONDS", "60") or 60)
+
+
 def make_client(base_url: str = None, api_key: str = None) -> openai.OpenAI:
     """Create an OpenAI-compatible client. Disables built-in retries — we handle them in _call_with_retry."""
     import httpx
@@ -1099,7 +1164,7 @@ def make_client(base_url: str = None, api_key: str = None) -> openai.OpenAI:
         api_key=api_key or _primary_api_key(),
         base_url=base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL),
         max_retries=0,
-        timeout=httpx.Timeout(60.0, connect=10.0),
+        timeout=httpx.Timeout(_llm_timeout(), connect=10.0),
         default_headers=headers,
     )
 
@@ -1119,7 +1184,7 @@ def make_paid_client(base_url: str = None, api_key: str = None) -> openai.OpenAI
         api_key=paid_key,
         base_url=base_url or os.environ.get("LLM_BASE_URL", DEFAULT_BASE_URL),
         max_retries=0,
-        timeout=httpx.Timeout(60.0, connect=10.0),
+        timeout=httpx.Timeout(_llm_timeout(), connect=10.0),
     )
 
 

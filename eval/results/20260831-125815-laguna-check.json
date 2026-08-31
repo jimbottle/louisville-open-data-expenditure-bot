@@ -1,0 +1,68 @@
+{
+ "label": "laguna-check",
+ "model": "poolside/laguna-s-2.1:free",
+ "provider": "openrouter",
+ "when": "2026-08-31T12:58:15",
+ "cases": 3,
+ "sql_pass": 3,
+ "answer_pass": 2,
+ "both_pass": 2,
+ "repairs": 0,
+ "repair_tries": 0,
+ "mean_seconds": 51.3,
+ "total_seconds": 154.5,
+ "results": [
+  {
+   "id": "fire-vehicles-fy2024",
+   "tags": [
+    "vocabulary"
+   ],
+   "question": "How much did the Louisville Fire department spend on vehicles in fiscal year 2024?",
+   "sql_ok": true,
+   "sql_note": "1,781,925.92 \u2248 1,581,197.96",
+   "answer_ok": false,
+   "answer_note": "does not state 1,581,197.96",
+   "seconds": 38.8,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2024\n  AND agency_canonical = 'Louisville Fire'\n  AND is_data_artifact = FALSE\n  AND (\n        spend_category ILIKE '%fleet%'\n        OR spend_category ILIKE '%automotive%'\n        OR spend_category ILIKE '%auto%'\n        OR spend_category ILIKE '%vehicle%'\n        OR spend_category ILIKE '%truck%'\n        OR cost_center ILIKE '%vehicle%'\n        OR cost_center ILIKE '%fleet%'\n        OR cost_center ILIKE '%truck%'\n        OR cost_center ILIKE '%auto%'\n        OR project ILIKE '%fire%'\n      );",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE fiscal_year = 2024\n  AND agency_canonical = 'Louisville Fire'\n  AND is_data_artifact = FALSE\n  AND (\n        spend_category ILIKE '%fleet%'\n        OR spend_category ILIKE '%automotive%'\n        OR spend_category ILIKE '%auto%'\n        OR spend_category ILIKE '%vehicle%'\n        OR spend_category ILIKE '%truck%'\n        OR cost_center ILIKE '%vehicle%'\n        OR cost_center ILIKE '%fleet%'\n        OR cost_center ILIKE '%truck%'\n        OR cost_center ILIKE '%auto%'\n        OR project ILIKE '%fire%'\n      );",
+   "answer": "The Louisville Fire department spent $1.78\u202fM on vehicles in fiscal year\u202f2024, according to the city\u2019s expenditure records."
+  },
+  {
+   "id": "top-agencies-all-time",
+   "tags": [
+    "summary"
+   ],
+   "question": "Which agencies have spent the most money across all fiscal years?",
+   "sql_ok": true,
+   "sql_note": "top 5 match",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 60.9,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT agency AS agency_canonical, ROUND(total_spend, 2) AS total_spend, transaction_count\nFROM summary_agency_spend\nWHERE agency IS NOT NULL\nORDER BY total_spend DESC",
+   "first_sql": "SELECT agency AS agency_canonical, ROUND(total_spend, 2) AS total_spend, transaction_count\nFROM summary_agency_spend\nWHERE agency IS NOT NULL\nORDER BY total_spend DESC",
+   "answer": "The agency that has spent the most across all fiscal years is Public Works & Assets, with about $1.036\u202fbillion.\n\nTop spenders (10 of the 61 agencies in the data):\n1. Public Works & Assets \u2013 $1.036\u202fB  \n2. Economic Development \u2013 $390.4\u202fM  \n3. Facilities & Fleet Management \u2013 $368.8\u202fM  \n4. Community Services & Revitalization \u2013 $351.4\u202fM  \n5. Office of Housing & Community Development \u2013 $348.6\u202fM  \n6. OMB Finance \u2013 $319.9\u202fM  \n7. Develop Louisville \u2013 $288.1\u202fM  \n8. Parks & Recreation \u2013 $276.3\u202fM  \n9. Louisville Metro Police Department \u2013 $263.6\u202fM  \n10. Public Health & Wellness \u2013 $262.4\u202fM  \n\nThese ten agencies together account for roughly $3.9\u202fbillion of the city\u2019s total spending."
+  },
+  {
+   "id": "annual-spend-trend",
+   "tags": [
+    "summary",
+    "year"
+   ],
+   "question": "How has total annual spending changed from 2008 to 2026?",
+   "sql_ok": true,
+   "sql_note": "19 rows",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 54.3,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT fiscal_year, ROUND(total_spend, 2) AS total_spend, transaction_count FROM summary_annual_spend ORDER BY fiscal_year ASC",
+   "first_sql": "SELECT fiscal_year, ROUND(total_spend, 2) AS total_spend, transaction_count FROM summary_annual_spend ORDER BY fiscal_year ASC",
+   "answer": "Total annual spending rose from $244.8M in 2008 to $643.7M in 2025, then fell to $439.7M in 2026.\n\nThe path was uneven:\n1. 2008 to 2020: spending mostly between $210M and $280M.\n2. 2021: $374.6M, rising to $411.6M in 2022.\n3. 2023: dipped to $277.7M.\n4. 2024: climbed to $541.5M.\n5. 2025: peaked at $643.7M.\n6. 2026: $439.7M.\n\nTransaction counts rose from 129,647 in 2008 to 173,733 in 2024, then 112,661 in 2026.\n\nThe 2026 total is partial, with expenditure data loaded only through March 16, 2026.\n\nSpending records cannot be linked to council legislation."
+  }
+ ]
+}

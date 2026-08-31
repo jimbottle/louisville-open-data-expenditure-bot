@@ -465,3 +465,49 @@ def test_model_not_found_is_not_treated_as_a_provider_error():
 
     with pytest.raises(openai.NotFoundError):
         aa._call_with_retry(primary, fallback_fn=lambda: "no")
+
+
+# ── Stall watchdog: an open-but-silent stream is abandoned, not waited out ───
+
+def test_stall_guard_passes_a_healthy_stream_through():
+    class _Stream:
+        def __iter__(self): return iter([1, 2, 3])
+        def close(self): pass
+    assert list(aa._iter_with_stall_guard(_Stream(), stall_seconds=1)) == [1, 2, 3]
+
+
+def test_stall_guard_abandons_a_stream_that_goes_quiet():
+    import time as _time
+    closed = {"n": 0}
+
+    class _Stream:
+        def __iter__(self):
+            yield "first"
+            _time.sleep(5)      # the dribble: alive, producing nothing
+            yield "never seen"
+        def close(self): closed["n"] += 1
+
+    got = []
+    with pytest.raises(aa.StreamStalledError):
+        for x in aa._iter_with_stall_guard(_Stream(), stall_seconds=0.2):
+            got.append(x)
+    assert got == ["first"] and closed["n"] == 1
+
+
+def test_stall_guard_propagates_stream_errors_in_order():
+    class _Stream:
+        def __iter__(self):
+            yield "a"
+            raise _upstream_overloaded()
+        def close(self): pass
+    got = []
+    with pytest.raises(openai.APIError):
+        for x in aa._iter_with_stall_guard(_Stream(), stall_seconds=1):
+            got.append(x)
+    assert got == ["a"]
+
+
+def test_stall_guard_disabled_when_zero():
+    class _Stream:
+        def __iter__(self): return iter("ab")
+    assert list(aa._iter_with_stall_guard(_Stream(), stall_seconds=0)) == ["a", "b"]

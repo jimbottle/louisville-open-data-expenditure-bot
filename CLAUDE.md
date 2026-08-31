@@ -123,9 +123,13 @@ sh -c 'docker run --rm -v /Users/macserver/projects/louisville-open-data:/src -w
 > `INTER_CALL_PAUSE_SECONDS` (default 0): seconds to idle between the 2-3 LLM
 > calls of one request. It used to be a fixed 3s + 2s for the Cerebras free
 > tier's per-minute cap; set it only if a provider's RPM cap starts biting.
-> Also tunable: `LLM_MAX_RETRIES` (3), `LLM_RETRY_BASE_DELAY` (16s) and
-> `STREAM_TIMEOUT_SECONDS` (90) — the billed-idle knobs for a per-second
-> platform; leave the defaults on the long-lived container.
+> Also tunable: `LLM_MAX_RETRIES` (3), `LLM_RETRY_BASE_DELAY` (16s),
+> `STREAM_TIMEOUT_SECONDS` (90), `LLM_TIMEOUT_SECONDS` (60, per-call read
+> timeout) and `STREAM_STALL_SECONDS` (20 — abandon a stream that produces no
+> chunk for this long and fail over; 0 disables). The stall guard exists
+> because OpenRouter's overloaded nemotron upstream kept streams OPEN while
+> dribbling tokens (2026-08-31): nothing errored, the 90s cap truncated the
+> answer, and the funded Cerebras fallback sat idle.
 
 > ⚠️ **Set `TRUSTED_PROXY_IPS`** to the Docker bridge gateway (the peer the
 > cloudflared tunnel reaches the container from). It is unset by default and the
