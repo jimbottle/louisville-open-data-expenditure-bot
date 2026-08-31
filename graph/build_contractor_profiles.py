@@ -187,10 +187,23 @@ def main():
     # HVAC). A row-fanning merge would repeat the payee-level total_spend once
     # per license and double-count any SUM over the table, so the license
     # fields are collapsed to one row per payee, values joined with "; ".
-    lic_cols = [c for c in contractors.columns if c not in ("name_lower",)]
-    contractors = (
-        contractors.groupby("name_lower", as_index=False)[lic_cols]
-        .agg(lambda col: "; ".join(str(v) for v in col.dropna().astype(str).unique()) or None)
+    # Only TEXT fields are joined. A numeric column (ZIPCODE) must stay a
+    # single value: DuckDB infers the CSV column's type from the whole file,
+    # so one "53201.0; 40220.0" cell would flip ZIPCODE to VARCHAR for all
+    # 200 rows and break every numeric ZIP comparison in generated SQL.
+    # Numeric/date columns take the first license's value instead.
+    def _join_text(col):
+        vals = col.dropna().astype(str).unique()
+        return "; ".join(vals) if len(vals) else None
+
+    def _first(col):
+        vals = col.dropna()
+        return vals.iloc[0] if len(vals) else None
+
+    single_value = {"ZIPCODE", "EXPIRATIONDATE"}
+    lic_cols = [c for c in contractors.columns if c != "name_lower"]
+    contractors = contractors.groupby("name_lower", as_index=False)[lic_cols].agg(
+        {c: (_first if c in single_value else _join_text) for c in lic_cols}
     )
     merged = payees.merge(contractors, left_on="payee_lower", right_on="name_lower", how="left")
     merged = merged.drop(columns=["payee_lower", "name_lower"], errors="ignore")

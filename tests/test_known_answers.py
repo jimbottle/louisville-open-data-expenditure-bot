@@ -2157,3 +2157,25 @@ def test_shipped_contractor_profiles_have_one_row_per_payee():
         payees = [r["payee"] for r in csv.DictReader(f)]
     assert len(payees) == len(set(payees)), \
         sorted({p for p in payees if payees.count(p) > 1})
+
+
+def test_shipped_contractor_profiles_keep_their_numeric_columns_numeric():
+    """DuckDB infers each CSV column's type from the WHOLE file, so a single
+    text cell — "53201.0; 40220.0" from joining two licenses' ZIP codes —
+    flips ZIPCODE to VARCHAR for all 200 rows and every numeric comparison in
+    generated SQL then errors. The license aggregation joins text fields only;
+    this pins the inferred types the table had before it existed."""
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "data", "contractor_profiles.csv")
+    if not os.path.exists(path):
+        pytest.skip("data/contractor_profiles.csv not present")
+    import duckdb
+    con = duckdb.connect()
+    types = dict(con.execute(
+        f"SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_csv_auto('{path}'))"
+    ).fetchall())
+    numeric = {"total_spend", "transaction_count", "years_active", "first_year", "last_year",
+               "agencies_served", "funds_used", "expenditure_types", "ZIPCODE", "sos_org_number"}
+    wrong = {c: types.get(c) for c in numeric if types.get(c) == "VARCHAR" or c not in types}
+    assert not wrong, f"columns that lost their numeric type: {wrong}"
+    assert types.get("sos_file_date") == "DATE"
