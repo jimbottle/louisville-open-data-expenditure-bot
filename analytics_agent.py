@@ -109,6 +109,13 @@ class EmptyCompletionError(RuntimeError):
     """
 
 
+def _is_auth_error(e: Exception) -> bool:
+    """A bad or revoked key: not transient — every later call fails the same
+    way until a human fixes the key, so it earns the primary-unusable latch
+    (which rechecks every PRIMARY_RECHECK_SECONDS and heals by itself)."""
+    return isinstance(e, (openai.AuthenticationError, openai.PermissionDeniedError))
+
+
 class StreamStalledError(RuntimeError):
     """A streamed completion went quiet: no chunk within the stall window.
 
@@ -179,6 +186,13 @@ def is_provider_error(e: Exception) -> bool:
     RateLimitError is excluded: the ladder handles it with its own pacing.
     """
     if isinstance(e, openai.RateLimitError):
+        return False
+    if isinstance(e, (openai.BadRequestError, openai.ConflictError,
+                      openai.UnprocessableEntityError)):
+        # 400/409/422 are OUR request being wrong (a malformed payload, an
+        # over-long prompt), not the provider being down. The same request
+        # would fail the same way on the fallback, so crossing over just
+        # burns a paid call and logs a "provider error" for a local bug.
         return False
     if isinstance(e, openai.NotFoundError):
         # Only a genuine model_not_found belongs to the resolution path. An
@@ -252,8 +266,9 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
 
             # A plain rate limit gets one more shot at the primary first; the
             # others are hopeless on this key right now, so they cross over at
-            # once. A provider-side failure (5xx / upstream overloaded / bad
-            # key) is transient-or-configuration: fall over without latching.
+            # once. A transient provider failure (5xx / upstream overloaded)
+            # falls over WITHOUT latching; a bad key latches below, because it
+            # keeps failing until a human rotates it.
             if (exhausted or empty or provider_down or attempt > 1) and fallback_fn and not fallback_tried:
                 fallback_tried = True
                 log.info("Primary unavailable (%s), using fallback provider",
@@ -264,10 +279,12 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
                 try:
                     result = fallback_fn()
                     _served(True)
-                    if exhausted:
-                        # Only for credit/allowance exhaustion. Latching on an
-                        # ordinary 429 would route 15 minutes of traffic to the
-                        # billed provider over a one-minute spike.
+                    if exhausted or _is_auth_error(e):
+                        # Credit/allowance exhaustion and dead keys: durable
+                        # states where every unlatched call would pay a doomed
+                        # primary round-trip first. Latching on an ordinary 429
+                        # or a 5xx blip would instead route 15 minutes of
+                        # traffic to the billed provider over a hiccup.
                         _mark_primary_unusable()
                     return result
                 except Exception as fallback_err:

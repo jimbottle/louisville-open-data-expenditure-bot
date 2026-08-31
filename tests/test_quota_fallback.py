@@ -422,7 +422,7 @@ def test_generic_provider_error_fails_over_to_the_fallback():
     assert not aa._primary_is_unusable()            # transient: never latched
 
 
-def test_bad_primary_key_fails_over_to_the_fallback():
+def test_bad_primary_key_fails_over_and_latches_the_primary():
     req = httpx.Request("POST", "https://api.test/v1/chat/completions")
     resp = httpx.Response(401, request=req)
     err = openai.AuthenticationError("invalid api key", response=resp, body=None)
@@ -431,6 +431,31 @@ def test_bad_primary_key_fails_over_to_the_fallback():
         raise err
 
     assert aa._call_with_retry(primary, fallback_fn=lambda: "saved") == "saved"
+    # A dead key is durable: without the latch every later call pays a doomed
+    # primary round-trip first, for as long as the key stays broken.
+    assert aa._primary_is_unusable()
+
+
+@pytest.mark.parametrize("make_err", [
+    lambda req, resp: openai.BadRequestError("context length exceeded", response=resp, body=None),
+    lambda req, resp: openai.ConflictError("conflict", response=resp, body=None),
+    lambda req, resp: openai.UnprocessableEntityError("unprocessable", response=resp, body=None),
+])
+def test_client_request_errors_do_not_cross_to_the_fallback(make_err):
+    """400/409/422 are our request being wrong; the fallback would fail the
+    same way, so the error surfaces instead of burning a paid call."""
+    req = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    err = make_err(req, httpx.Response(400, request=req))
+    assert not aa.is_provider_error(err)
+    calls = {"fallback": 0}
+
+    def fallback():
+        calls["fallback"] += 1
+        return "should not be used"
+
+    with pytest.raises(type(err)):
+        aa._call_with_retry(lambda: (_ for _ in ()).throw(err), fallback_fn=fallback)
+    assert calls["fallback"] == 0
 
 
 def test_provider_error_with_no_fallback_still_raises():
