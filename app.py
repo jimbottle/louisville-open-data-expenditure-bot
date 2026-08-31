@@ -20,31 +20,35 @@ import grounding
 import rag
 from fastapi import FastAPI, Request
 
-LOG_DIR = os.environ.get("LOG_DIR", "/logs")
+# Logs go to stdout. A rotating file log is opt-in via LOG_DIR (the Docker
+# deployment sets -e LOG_DIR=/logs on a named volume so logs survive container
+# recreation); unset, nothing is written to disk — what a Lambda / any
+# platform with a log collector wants, and what local dev used to trip over
+# ("could not set up file logging: Read-only file system: '/logs'").
+LOG_DIR = os.environ.get("LOG_DIR", "")
 LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
 
-# Console handler
 logging.basicConfig(
     level=logging.INFO,
     format=LOG_FORMAT,
     datefmt=LOG_DATEFMT,
 )
 
-# File handler — persistent logs that survive container recreations
-try:
-    os.makedirs(LOG_DIR, exist_ok=True)
-    from logging.handlers import RotatingFileHandler
-    file_handler = RotatingFileHandler(
-        os.path.join(LOG_DIR, "louisville-bot.log"),
-        maxBytes=10 * 1024 * 1024,  # 10 MB
-        backupCount=5,
-    )
-    file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
-    file_handler.setLevel(logging.INFO)
-    logging.getLogger().addHandler(file_handler)
-except Exception as e:
-    print(f"Warning: could not set up file logging: {e}")
+if LOG_DIR:
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        from logging.handlers import RotatingFileHandler
+        file_handler = RotatingFileHandler(
+            os.path.join(LOG_DIR, "louisville-bot.log"),
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+        )
+        file_handler.setFormatter(logging.Formatter(LOG_FORMAT, datefmt=LOG_DATEFMT))
+        file_handler.setLevel(logging.INFO)
+        logging.getLogger().addHandler(file_handler)
+    except Exception as e:
+        print(f"Warning: could not set up file logging in {LOG_DIR}: {e}")
 
 log = logging.getLogger("app")
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -299,6 +303,14 @@ persistent_stats = _load_stats()
 
 # ── Error Tracking ───────────────────────────────────────────────────────────
 
+# A funding failure (402 / spent daily allowance) is reported as "degraded"
+# for this long after the last one, so the heartbeat's sustained-degradation
+# notice pages the operator — /api/health otherwise stays "ok" and cached
+# answers keep streaming while every live question fails (louisville-open-data-8uk).
+QUOTA_DEGRADE_SECONDS = 3600
+QUOTA_CATEGORIES = ("quota", "daily_cap")
+
+
 def track_error(category: str, detail: str = ""):
     """Record an error occurrence."""
     now = time.time()
@@ -306,6 +318,9 @@ def track_error(category: str, detail: str = ""):
         errs = persistent_stats["errors"]
         errs["total_errors"] += 1
         errs[f"{category}_errors"] = errs.get(f"{category}_errors", 0) + 1
+        if category in QUOTA_CATEGORIES:
+            errs["last_quota_error_time"] = now
+            errs["last_quota_error"] = f"{category}: {detail}" if detail else category
         errs["last_error"] = f"{category}: {detail}" if detail else category
         errs["last_error_time"] = datetime.now().isoformat()
         errs["errors_last_hour"].append(now)
@@ -326,6 +341,10 @@ def get_error_summary() -> dict:
         "sql_exec_errors": errs.get("sql_exec_errors", 0),
         "interpretation_errors": errs.get("interpretation_errors", 0),
         "rate_limit_errors": errs.get("rate_limit_errors", 0),
+        "quota_errors": errs.get("quota_errors", 0) + errs.get("daily_cap_errors", 0),
+        "last_quota_error": errs.get("last_quota_error"),
+        "quota_error_recent": bool(errs.get("last_quota_error_time"))
+                              and now - errs["last_quota_error_time"] < QUOTA_DEGRADE_SECONDS,
         "last_error": errs.get("last_error"),
         "last_error_time": errs.get("last_error_time"),
     }
@@ -708,7 +727,7 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
                  MODEL, get_primary_tier(), FALLBACK_MODEL)
     else:
         log.info("Model: %s (%s), no fallback key", MODEL, get_primary_tier())
-    log.info("Logs writing to: %s", LOG_DIR)
+    log.info("Logs writing to: %s", LOG_DIR or "stdout only (LOG_DIR unset)")
 
     # A deploy that forgets TRUSTED_PROXY_IPS silently collapses the per-IP rate
     # limit to one site-wide bucket behind the tunnel (every request shares the
@@ -741,10 +760,18 @@ async def health():
             count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
             stats[table_name] = count
     errors = get_error_summary()
-    # Status is "degraded" if >5 errors in the last hour, "ok" otherwise
-    status = "degraded" if errors["errors_last_hour"] > 5 else "ok"
+    # "degraded" on >5 errors in the last hour, or on ANY funding failure in
+    # the last hour: out-of-credit takes every live question down while the
+    # health check and the cached starters look fine, so it must page.
+    degraded_reason = None
+    if errors["quota_error_recent"]:
+        degraded_reason = f"LLM funding failure: {errors['last_quota_error']}"
+    elif errors["errors_last_hour"] > 5:
+        degraded_reason = f"{errors['errors_last_hour']} errors in the last hour"
+    status = "degraded" if degraded_reason else "ok"
     return {
         "status": status,
+        "degraded_reason": degraded_reason,
         "tables": stats,
         # "model" is the model actually in use; if a provider deprecation
         # triggered a runtime fallback, model != model_configured and

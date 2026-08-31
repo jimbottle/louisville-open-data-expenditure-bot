@@ -185,6 +185,13 @@ canonicalization:
   prefix_map: payee_prefix_map.csv
   case_insensitive: true
 data_quality:
+  # Source typos: invoice years like 2102, 2502, 7202 sort to the newest end
+  # of every month series. Nulled at load (louisville-open-data-ukl); the
+  # amount stays in totals. Window: 2000-01-01 .. newest FY + 1 year.
+  date_sanity:
+    columns: [invoice_date, payment_date]
+    min: "2000-01-01"
+    max_years_after_newest: 1
   table: expenditures
   amount_column: extended_amount
   offsetting:

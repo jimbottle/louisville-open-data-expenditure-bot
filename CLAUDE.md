@@ -93,16 +93,31 @@ docker stop louisville-bot-prev
 # site-wide (5/min for ALL users). Find it: docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}'  (usually 172.17.0.1).
 # ADMIN_TOKEN: any long random secret; gates /api/cache (warm_cache.py and
 # refresh_data.py must be run with the same ADMIN_TOKEN in their env).
+# 3b. Build the prebuilt DuckDB artifact INTO the state volume from the new image
+#     (~1 min on the Air). The app then opens it read-only in ~0.5s / ~400MB
+#     instead of rebuilding 531MB of CSV (~5s / ~1.9GB) — the cold start that
+#     overran the health check in the 2026-08-11 outage. Rebuild it after every
+#     refresh_data.py run; it is a snapshot.
+docker run --rm -v louisville-data:/data:ro -v louisville-state:/state -e DATA_DIR=/data \
+  louisville-bot:new python data_model.py --materialize /state/lou.duckdb
+# 3c. Reuse the running container's secrets WITHOUT echoing them (the MCP runner
+#     accepts `sh -c '...'` for pipes/redirects): write an env file, use it, delete it.
+sh -c 'docker inspect -f "{{range .Config.Env}}{{println .}}{{end}}" louisville-bot | grep -E "^(CEREBRAS_API_KEY|CEREBRAS_PAID_API_KEY|OPENROUTER_API_KEY|OPENROUTER_BASE_URL|OPENROUTER_MODEL|MODEL|LLM_BASE_URL|ADMIN_TOKEN)=" > /tmp/lou.env'
+# (first time only) sh -c 'echo "ADMIN_TOKEN=$(openssl rand -hex 32)" >> /tmp/lou.env'
 docker run -d --name louisville-bot --restart unless-stopped -p 8000:8000 \
   -v louisville-data:/data:ro -v louisville-state:/state -v louisville-logs:/logs \
-  -e CEREBRAS_PAID_API_KEY=... -e MODEL=gpt-oss-120b \
-  -e LLM_BASE_URL=https://api.cerebras.ai/v1 -e DATA_DIR=/data -e STATS_DIR=/state -e LOG_DIR=/logs \
-  -e TRUSTED_PROXY_IPS=172.17.0.1 -e ADMIN_TOKEN=... \
+  --env-file /tmp/lou.env \
+  -e DATA_DIR=/data -e STATS_DIR=/state -e LOG_DIR=/logs -e PREBUILT_DB=/state/lou.duckdb \
+  -e TRUSTED_PROXY_IPS=172.17.0.1 \
   --health-cmd "curl -sf --max-time 5 http://localhost:8000/api/health || exit 1" \
   --health-interval 30s --health-start-period 600s --health-retries 3 \
   louisville-bot:new
 docker tag louisville-bot:new louisville-bot:latest
+rm /tmp/lou.env
 # Rollback: docker stop louisville-bot; docker rm louisville-bot; docker rename louisville-bot-prev louisville-bot; docker start louisville-bot
+# 4. Re-warm the starter answers (a prompt change orphans the whole cache). The
+#    host python has no `requests`; run warm_cache.py from the image instead:
+sh -c 'docker run --rm -v /Users/macserver/projects/louisville-open-data:/src -w /src --env-file /tmp/lou.env louisville-bot:new python warm_cache.py --host http://host.docker.internal:8000'
 ```
 
 > `INTER_CALL_PAUSE_SECONDS` (default 0): seconds to idle between the 2-3 LLM
@@ -135,6 +150,13 @@ A deploy is not "done" until it is tested **end-to-end through the production UR
 1. Container reachable: `curl -sf http://localhost:8000/api/health` on the server returns `ok`.
 2. **End-to-end through production:** `curl -i -X POST https://louisville.raylytics.io/<ask-path> -H 'Content-Type: application/json' --data '{"question":""}'` must return **HTTP 200** and `content-type: text/event-stream` (an empty question short-circuits to an SSE error with no LLM call, so it's a free, safe probe). A `403`/`5xx` here means the edge or app is blocking the API, fix before calling the deploy good.
 3. One real question in the browser at https://louisville.raylytics.io/ returns an answer.
+
+`data/contractor_profiles.csv` is the one data file tracked in git (a
+`.gitignore` exception): it is derived (top-200 canonical payees + KY SOS
+enrichment, `graph/build_contractor_profiles.py`), small, public-record, and
+git is the only file transport to the server. After rebuilding it, copy it
+into the data volume: `sh -c 'docker run --rm -v louisville-data:/data -v /Users/macserver/projects/louisville-open-data/data/contractor_profiles.csv:/src.csv:ro alpine cp /src.csv /data/contractor_profiles.csv'`
+then rebuild the prebuilt artifact (3b) and recreate the container.
 
 Persistent state lives in Docker named volumes, not the image: `louisville-data` (CSVs, read-only at `/data`), `louisville-state` (`.stats.json`, response cache), `louisville-logs` (rotating logs). Env (incl. the Cerebras keys) is set on the container, sourced from the gitignored `.env` locally; the keys are not in git.
 

@@ -199,3 +199,43 @@ def test_build_summaries_survives_a_table_key_that_does_not_match_its_sql(
     assert expected_exc in caplog.text, f"warning omits the exception type for {table_key!r}"
     # the SQL still ran, so the real table exists
     assert con.execute("SELECT COUNT(*) FROM summary_actual").fetchone()[0] == 2
+
+
+# ── Date sanity (louisville-open-data-ukl) ───────────────────────────────────
+# The source extract carries invoice dates in years 2102, 2502, 7202. They sort
+# to the newest end of every month series — the position a reader trusts most.
+
+def test_date_sanity_nulls_impossible_dates_and_keeps_the_amount():
+    from data_model import _apply_data_quality
+    con = duckdb.connect()
+    con.execute("""
+        CREATE TABLE expenditures AS SELECT * FROM (VALUES
+            (2024, DATE '2023-09-01', DATE '2023-09-15', 'A', 'inv1', 100.0),
+            (2024, DATE '2502-05-28', DATE '2023-07-10', 'A', 'inv2', 785.66),
+            (2026, DATE '7202-07-14', DATE '2025-09-08', 'B', 'inv3', 1533.42),
+            (2010, DATE '1999-12-31', DATE '2009-08-01', 'B', 'inv4', 5.0),
+            (2026, DATE '2027-06-30', DATE '2026-01-01', 'B', 'inv5', 7.0)
+        ) t(fiscal_year, invoice_date, payment_date, payee, invoice_number, extended_amount)
+    """)
+    cfg = CityConfig({"data_quality": {
+        "table": "expenditures", "amount_column": "extended_amount",
+        "date_sanity": {"columns": ["invoice_date", "payment_date"], "min": "2000-01-01",
+                        "max_years_after_newest": 1},
+    }}, "/nonexistent")
+    _apply_data_quality(con, cfg)
+    rows = con.execute("SELECT invoice_number, invoice_date, extended_amount FROM expenditures ORDER BY invoice_number").fetchall()
+    dates = {r[0]: r[1] for r in rows}
+    assert dates["inv1"] is not None and dates["inv5"] is not None   # in window (newest FY 2026 + 1)
+    assert dates["inv2"] is None and dates["inv3"] is None and dates["inv4"] is None
+    # The amounts are untouched: the row is still real spending.
+    assert float(con.execute("SELECT ROUND(SUM(extended_amount), 2) FROM expenditures").fetchone()[0]) == 2431.08
+    # payment_date was in range everywhere and stays.
+    assert con.execute("SELECT COUNT(*) FROM expenditures WHERE payment_date IS NULL").fetchone()[0] == 0
+
+
+def test_date_sanity_is_off_unless_configured():
+    from data_model import _apply_data_quality
+    con = duckdb.connect()
+    con.execute("CREATE TABLE expenditures AS SELECT 2024 AS fiscal_year, DATE '7202-07-14' AS invoice_date, 1.0 AS extended_amount")
+    _apply_data_quality(con, CityConfig({"data_quality": {"table": "expenditures", "amount_column": "extended_amount"}}, "/x"))
+    assert con.execute("SELECT invoice_date FROM expenditures").fetchone()[0] is not None

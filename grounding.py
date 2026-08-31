@@ -852,8 +852,11 @@ def format_repair_hint(diagnoses: list, cfg=None, instruct: bool = True) -> str:
         if d.get("year_gap"):
             lines.append(
                 f"- {shown} is a real value, but it has no rows in {d['year_col']} = {d['year']}: "
-                f"its rows run {d['year_col']} {d['first']}-{d['last']}. If the question did not "
-                f"name that year, drop the year filter (or use the years it covers)."
+                f"its rows run {d['year_col']} {d['first']}-{d['last']}. The question did NOT ask "
+                f"for {d['year']} — that filter was added by the query, not the reader. REMOVE the "
+                f"{d['year_col']} = {d['year']} predicate and query all years (the data has no "
+                f"other reading of the question; the \"return it unchanged\" exception below does "
+                f"not apply here)."
             )
             continue
         if d.get("narrow"):

@@ -1,5 +1,6 @@
 .env
-data/
+data/*
+!data/contractor_profiles.csv
 __pycache__/
 *.pyc
 *.egg-info/

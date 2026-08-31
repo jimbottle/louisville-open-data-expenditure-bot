@@ -120,8 +120,12 @@ if [ "$health_ok" = 1 ] && [ "$ask_code" = '200' ]; then
             # escalation every 60s forever. Say so, and do nothing else.
             warn_once "WARN: cannot persist '$DEGRADED_COUNT_FILE' - sustained-degradation escalation disabled"
         else
+            # The app names why (>5 errors/hour, or an LLM funding failure —
+            # out of credit / free allowance spent — which takes every live
+            # question down while cached answers keep the site looking fine).
+            reason=$(printf '%s' "$health" | sed -n 's/.*"degraded_reason":"\([^"]*\)".*/\1/p' | cut -c1-160)
             if [ "$degraded_cycles" -eq 1 ]; then
-                log 'app reports status=degraded (>5 upstream errors in the last hour) - still serving, not paging'
+                log "app reports status=degraded (${reason:-no reason given}) - still serving, not paging"
             fi
             if [ "$degraded_cycles" -eq "$DEGRADED_ALERT_AFTER" ]; then
                 log "app has reported degraded for $degraded_cycles consecutive probes - sending low-priority notice"
@@ -129,7 +133,7 @@ if [ "$health_ok" = 1 ] && [ "$ask_code" = '200' ]; then
                     -H 'Title: louisville-bot degraded' \
                     -H 'Priority: default' \
                     -H 'Tags: warning' \
-                    -d "The site is serving, but /api/health has reported degraded for $degraded_cycles minutes straight. Live queries may all be failing (check MODEL against the provider's current model list)." \
+                    -d "The site is serving, but /api/health has reported degraded for $degraded_cycles minutes straight: ${reason:-no reason given}. Live queries may all be failing (out of LLM credit? MODEL retired at the provider?)." \
                     "https://ntfy.sh/$NTFY_TOPIC" >/dev/null 2>&1
             fi
         fi

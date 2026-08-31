@@ -1,0 +1,120 @@
+{
+ "label": "openrouter-nemotron-subset",
+ "model": "nvidia/nemotron-3-super-120b-a12b:free",
+ "provider": "openrouter",
+ "when": "2026-08-30T20:39:59",
+ "cases": 6,
+ "sql_pass": 5,
+ "answer_pass": 5,
+ "both_pass": 5,
+ "repairs": 1,
+ "repair_tries": 2,
+ "mean_seconds": 28.6,
+ "total_seconds": 173.0,
+ "results": [
+  {
+   "id": "fire-vehicles-fy2024",
+   "tags": [
+    "vocabulary"
+   ],
+   "question": "How much did the Louisville Fire department spend on vehicles in fiscal year 2024?",
+   "sql_ok": true,
+   "sql_note": "1,581,197.96 \u2248 1,581,197.96",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 26.2,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spent_on_vehicles\nFROM expenditures\nWHERE agency_canonical = 'Louisville Fire'\n  AND fiscal_year = 2024\n  AND spend_category IS NOT NULL\n  AND (spend_category ILIKE '%fleet%' OR spend_category ILIKE '%automotive%' OR spend_category ILIKE '%auto%' OR spend_category ILIKE '%vehicle%' OR spend_category ILIKE '%truck%');",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spent_on_vehicles\nFROM expenditures\nWHERE agency_canonical = 'Louisville Fire'\n  AND fiscal_year = 2024\n  AND spend_category IS NOT NULL\n  AND (spend_category ILIKE '%fleet%' OR spend_category ILIKE '%automotive%' OR spend_category ILIKE '%auto%' OR spend_category ILIKE '%vehicle%' OR spend_category ILIKE '%truck%');",
+   "answer": "The Louisville Fire department spent $1,581,197.96 on vehicles in fiscal year 2024."
+  },
+  {
+   "id": "arp-total",
+   "tags": [
+    "vocabulary",
+    "year"
+   ],
+   "question": "How much has Louisville spent from the American Rescue Plan?",
+   "sql_ok": false,
+   "sql_note": "served query returned nothing",
+   "answer_ok": false,
+   "answer_note": "does not state 37,636,175.82",
+   "seconds": 29.4,
+   "repair_tried": true,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spent_arp_fy2025\nFROM expenditures\nWHERE fund = 'ARP'\n  AND fiscal_year = 2025;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spent_arp_fy2025\nFROM expenditures\nWHERE fund = 'ARP'\n  AND fiscal_year = 2025;",
+   "answer": "The query filtered for fund\u202f=\u202f'ARP' and fiscal_year\u202f=\u202f2025, but the expenditure data only contains ARP\u2011funded rows for fiscal year\u202f2022. Since no rows match both conditions, the sum returns nothing.\n\nTo get a result, you could ask:\n- How much has Louisville spent from the American Rescue Plan overall?\n- How much has Louisville spent from the American Rescue Plan in fiscal year\u202f2022?"
+  },
+  {
+   "id": "cares-total",
+   "tags": [
+    "vocabulary",
+    "year"
+   ],
+   "question": "How much CARES Act coronavirus relief money did the city spend?",
+   "sql_ok": true,
+   "sql_note": "139,614,685.03 \u2248 139,614,685.03",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 61.8,
+   "repair_tried": true,
+   "repaired": true,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_cares_spend\nFROM expenditures\nWHERE fund ILIKE '%cares%'\n  AND is_data_artifact = FALSE;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_cares_spend_fy2025\nFROM expenditures\nWHERE fiscal_year = 2025\n  AND fund ILIKE '%cares%'\n  AND is_data_artifact =",
+   "answer": "The city spent $139,614,685.03 in CARES Act coronavirus relief money. This total reflects all expenditure records tagged as CARES Act funding in the city\u2019s financial system, with any test or duplicate rows removed. FY2026 expenditure data is incomplete, having been loaded only through March\u202f16,\u202f2026. [R-011-21] authorized the mayor to accept $5,430,961 of CARES Act funding through the U.S. Department of Housing and Urban Development for the Emergency Solutions Grant Program."
+  },
+  {
+   "id": "mayor-and-chief-pay",
+   "tags": [
+    "entity"
+   ],
+   "question": "How much does the mayor make? What about the police chief?",
+   "sql_ok": true,
+   "sql_note": "all present",
+   "answer_ok": true,
+   "answer_note": "ok",
+   "seconds": 38.4,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT Employee_Name, jobTitle, YTD_Total AS total_compensation\nFROM salary_data\nWHERE CalYear = 2025\n  AND jobTitle IN ('Mayor', 'Police Chief')\n  AND YTD_Total IS NOT NULL\nORDER BY YTD_Total DESC;",
+   "first_sql": "SELECT Employee_Name, jobTitle, YTD_Total AS total_compensation\nFROM salary_data\nWHERE CalYear = 2025\n  AND jobTitle IN ('Mayor', 'Police Chief')\n  AND YTD_Total IS NOT NULL\nORDER BY YTD_Total DESC;",
+   "answer": "Mayor Craig Greenberg earned $158,115.58 and Police Chief Paul Louis Humphrey earned $267,811.04 in total compensation for calendar year 2025."
+  },
+  {
+   "id": "honest-empty-fy2031",
+   "tags": [
+    "guard"
+   ],
+   "question": "How much did Louisville Fire spend in fiscal year 2031?",
+   "sql_ok": true,
+   "sql_note": "empty as expected",
+   "answer_ok": true,
+   "answer_note": "no fabricated figure",
+   "seconds": 12.7,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE agency_canonical = 'Louisville Fire'\n  AND fiscal_year = 2031;",
+   "first_sql": "SELECT ROUND(SUM(extended_amount), 2) AS total_spend\nFROM expenditures\nWHERE agency_canonical = 'Louisville Fire'\n  AND fiscal_year = 2031;",
+   "answer": "The expenditure data only covers fiscal years 2008 through 2026, with FY2026 being partial. Fiscal year 2031 is outside this range, so there are no records for Louisville Fire in that year, resulting in no rows returned.\n\nSuggested rephrased questions:\n- How much did Louisville Fire spend in fiscal year 2025?\n- What is Louisville Fire\u2019s total spending across all available fiscal years?"
+  },
+  {
+   "id": "off-topic",
+   "tags": [
+    "guard"
+   ],
+   "question": "Tell me a joke about cats.",
+   "sql_ok": true,
+   "sql_note": "no SQL executed",
+   "answer_ok": true,
+   "answer_note": "no fabricated figure",
+   "seconds": 2.9,
+   "repair_tried": false,
+   "repaired": false,
+   "served_sql": null,
+   "first_sql": null,
+   "answer": "This question doesn't appear to be answerable from the Louisville Metro expenditure data. Try asking about government spending, agency budgets, contractor payments, employee salaries, or capital projects."
+  }
+ ]
+}

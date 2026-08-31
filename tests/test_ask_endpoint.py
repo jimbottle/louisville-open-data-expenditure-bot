@@ -589,3 +589,24 @@ def test_documents_sharing_no_content_word_with_the_question_are_dropped(client)
     assert kept
     # A question with no content words keeps everything (nothing to judge by).
     assert app._on_topic_hits("Which agencies spend the most?", hits) == hits
+
+
+# ── Funding failures page the operator (louisville-open-data-8uk) ────────────
+
+def test_a_quota_error_makes_health_degraded_with_a_reason(client, monkeypatch):
+    """Out of credit used to leave /api/health "ok" (cached starters still
+    stream) while every live question failed — invisible to the dead-man's
+    switch. Now any funding failure in the last hour is a named degradation,
+    which the heartbeat escalates."""
+    import app
+    monkeypatch.setitem(app.persistent_stats["errors"], "last_quota_error_time", None)
+    monkeypatch.setitem(app.persistent_stats["errors"], "errors_last_hour", [])
+    assert client.get("/api/health").json()["status"] == "ok"
+    app.track_error("quota", "Error code: 402 - payment_required")
+    h = client.get("/api/health").json()
+    assert h["status"] == "degraded"
+    assert "funding" in h["degraded_reason"] and "402" in h["degraded_reason"]
+    assert h["errors"]["quota_errors"] >= 1
+    # An hour later it clears by itself (the operator has been paged by then).
+    app.persistent_stats["errors"]["last_quota_error_time"] -= app.QUOTA_DEGRADE_SECONDS + 1
+    assert client.get("/api/health").json()["status"] == "ok"

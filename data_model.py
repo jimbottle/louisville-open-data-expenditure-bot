@@ -246,6 +246,35 @@ def _apply_data_quality(con, cfg: CityConfig) -> None:
             );
         """)
 
+    # Impossible dates. The source extract carries invoice_date typos (years
+    # 2102, 2502, 7202) that sort to the newest end of every month series —
+    # the position a reader trusts most. A date outside the pack's window is
+    # nulled: the row keeps its amount for totals, it just no longer claims
+    # a date. Bounds: `min` (a literal date) and `max_years_after_newest`
+    # (years beyond the newest fiscal year present, default 1).
+    ds = dq.get("date_sanity")
+    if ds:
+        year_col = ds.get("year_column", "fiscal_year")
+        newest = con.execute(f"SELECT MAX({year_col}) FROM {table}").fetchone()[0]
+        years_after = int(ds.get("max_years_after_newest", 1))
+        max_date = f"{int(newest) + years_after}-12-31" if newest is not None else None
+        min_date = ds.get("min")
+        for col in ds.get("columns", []):
+            q = _ident_quote(col)
+            conds = []
+            if min_date:
+                conds.append(f"{q} < DATE '{min_date}'")
+            if max_date:
+                conds.append(f"{q} > DATE '{max_date}'")
+            if not conds:
+                continue
+            where = " OR ".join(conds)
+            n = con.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0]
+            if n:
+                con.execute(f"UPDATE {table} SET {q} = NULL WHERE {where}")
+                print(f"Date sanity: nulled {n:,} impossible {col} value(s) outside "
+                      f"{min_date or '-inf'}..{max_date or '+inf'}")
+
     offset_count = con.execute(f"SELECT COUNT(*) FROM {table} WHERE is_offsetting").fetchone()[0] if off else 0
     artifact_count = con.execute(f"SELECT COUNT(*) FROM {table} WHERE is_data_artifact").fetchone()[0] if art else 0
     print(f"Data quality: {offset_count} offsetting rows flagged, {artifact_count} data artifacts flagged")
