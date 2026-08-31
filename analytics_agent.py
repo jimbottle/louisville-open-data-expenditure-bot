@@ -109,6 +109,13 @@ class EmptyCompletionError(RuntimeError):
     """
 
 
+# The wordings OpenAI-compatible providers use for a prompt that overflows the
+# model's window (code context_length_exceeded, "maximum context length is …",
+# "context window", "too many tokens").
+_CONTEXT_OVERFLOW = re.compile(
+    r"context[_ ]?(?:window|length)|maximum context|too many tokens", re.I)
+
+
 def _is_auth_error(e: Exception) -> bool:
     """A bad or revoked key: not transient — every later call fails the same
     way until a human fixes the key, so it earns the primary-unusable latch
@@ -189,11 +196,15 @@ def is_provider_error(e: Exception) -> bool:
         return False
     if isinstance(e, (openai.BadRequestError, openai.ConflictError,
                       openai.UnprocessableEntityError)):
-        # 400/409/422 are OUR request being wrong (a malformed payload, an
-        # over-long prompt), not the provider being down. The same request
-        # would fail the same way on the fallback, so crossing over just
-        # burns a paid call and logs a "provider error" for a local bug.
-        return False
+        # 400/409/422 are OUR request being wrong (a malformed payload), not
+        # the provider being down: the same request fails the same way on the
+        # fallback, so crossing over burns a paid call and logs a "provider
+        # error" for a local bug. ONE exception: a context-length overflow is
+        # about the MODEL's window, and primary and fallback are different
+        # models — the same request can fit the fallback's window, so that
+        # 400 is allowed to cross.
+        return bool(isinstance(e, openai.BadRequestError)
+                    and _CONTEXT_OVERFLOW.search(str(e)))
     if isinstance(e, openai.NotFoundError):
         # Only a genuine model_not_found belongs to the resolution path. An
         # upstream 404 ("Provider returned error", code 404, seen live

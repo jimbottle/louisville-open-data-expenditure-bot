@@ -437,7 +437,7 @@ def test_bad_primary_key_fails_over_and_latches_the_primary():
 
 
 @pytest.mark.parametrize("make_err", [
-    lambda req, resp: openai.BadRequestError("context length exceeded", response=resp, body=None),
+    lambda req, resp: openai.BadRequestError("invalid request: messages[1].content is required", response=resp, body=None),
     lambda req, resp: openai.ConflictError("conflict", response=resp, body=None),
     lambda req, resp: openai.UnprocessableEntityError("unprocessable", response=resp, body=None),
 ])
@@ -551,3 +551,19 @@ def test_upstream_404_that_is_not_model_not_found_fails_over():
         response=resp, body={"error": {"message": "Provider returned error", "code": 404}})
     assert aa.is_provider_error(err)
     assert aa._call_with_retry(lambda: (_ for _ in ()).throw(err), fallback_fn=lambda: "saved") == "saved"
+
+
+@pytest.mark.parametrize("msg", [
+    "Error code: 400 - {'error': {'message': 'This model\'s maximum context length is 131072 tokens', 'code': 'context_length_exceeded'}}",
+    "prompt exceeds the context window of the model",
+    "too many tokens: 140000 > 131072",
+])
+def test_context_overflow_400_still_crosses_to_the_fallback(msg):
+    """A context overflow is about the MODEL's window, and the fallback is a
+    DIFFERENT model — the request can fit there. Excluding all 400s from
+    crossover regressed exactly this case (roborev 4413)."""
+    req = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    err = openai.BadRequestError(msg, response=req and httpx.Response(400, request=req), body=None)
+    assert aa.is_provider_error(err)
+    assert aa._call_with_retry(lambda: (_ for _ in ()).throw(err), fallback_fn=lambda: "fits") == "fits"
+    assert not aa._primary_is_unusable()   # per-request shape, never latched
