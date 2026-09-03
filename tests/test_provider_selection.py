@@ -576,3 +576,119 @@ def test_the_cooldown_never_skips_the_only_route_to_an_answer(monkeypatch):
     # than hard-failing for the rest of the cooldown window.
     assert aa._call_with_model_fallback(mk, "client", "deprecated-model") == "answer from a-live-model"
     assert len(attempts) == 2
+
+
+# ── Swapped calls: the refine pass runs the paid provider first ──────────────
+# (REFINE_PREFER_PAID in app.py). Everything module-wide — the deprecation pin,
+# the unusable latch, the tier display — describes the DEFAULT primary
+# (OpenRouter), so a call whose providers arrive in reverse order must neither
+# consult that state nor write it.
+
+
+def _quota_402():
+    import httpx
+    return openai.APIStatusError(
+        "402 payment_required",
+        response=httpx.Response(402, request=httpx.Request("POST", "https://api.test/v1")),
+        body={"code": "payment_required"},
+    )
+
+
+def test_swapped_call_runs_the_paid_client_first(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    def mk(client, model):
+        return lambda: f"ok:{client}:{model}"
+
+    out = aa._call_with_model_fallback(
+        mk, "cerebras", "gpt-oss-120b",
+        fallback_client="openrouter", fallback_model="vendor/model:free", swapped=True)
+    assert out == "ok:cerebras:gpt-oss-120b"
+    assert aa.get_last_tier_used() == "paid"
+
+
+def test_swapped_call_crosses_to_the_free_primary_on_402_without_latching(monkeypatch):
+    """When the Cerebras key runs dry, the swap undoes itself per-call — and a
+    spent Cerebras key must not latch out the OpenRouter primary that every
+    OTHER call still depends on."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    def mk(client, model):
+        def _call():
+            if client == "cerebras":
+                raise _quota_402()
+            return f"ok:{client}:{model}"
+        return _call
+
+    out = aa._call_with_model_fallback(
+        mk, "cerebras", "gpt-oss-120b",
+        fallback_client="openrouter", fallback_model="vendor/model:free", swapped=True)
+    assert out == "ok:openrouter:vendor/model:free"
+    assert not aa._primary_is_unusable()
+    assert aa.get_last_tier_used() == "openrouter"
+
+
+def test_swapped_call_ignores_the_default_primarys_model_pin(monkeypatch):
+    """An engaged OpenRouter deprecation switch pins _active_model to an
+    OpenRouter slug; a swapped call must still send Cerebras ITS model."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setattr(aa, "_active_model", "vendor/replacement:free")
+    sent = []
+
+    def mk(client, model):
+        def _call():
+            sent.append((client, model))
+            return "ok"
+        return _call
+
+    aa._call_with_model_fallback(
+        mk, "cerebras", "gpt-oss-120b",
+        fallback_client="openrouter", fallback_model="vendor/model:free", swapped=True)
+    assert sent[0] == ("cerebras", "gpt-oss-120b")
+
+
+def test_swapped_call_ignores_a_latched_default_primary(monkeypatch):
+    """The latch means 'OpenRouter is unusable'. A swapped call reading it
+    would skip its healthy Cerebras primary and go STRAIGHT to the provider
+    the latch says is dead."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    aa._mark_primary_unusable()
+    sent = []
+
+    def mk(client, model):
+        def _call():
+            sent.append((client, model))
+            return "ok"
+        return _call
+
+    aa._call_with_model_fallback(
+        mk, "cerebras", "gpt-oss-120b",
+        fallback_client="openrouter", fallback_model="vendor/model:free", swapped=True)
+    assert sent == [("cerebras", "gpt-oss-120b")]
+    assert aa._primary_is_unusable(), "and it must not clear the latch either"
+
+
+def test_swapped_call_model_not_found_uses_the_free_primary_without_pinning(monkeypatch):
+    """A Cerebras model deprecation on the swapped call: serve via the free
+    primary directly — the resolver's preference list and the _active_model pin
+    are both keyed to the DEFAULT primary's catalogue and must stay untouched."""
+    import httpx
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    nf = openai.NotFoundError(
+        "model gpt-oss-120b does not exist. model_not_found",
+        response=httpx.Response(404, request=httpx.Request("POST", "https://api.test/v1")),
+        body={"code": "model_not_found"})
+
+    def mk(client, model):
+        def _call():
+            if client == "cerebras":
+                raise nf
+            return f"ok:{client}:{model}"
+        return _call
+
+    out = aa._call_with_model_fallback(
+        mk, "cerebras", "gpt-oss-120b",
+        fallback_client="openrouter", fallback_model="vendor/model:free", swapped=True)
+    assert out == "ok:openrouter:vendor/model:free"
+    assert aa._active_model is None
+    assert not aa._primary_is_unusable()

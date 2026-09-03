@@ -129,7 +129,8 @@ sh -c 'docker run --rm -v /Users/macserver/projects/louisville-open-data:/src -w
 > chunk for this long and fail over; 0 disables). The stall guard exists
 > because OpenRouter's overloaded nemotron upstream kept streams OPEN while
 > dribbling tokens (2026-08-31): nothing errored, the 90s cap truncated the
-> answer, and the funded Cerebras fallback sat idle.
+> answer, and the funded Cerebras fallback sat idle. `REFINE_PREFER_PAID`
+> (default 1): run the refine pass Cerebras-first — see the Providers section.
 
 > ⚠️ **Set `TRUSTED_PROXY_IPS`** to the Docker bridge gateway (the peer the
 > cloudflared tunnel reaches the container from). It is unset by default and the
@@ -191,6 +192,18 @@ threaded alongside `fallback_client` through every LLM call. Drop
 The fallback engages on a 429 (after the retry ladder) and immediately on a 402;
 a 402 with no working fallback shows the user `QUOTA_MSG` ("out of credit"),
 never "try rewording your question".
+
+**Exception: the REFINE pass runs Cerebras-first** (`REFINE_PREFER_PAID`,
+default on, 2026-09-03). The refine streams the longest output of the 2-3
+calls per question, and OpenRouter's free pool dribbles tokens — it was 78.3s
+of a 107s production answer, ~73% of the wall clock — so this one call runs on
+the paid Cerebras client with the free primary as *its* fallback. The swap is
+per-call and self-undoing: when the Cerebras key runs out of credit, each
+refine crosses back to the free primary on a fast 402 without latching the
+shared primary state (the latch/model-pin machinery describes OpenRouter and
+is bypassed for swapped calls — `swapped=` in `_call_with_model_fallback`).
+If running dry becomes the permanent state, set `REFINE_PREFER_PAID=0` on the
+container (no rebuild) to stop paying a doomed 402 round-trip per question.
 
 **Picking the OpenRouter model.** Free slugs churn weekly, and the free roster is
 uneven. Benchmarked 2026-08-18 against the real NL→SQL task (3 questions,

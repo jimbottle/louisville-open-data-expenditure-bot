@@ -125,6 +125,15 @@ INTER_CALL_PAUSE = float(os.environ.get("INTER_CALL_PAUSE_SECONDS", "0") or 0)
 # Ceiling on each streamed LLM pass (draft, refine). Tunable for the same
 # reason as the retry ladder: billed idle on a hung stream.
 STREAM_TIMEOUT_SECONDS = float(os.environ.get("STREAM_TIMEOUT_SECONDS", "90") or 90)
+# Run the REFINE pass on the paid (Cerebras) client first, with the free
+# primary behind it — the reverse of every other call. The refine streams the
+# longest output of the 2-3 calls per question, and OpenRouter's free pool
+# dribbles tokens (78s of a 107s answer, observed 2026-09-03), so this one
+# call buys the most latency per paid token. When the Cerebras key runs dry
+# each refine still crosses back to the free primary on its own (a fast 402,
+# no latch); set REFINE_PREFER_PAID=0 to stop paying that per-question 402
+# once running dry is the permanent state.
+REFINE_PREFER_PAID = (os.environ.get("REFINE_PREFER_PAID", "1") or "0").lower() not in ("0", "false", "no")
 
 
 def _pace():
@@ -1581,10 +1590,17 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
             yield send("debug", {"content": f"Draft interpretation in {t_draft:.1f}s | ~{interp_tokens} chunks"})
             _pace()
             refine_counter = {"n": 0}
+            # Provider order is flipped for this one call when a paid client
+            # exists (see REFINE_PREFER_PAID above); everything else stays
+            # free-first.
+            if REFINE_PREFER_PAID and paid_client is not None:
+                r_client, r_model, r_fb, r_fb_model, r_swapped = paid_client, FALLBACK_MODEL, client, MODEL, True
+            else:
+                r_client, r_model, r_fb, r_fb_model, r_swapped = client, MODEL, paid_client, FALLBACK_MODEL, False
             yield from refine_events_with_fallback(
                 refine_interpretation_stream(
-                    client, MODEL, question, sql, result_str, draft, on_retry=on_retry, fallback_client=paid_client, fallback_model=FALLBACK_MODEL,
-                    extra_facts=CITY_FACTS, documents=documents,
+                    r_client, r_model, question, sql, result_str, draft, on_retry=on_retry, fallback_client=r_fb, fallback_model=r_fb_model,
+                    swapped=r_swapped, extra_facts=CITY_FACTS, documents=documents,
                 ),
                 draft,
                 send,

@@ -653,3 +653,64 @@ def test_draft_failure_with_no_fallback_still_degrades_honestly(client, monkeypa
     text = "".join(e.get("content", "") for e in events if e["type"] == "interpretation")
     assert "trouble summarizing" in text
     assert _types(events)[-1] == "done"
+
+
+# ── Refine provider order (REFINE_PREFER_PAID) ───────────────────────────────
+
+def _recording_refine(seen):
+    def _stream(r_client, model, question, sql, results, draft, **kw):
+        seen["client"] = r_client
+        seen["model"] = model
+        seen["kw"] = kw
+        yield "refined"
+    return _stream
+
+
+def test_refine_pass_prefers_the_paid_client_when_enabled(client, monkeypatch):
+    """The flip is scoped to the refine call: it gets the paid client first with
+    the free primary as ITS fallback, marked swapped so the shared primary
+    latch/pin machinery stays out of it. SQL generation and the draft are
+    untouched by design (asserted via the fakes' independence here)."""
+    import app
+    seen = {}
+    sentinel = object()
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("draft."))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _recording_refine(seen))
+    monkeypatch.setattr(app, "paid_client", sentinel)
+    monkeypatch.setattr(app, "REFINE_PREFER_PAID", True)
+
+    resp = _post(client, "who got paid the most for paving?")
+    assert resp.status_code == 200
+    assert seen["client"] is sentinel
+    assert seen["model"] == app.FALLBACK_MODEL
+    assert seen["kw"]["fallback_client"] is app.client
+    assert seen["kw"]["fallback_model"] == app.MODEL
+    assert seen["kw"]["swapped"] is True
+
+
+def test_refine_pass_keeps_free_first_when_disabled_or_unpaid(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("draft."))
+
+    # Toggle off: the normal order.
+    seen = {}
+    monkeypatch.setattr(app, "refine_interpretation_stream", _recording_refine(seen))
+    monkeypatch.setattr(app, "paid_client", object())
+    monkeypatch.setattr(app, "REFINE_PREFER_PAID", False)
+    assert _post(client, "toggle off refine order?").status_code == 200
+    assert seen["client"] is app.client
+    assert seen["kw"]["swapped"] is False
+
+    # No paid client to prefer: the flag alone must not swap.
+    seen2 = {}
+    monkeypatch.setattr(app, "refine_interpretation_stream", _recording_refine(seen2))
+    monkeypatch.setattr(app, "paid_client", None)
+    monkeypatch.setattr(app, "REFINE_PREFER_PAID", True)
+    app.response_cache.clear()
+    app.ip_requests.clear()
+    assert _post(client, "no paid client refine order?").status_code == 200
+    assert seen2["client"] is app.client
+    assert seen2["kw"]["fallback_client"] is None
+    assert seen2["kw"]["swapped"] is False

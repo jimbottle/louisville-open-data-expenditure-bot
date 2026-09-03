@@ -220,7 +220,8 @@ def is_provider_error(e: Exception) -> bool:
     return isinstance(e, openai.APIError)
 
 
-def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
+def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None,
+                     use_latch=True, tiers=None):
     """Run an LLM call, falling over to the fallback provider when the primary can't serve.
 
     One classification point, deliberately: an earlier version special-cased the
@@ -239,16 +240,29 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
     provenance: optional dict, filled with {"used_fallback": bool}. Per call, so
     a caller can tell who served IT — SSE requests run on threadpool threads, and
     a module global would let a concurrent call answer that question wrongly.
+
+    use_latch: whether this call may read and write the module-wide
+    primary-unusable latch. False when the caller has swapped the providers for
+    this one call (see _call_with_model_fallback's `swapped`): the latch
+    describes the DEFAULT primary, which is this call's fallback — honoring it
+    would route around the wrong provider, and writing it would latch out a
+    provider that never failed.
+
+    tiers: (primary_name, fallback_name) recorded in the tier display when the
+    respective side serves. Defaults to the process-wide arrangement.
     """
     global _last_tier_used
 
     def _served(via_fallback):
         global _last_tier_used
-        _last_tier_used = "paid" if via_fallback else get_primary_tier()
+        if tiers is not None:
+            _last_tier_used = tiers[1] if via_fallback else tiers[0]
+        else:
+            _last_tier_used = "paid" if via_fallback else get_primary_tier()
         if provenance is not None:
             provenance["used_fallback"] = via_fallback
 
-    if fallback_fn and _primary_is_unusable():
+    if fallback_fn and use_latch and _primary_is_unusable():
         try:
             result = fallback_fn()
             _served(True)
@@ -290,7 +304,7 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None):
                 try:
                     result = fallback_fn()
                     _served(True)
-                    if exhausted or _is_auth_error(e):
+                    if use_latch and (exhausted or _is_auth_error(e)):
                         # Credit/allowance exhaustion and dead keys: durable
                         # states where every unlatched call would pay a doomed
                         # primary round-trip first. Latching on an ordinary 429
@@ -522,7 +536,7 @@ def _record_model_fallback(from_model: str, to_model: str) -> None:
 
 
 def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_client=None,
-                              fallback_model=None):
+                              fallback_model=None, swapped=False):
     """Run an LLM call, surviving provider model deprecation.
 
     make_call(client, model) must return a zero-arg callable. On a
@@ -535,8 +549,33 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
     pins the fallback across a deprecation switch, because the replacement is
     resolved from the PRIMARY provider's catalogue. Left unset, both clients
     share one catalogue and the fallback follows the replacement as before.
+
+    swapped: True when the caller passed the providers in the REVERSE of the
+    process-wide order — the paid fallback provider as this call's primary
+    (the refine pass does this: it streams the longest output and the free
+    pool dribbles tokens). All module-wide state describes the DEFAULT
+    primary, so this call must not touch it: the deprecation pin
+    (get_active_model / _record_model_fallback) holds the other provider's
+    slug, the unusable latch would skip or latch the wrong provider, and the
+    tier display would name the wrong side. On a model_not_found the swapped
+    call goes straight to its fallback (the default primary) instead of
+    resolving a replacement — the resolver's preference list is keyed to the
+    default primary's catalogue.
     """
     global _last_tier_used
+    if swapped:
+        fb_model = fallback_model or model
+        fallback_fn = make_call(fallback_client, fb_model) if fallback_client else None
+        tiers = ("paid", get_primary_tier())
+        try:
+            return _call_with_retry(make_call(client, model), on_retry=on_retry,
+                                    fallback_fn=fallback_fn, use_latch=False, tiers=tiers)
+        except openai.NotFoundError as e:
+            if not _is_model_not_found(e) or not fallback_fn:
+                raise
+            log.warning("Swapped-call model '%s' not found at its provider; using the default primary", model)
+            return _call_with_retry(fallback_fn, on_retry=on_retry, use_latch=False,
+                                    tiers=(get_primary_tier(), "paid"))
     model = get_active_model(model)
     fb_model = fallback_model or model
     fallback_fn = make_call(fallback_client, fb_model) if fallback_client else None
@@ -936,7 +975,7 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
     Return ONLY the rewritten answer, nothing else.""")
 
 
-def refine_interpretation_stream(client, model, question, sql, results, draft, on_retry=None, fallback_client=None, extra_facts=None, documents="", fallback_model=None):
+def refine_interpretation_stream(client, model, question, sql, results, draft, on_retry=None, fallback_client=None, extra_facts=None, documents="", fallback_model=None, swapped=False):
     """Stream a refined (plain-language, consistency- and accuracy-checked)
     rewrite of a draft interpretation.
 
@@ -952,6 +991,8 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
     refiner deletes every citation, because its own rule is that anything the
     results table doesn't support must go — and a file number never appears in
     a results table.
+    swapped: the caller passed the providers in reverse order (paid provider
+    first) — see _call_with_model_fallback.
     """
     system_prompt = REFINE_SYSTEM_PROMPT
     if extra_facts:
@@ -976,7 +1017,7 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
                 stream=True,
             )
         return _call
-    stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model)
+    stream = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry, fallback_client=fallback_client, fallback_model=fallback_model, swapped=swapped)
     for chunk in _iter_with_stall_guard(stream):
         if chunk.choices and chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
