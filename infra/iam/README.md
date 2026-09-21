@@ -161,6 +161,9 @@ aws iam create-policy \
 The user comes **before** the role: the role's trust policy names
 `user/lou-dev` as its principal, and IAM rejects a trust policy whose principal
 does not exist yet (`MalformedPolicyDocument: Invalid principal in policy`).
+The same error can appear for a few seconds *after* the user is created — IAM is
+eventually consistent — so if step 4 fails with it immediately after step 3,
+wait ten seconds and retry.
 
 ```bash
 aws iam create-user --user-name lou-dev --tags Key=Project,Value=lou
