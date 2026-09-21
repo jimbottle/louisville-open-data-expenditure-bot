@@ -9,8 +9,8 @@ export AWS_PAGER=""
 P=(--profile lou --region us-east-1)
 ACCT=012146975534
 NAME=lou-sse-spike
-OUT=$(dirname "$0")/.deploy-state.json
 cd "$(dirname "$0")"
+OUT=$PWD/.deploy-state.json
 getstate() { python3 -c "import json,sys; print(json.load(open('$OUT')).get('$1',''))"; }
 state() { python3 - "$OUT" "$1" "$2" <<'PY'
 import json, sys
@@ -33,8 +33,13 @@ echo "   $OAC_ID"
 echo "== 2. Function URL -> AuthType AWS_IAM; allow only this distribution to invoke it"
 aws lambda update-function-url-config "${P[@]}" --function-name "$NAME" --auth-type AWS_IAM --invoke-mode RESPONSE_STREAM --query AuthType --output text
 aws lambda remove-permission "${P[@]}" --function-name "$NAME" --statement-id public-url 2>/dev/null || true
+aws lambda remove-permission "${P[@]}" --function-name "$NAME" --statement-id public-url-invoke 2>/dev/null || true
+# Both grants again (see deploy.sh), now scoped to the CloudFront service principal + this distribution.
 aws lambda add-permission "${P[@]}" --function-name "$NAME" --statement-id cloudfront-oac \
   --action lambda:InvokeFunctionUrl --principal cloudfront.amazonaws.com \
+  --source-arn "arn:aws:cloudfront::$ACCT:distribution/$DIST_ID" >/dev/null 2>&1 || echo "   (permission already present)"
+aws lambda add-permission "${P[@]}" --function-name "$NAME" --statement-id cloudfront-oac-invoke \
+  --action lambda:InvokeFunction --principal cloudfront.amazonaws.com --invoked-via-function-url \
   --source-arn "arn:aws:cloudfront::$ACCT:distribution/$DIST_ID" >/dev/null 2>&1 || echo "   (permission already present)"
 
 echo "== 3. attach the OAC to the origin"

@@ -8,8 +8,8 @@ P=(--profile lou --region us-east-1)
 ACCT=012146975534
 NAME=lou-sse-spike
 ROLE_NAME=$NAME-exec
-OUT=$(dirname "$0")/.deploy-state.json
 cd "$(dirname "$0")"
+OUT=$PWD/.deploy-state.json
 getstate() { python3 -c "import json,sys; print(json.load(open('$OUT')).get('$1',''))" 2>/dev/null || true; }
 
 echo "== caller: $(aws sts get-caller-identity "${P[@]}" --query Arn --output text)"
@@ -49,4 +49,5 @@ aws logs delete-log-group "${P[@]}" --log-group-name "/aws/lambda/$NAME" 2>/dev/
 rm -f "$OUT"
 echo "== done. Remaining lou-* resources:"
 aws lambda list-functions "${P[@]}" --query "Functions[?starts_with(FunctionName,'lou-')].FunctionName" --output text
-aws ecr describe-repositories "${P[@]}" --query "repositories[?starts_with(repositoryName,'lou-')].repositoryName" --output text
+# (ecr:* is scoped to lou-* repos, so an unnamed DescribeRepositories is denied; name it)
+aws ecr describe-repositories "${P[@]}" --repository-names "$NAME" --query 'repositories[].repositoryName' --output text 2>/dev/null || echo "   (repo $NAME gone)"

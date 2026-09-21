@@ -24,8 +24,8 @@ ROLE_NAME=$NAME-exec
 ROLE_ARN="arn:aws:iam::$ACCT:role/lou/$ROLE_NAME"
 REPO="$ACCT.dkr.ecr.$REGION.amazonaws.com/$NAME"
 TAG=${TAG:-$(git rev-parse --short HEAD 2>/dev/null || date +%s)}
-OUT=$(dirname "$0")/.deploy-state.json   # gitignored; records the ids for teardown + measurement
 cd "$(dirname "$0")"
+OUT=$PWD/.deploy-state.json   # gitignored; records the ids for teardown + measurement
 
 state() { python3 - "$OUT" "$1" "$2" <<'PY'
 import json, sys, os
@@ -91,9 +91,15 @@ if run 3; then
   if ! aws lambda get-function-url-config "${P[@]}" --function-name "$NAME" >/dev/null 2>&1; then
     aws lambda create-function-url-config "${P[@]}" --function-name "$NAME" \
       --auth-type NONE --invoke-mode RESPONSE_STREAM --query FunctionUrl --output text
+    # Since Oct 2025 a Function URL needs BOTH grants: InvokeFunctionUrl (URL
+    # auth) and InvokeFunction restricted to via-URL calls. Only the first ->
+    # 403 AccessDeniedException on every request (found the hard way, 2026-09-21).
     aws lambda add-permission "${P[@]}" --function-name "$NAME" \
       --statement-id public-url --action lambda:InvokeFunctionUrl \
       --principal '*' --function-url-auth-type NONE >/dev/null
+    aws lambda add-permission "${P[@]}" --function-name "$NAME" \
+      --statement-id public-url-invoke --action lambda:InvokeFunction \
+      --principal '*' --invoked-via-function-url >/dev/null
   fi
   FURL=$(aws lambda get-function-url-config "${P[@]}" --function-name "$NAME" --query FunctionUrl --output text)
   state function_url "$FURL"
