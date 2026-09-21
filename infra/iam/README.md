@@ -93,7 +93,13 @@ roles outside the `/lou/` path). This is a one-time human action.
 ```bash
 aws sts get-caller-identity          # confirm you are the admin, not airflow-user
 export AWS_REGION=us-east-1
+export AWS_PAGER=""                  # or `cli_pager =` in ~/.aws/config; see below
 ```
+
+> If `aws` commands print nothing in your terminal, the CLI is handing output to
+> a pager (`less`) that is swallowing it — and in a `set -e` script the failed
+> pager aborts the run silently after the first command that produces output.
+> Disable it with `AWS_PAGER=""` or `cli_pager =` under the profile.
 
 ## Step 1 — Render the policies with your account ID
 
@@ -150,29 +156,11 @@ aws iam create-policy \
 > first — it is superseded by these two:
 > `aws iam delete-policy --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouServicePolicy`
 
-## Step 3 — Create the role `lou-deploy`
+## Step 3 — Create the user `lou-dev`
 
-```bash
-aws iam create-role \
-  --role-name lou-deploy \
-  --assume-role-policy-document file://infra/iam/rendered/lou-deploy-trust.json \
-  --max-session-duration 3600 \
-  --description "Deploy principal for the Lou serverless migration" \
-  --tags Key=Project,Value=lou
-
-aws iam attach-role-policy \
-  --role-name lou-deploy \
-  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployServices
-
-aws iam attach-role-policy \
-  --role-name lou-deploy \
-  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployGuardrails
-```
-
-Both are required. `LouDeployServices` alone grants no IAM and carries none of
-the Deny guardrails; `LouDeployGuardrails` alone can build nothing.
-
-## Step 4 — Create the user `lou-dev`
+The user comes **before** the role: the role's trust policy names
+`user/lou-dev` as its principal, and IAM rejects a trust policy whose principal
+does not exist yet (`MalformedPolicyDocument: Invalid principal in policy`).
 
 ```bash
 aws iam create-user --user-name lou-dev --tags Key=Project,Value=lou
@@ -194,6 +182,28 @@ aws iam create-access-key --user-name lou-dev      # capture the secret ONCE
 
 > Store the secret in your password manager. Do not paste it into this repo,
 > into a bd issue, or into a chat session.
+
+## Step 4 — Create the role `lou-deploy`
+
+```bash
+aws iam create-role \
+  --role-name lou-deploy \
+  --assume-role-policy-document file://infra/iam/rendered/lou-deploy-trust.json \
+  --max-session-duration 3600 \
+  --description "Deploy principal for the Lou serverless migration" \
+  --tags Key=Project,Value=lou
+
+aws iam attach-role-policy \
+  --role-name lou-deploy \
+  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployServices
+
+aws iam attach-role-policy \
+  --role-name lou-deploy \
+  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployGuardrails
+```
+
+Both are required. `LouDeployServices` alone grants no IAM and carries none of
+the Deny guardrails; `LouDeployGuardrails` alone can build nothing.
 
 ## Step 5 — Configure the local profile
 
