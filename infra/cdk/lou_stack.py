@@ -51,6 +51,9 @@ from constructs import Construct
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FUNCTION_NAME = "lou-bot"
 TABLE_NAME = "lou-state"
+# AWS/WAFV2 publishes the WebACL dimension as the ACL's VisibilityConfig
+# MetricName, NOT its name — the alarm and the ACL must share this string.
+WAF_METRIC_NAME = "lou-edge"
 
 
 class LouStack(cdk.Stack):
@@ -275,7 +278,7 @@ class LouStack(cdk.Stack):
             alarm("WafBlockedAlarm", "lou-edge-blocked-spike",
                   cw.Metric(namespace="AWS/WAFV2", metric_name="BlockedRequests", statistic="Sum",
                             period=Duration.minutes(5),
-                            dimensions_map={"WebACL": "lou-edge-rate-limit", "Region": "Global", "Rule": "ALL"}),
+                            dimensions_map={"WebACL": WAF_METRIC_NAME, "Region": "Global", "Rule": "ALL"}),
                   50, "lou edge: the WAF rate rule is blocking a spike of requests")
 
         # ── outputs ─────────────────────────────────────────────────────────
@@ -299,7 +302,7 @@ class LouStack(cdk.Stack):
             scope="CLOUDFRONT",
             default_action=wafv2.CfnWebACL.DefaultActionProperty(allow={}),
             visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                cloud_watch_metrics_enabled=True, metric_name="lou-edge", sampled_requests_enabled=True),
+                cloud_watch_metrics_enabled=True, metric_name=WAF_METRIC_NAME, sampled_requests_enabled=True),
             rules=[wafv2.CfnWebACL.RuleProperty(
                 name="lou-per-ip-rate",
                 priority=0,

@@ -50,7 +50,10 @@ esac
 # the alarms and topic still exist, just with no subscriber.
 CTX=()
 [ -n "${LOU_ALERT_EMAIL:-}" ] && CTX=(-c "lou:alertEmail=$LOU_ALERT_EMAIL")
-cdk() { npx --yes aws-cdk@2 "${CTX[@]}" "$@"; }
+# ${CTX[@]+"${CTX[@]}"} expands to nothing when the array is empty: a plain
+# "${CTX[@]}" is an unbound-variable error under `set -u` on bash < 4.4
+# (macOS /bin/bash is 3.2).
+cdk() { npx --yes aws-cdk@2 ${CTX[@]+"${CTX[@]}"} "$@"; }
 
 case "$STEP" in
   synth) cdk synth --quiet && echo "template: cdk.out/LouStack.template.json" ;;

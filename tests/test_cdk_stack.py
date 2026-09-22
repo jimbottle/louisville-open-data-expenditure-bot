@@ -261,5 +261,13 @@ def test_alert_email_becomes_a_subscription_only_via_context():
 
 def test_waf_alarm_only_when_waf_is_on():
     res = _synth(**{"lou:waf": True}).to_json()["Resources"]
-    names = {r["Properties"]["AlarmName"] for r in res.values() if r["Type"] == "AWS::CloudWatch::Alarm"}
-    assert "lou-edge-blocked-spike" in names
+    alarms = {r["Properties"]["AlarmName"]: r["Properties"]
+              for r in res.values() if r["Type"] == "AWS::CloudWatch::Alarm"}
+    assert "lou-edge-blocked-spike" in alarms
+    # The WebACL dimension is the ACL's VisibilityConfig MetricName, not its
+    # name; a mismatch means a metric with no datapoints and an alarm stuck OK.
+    acl = _only(res, "AWS::WAFv2::WebACL")
+    dims = {d["Name"]: d["Value"] for d in alarms["lou-edge-blocked-spike"]["Dimensions"]}
+    assert dims["WebACL"] == acl["VisibilityConfig"]["MetricName"]
+    assert dims["WebACL"] != acl["Name"]
+    assert dims["Region"] == "Global" and dims["Rule"] == "ALL"
