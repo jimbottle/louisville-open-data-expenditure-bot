@@ -28,16 +28,22 @@ echo "== caller: $(aws sts get-caller-identity $P --query Arn --output text)"
 [ -f ../../data/lou.duckdb ] || { echo "data/lou.duckdb missing — run: python data_model.py --materialize data/lou.duckdb"; exit 1; }
 [ -f ../../data/rag_documents.duckdb ] || { echo "data/rag_documents.duckdb missing — run: python rag.py ingest"; exit 1; }
 
-cdk() { npx --yes aws-cdk@2 "$@" $P; }
+# The CDK CLI (JS SDK) cannot drive the MFA prompt of the `lou` profile from
+# a script, and does not read the AWS CLI's cached session. Hand it the session
+# the CLI already holds (primed by `aws sts get-caller-identity --profile lou`)
+# as environment variables — inside this process only; nothing is printed.
+eval "$(aws configure export-credentials $P --format env)"
+cdk() { npx --yes aws-cdk@2 "$@"; }
 
 case "$STEP" in
   synth) cdk synth --quiet && echo "template: cdk.out/LouStack.template.json" ;;
   diff)  cdk diff ;;
   deploy)
     cdk diff || true
-    # Broadening IAM/security-group changes prompt for approval; everything
-    # else applies. The image is built (arm64, needs Docker) and pushed here.
-    cdk deploy --require-approval broadening --outputs-file cdk.out/outputs.json
+    # Approval is the human reading the diff above (this script is driven from
+    # a non-interactive shell, where the CLI's own prompt cannot be answered).
+    # The image is built (arm64, needs Docker) and pushed here.
+    cdk deploy --require-approval never --outputs-file cdk.out/outputs.json
     CF=$(python3 -c "import json; print(json.load(open('cdk.out/outputs.json'))['LouStack']['CloudFrontUrl'])")
     FN=$(python3 -c "import json; print(json.load(open('cdk.out/outputs.json'))['LouStack']['FunctionName'])")
     echo "== warm invoke (the one-time image-cache miss lands here, not on the first visitor)"

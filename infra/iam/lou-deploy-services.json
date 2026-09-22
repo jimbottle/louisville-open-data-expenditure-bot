@@ -165,6 +165,16 @@
       "Resource": "arn:aws:ssm:us-east-1:${AWS_ACCOUNT_ID}:parameter/lou/*"
     },
     {
+      "Sid": "CdkBootstrapVersionParameterRead",
+      "Comment": "Every CDK template carries a BootstrapVersion parameter resolved from SSM at changeset time; the cfn-exec role (which carries this policy) must read it. Found on the first LouStack deploy (2026-09-22). Read-only, and only Lou's own qualifier.",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
+      "Resource": "arn:aws:ssm:us-east-1:${AWS_ACCOUNT_ID}:parameter/cdk-bootstrap/lou0/*"
+    },
+    {
       "Sid": "KmsDecryptForSsmSecureStringsOnly",
       "Effect": "Allow",
       "Action": [
@@ -201,9 +211,13 @@
         "cloudfront:DeleteCachePolicy",
         "cloudfront:CreateResponseHeadersPolicy",
         "cloudfront:GetResponseHeadersPolicy",
-        "cloudfront:DeleteResponseHeadersPolicy"
+        "cloudfront:DeleteResponseHeadersPolicy",
+        "cloudfront:CreateDistributionWithTags",
+        "cloudfront:ListTagsForResource",
+        "cloudfront:UntagResource"
       ],
-      "Resource": "*"
+      "Resource": "*",
+      "Comment": "CreateDistributionWithTags/ListTagsForResource/UntagResource: CloudFormation uses the tag-aware calls for a tagged distribution (first LouStack deploy, 2026-09-22)."
     },
     {
       "Sid": "WafV2ForCloudFrontSeeReadme",
