@@ -90,6 +90,7 @@ from data_model import (
     measure_kind,
     chart_window,
     load_all_data,
+    prebuilt_meta,
     load_prebuilt,
     year_context,
 )
@@ -560,7 +561,14 @@ def startup():
         log.info("Built database from CSVs in %s in %.1fs", DATA_DIR, time.time() - t_load)
     # Compact schema for the system prompt (sent on every LLM call, so token
     # size matters); the full verbose version is still available at /api/schema.
-    schema_desc = get_compact_schema_description(con)
+    # A prebuilt artifact carries the description computed at build time
+    # (data_model._write_meta); recomputing it is the single largest piece of
+    # the serving cold start. An artifact from before that key still works.
+    schema_desc = prebuilt_meta(con, "compact_schema") if PREBUILT_DB else None
+    if schema_desc:
+        log.info("Schema description read from the prebuilt artifact")
+    else:
+        schema_desc = get_compact_schema_description(con)
 
     # Year facts are derived from the loaded data, never hardcoded — and
     # "partial" is decided by DATA COVERAGE, not by assuming the newest year

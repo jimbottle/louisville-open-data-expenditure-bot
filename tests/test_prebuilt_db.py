@@ -187,15 +187,38 @@ def test_artifact_omits_internal_helper_tables(real_artifact):
     The one underscore table that MUST persist is grounding's `_value_index`:
     it is serving data (the vocabulary lookups run against it on every
     question) and the serving connection is read-only, so it cannot be rebuilt
-    at boot. The compact schema still skips it like every `_` table."""
+    at boot. `_meta` is the build-time snapshot of startup derivations
+    (compact schema). The compact schema still skips both like every `_` table."""
     pre = dm.load_prebuilt(real_artifact)
     try:
         tables = [t[0] for t in pre.execute("SHOW TABLES").fetchall()]
     finally:
         pre.close()
-    assert [t for t in tables if t.startswith("_")] == ["_value_index"], tables
+    assert sorted(t for t in tables if t.startswith("_")) == ["_meta", "_value_index"], tables
     assert "expenditures" in tables
     assert "summary_agency_spend" in tables
+
+
+def test_artifact_snapshots_the_compact_schema(real_artifact):
+    """The serving path reads the compact schema description from the artifact
+    instead of recomputing it on every cold start (~1.3s on Lambda's init CPU).
+    The snapshot must equal what recomputing on the same artifact would give,
+    and must itself omit the `_` helper tables."""
+    pre = dm.load_prebuilt(real_artifact)
+    try:
+        stored = dm.prebuilt_meta(pre, "compact_schema")
+        assert stored and stored == dm.get_compact_schema_description(pre)
+        assert "_value_index" not in stored and "_meta" not in stored
+        assert dm.prebuilt_meta(pre, "no-such-key") is None
+    finally:
+        pre.close()
+
+
+def test_prebuilt_meta_tolerates_an_older_artifact(tmp_path):
+    """An artifact built before _meta existed still serves: the caller
+    recomputes instead of failing at boot."""
+    con = dm.load_prebuilt(_tiny_db(str(tmp_path / "old.duckdb")))
+    assert dm.prebuilt_meta(con, "compact_schema") is None
 
 
 def test_prebuilt_honors_duckdb_temp_dir(tmp_path, monkeypatch):

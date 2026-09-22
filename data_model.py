@@ -421,6 +421,7 @@ def build_database(out_path: str, data_dir: str = "data",
     con = duckdb.connect(tmp)
     try:
         _ingest(con, cfg, data_dir)
+        _write_meta(con)
     except BaseException:
         # Clean up the partial build before propagating. Without this a failed
         # or interrupted run leaves a multi-hundred-MB .building file on disk —
@@ -437,6 +438,36 @@ def build_database(out_path: str, data_dir: str = "data",
     log.info("Built %s (%.0f MB) from %s", out_path,
              os.path.getsize(out_path) / 1e6, data_dir)
     return out_path
+
+
+META_TABLE = "_meta"
+
+
+def _write_meta(con: duckdb.DuckDBPyConnection) -> None:
+    """Snapshot startup-time derivations into the artifact.
+
+    The compact schema description samples DISTINCT values of every
+    low-cardinality column across all tables — ~0.3s on a laptop, ~1.3s on
+    Lambda's init CPU, on every cold start. The artifact is already a
+    snapshot (the value index is built here too), so the description is
+    computed once at build time and read back by the serving path. Anything
+    that changes the description (data, dictionary, this code) changes the
+    artifact, which is rebuilt after every refresh anyway.
+    """
+    con.execute(f"DROP TABLE IF EXISTS {META_TABLE}")
+    con.execute(f"CREATE TABLE {META_TABLE} (key VARCHAR PRIMARY KEY, value VARCHAR)")
+    con.execute(f"INSERT INTO {META_TABLE} VALUES (?, ?)",
+                ["compact_schema", get_compact_schema_description(con)])
+
+
+def prebuilt_meta(con: duckdb.DuckDBPyConnection, key: str) -> str | None:
+    """A value snapshotted by _write_meta, or None when the artifact predates
+    the key (an older artifact still serves; the caller recomputes)."""
+    try:
+        row = con.execute(f"SELECT value FROM {META_TABLE} WHERE key = ?", [key]).fetchone()
+    except duckdb.Error:
+        return None
+    return row[0] if row else None
 
 
 def load_prebuilt(db_path: str) -> duckdb.DuckDBPyConnection:

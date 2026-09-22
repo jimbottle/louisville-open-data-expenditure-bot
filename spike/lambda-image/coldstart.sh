@@ -76,7 +76,11 @@ if run 3; then
   else
     aws lambda update-function-code "${P[@]}" --function-name "$NAME" --image-uri "$IMAGE" --query CodeSha256 --output text
   fi
+  # A container-image code update stays InProgress while Lambda optimises the
+  # image (~30-60s); the active waiter returns before that, and the next
+  # configuration update then fails with ResourceConflictException.
   aws lambda wait function-active-v2 "${P[@]}" --function-name "$NAME"
+  aws lambda wait function-updated-v2 "${P[@]}" --function-name "$NAME"
 
   EVENT='{"version":"2.0","routeKey":"$default","rawPath":"/api/health","rawQueryString":"","headers":{"host":"x","accept":"*/*"},"requestContext":{"http":{"method":"GET","path":"/api/health","protocol":"HTTP/1.1","sourceIp":"127.0.0.1","userAgent":"coldstart"},"requestId":"x","stage":"$default"},"isBase64Encoded":false}'
   for MEM in $MEMORIES; do
@@ -89,11 +93,10 @@ if run 3; then
       [ $i -gt 1 ] && aws lambda update-function-configuration "${P[@]}" --function-name "$NAME" \
         --environment "Variables={CEREBRAS_PAID_API_KEY=placeholder,OPENROUTER_API_KEY=placeholder,TRUSTED_PROXY_IPS=127.0.0.1,COLDSTART_NONCE=$(date +%s)$i}" >/dev/null \
         && aws lambda wait function-updated-v2 "${P[@]}" --function-name "$NAME"
-      t0=$(python3 -c 'import time;print(time.time())')
       aws lambda invoke "${P[@]}" --function-name "$NAME" --cli-binary-format raw-in-base64-out \
         --payload "$EVENT" --log-type Tail --query 'LogResult' --output text /tmp/lou-coldstart-out.json \
         | base64 -d | grep -o 'Init Duration: [0-9.]* ms\|Duration: [0-9.]* ms\|Max Memory Used: [0-9]* MB' | paste -sd' ' - \
-        | sed "s/^/   mem=${MEM}MB run=$i  wall=$(python3 -c "import time;print(round(time.time()-$t0,2))")s  /"
+        | sed "s/^/   mem=${MEM}MB run=$i  /"
       grep -q '"statusCode": *200\|"statusCode":200' /tmp/lou-coldstart-out.json || { echo "   !! non-200 body:"; head -c 300 /tmp/lou-coldstart-out.json; echo; }
     done
   done

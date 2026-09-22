@@ -318,6 +318,16 @@ uvicorn app:app --host 127.0.0.1 --port 8000
 # then open http://127.0.0.1:8000  (DEV ONLY — see "Where the bot runs" above)
 ```
 
+### Lambda image (migration)
+
+`Dockerfile.lambda` is the container for the AWS migration (epic
+`louisville-open-data-ru6`): Lambda Web Adapter in response-stream mode,
+arm64, the prebuilt artifact and document corpus baked in, all writes on
+`/tmp` (`STATS_DIR`, `DUCKDB_TEMP_DIR`). Build needs `data/lou.duckdb` and
+`data/rag_documents.duckdb` present. Measured cold start 2.5-4.5s
+(`spike/lambda-image/results.md`). The self-hosted deploy keeps using
+`./Dockerfile`.
+
 ### Prebuilt database artifact
 
 Startup has two paths. By default the app rebuilds everything from the CSVs in
@@ -338,7 +348,11 @@ that rebuild is exactly what exhausts memory and overruns the health-check
 start period (the 2026-08-11 outage).
 
 Rebuild the artifact after any `refresh_data.py` run: it is a snapshot, and a
-stale one serves stale numbers with no other symptom. `tests/test_prebuilt_db.py`
+stale one serves stale numbers with no other symptom. The artifact also
+snapshots the compact schema description (`_meta` table, read by the serving
+path instead of re-sampling every column at boot — it was ~1.3s of the Lambda
+cold start); a change to the data dictionary or to
+`get_compact_schema_description` therefore needs a rebuild too. `tests/test_prebuilt_db.py`
 asserts the artifact is byte-identical to the CSV path on schema, year context,
 and the summary tables, and that the serving connection cannot reach the
 filesystem (`read_csv` of an arbitrary path and `COPY TO` are both blocked —
