@@ -257,8 +257,12 @@ npx cdk bootstrap aws://<ACCOUNT_ID>/us-east-1 \
 > boundary reaches the roles the *stack* creates by a different route:
 > `LouDeployGuardrails` denies `iam:CreateRole` without it, and the stack sets
 > it explicitly (`infra/cdk/lou_stack.py`). If a bootstrap already carries the
-> flag, re-run the command above without it — the bootstrap stack update
-> removes the boundary from the execution role.
+> flag, re-run the command above without it **and with
+> `--no-previous-parameters`** (the CLI otherwise reuses the stack's previous
+> parameter values, boundary included) — the bootstrap stack update then
+> removes the boundary from the execution role. Verify with
+> `aws iam get-role --role-name cdk-lou0-cfn-exec-role-<ACCOUNT_ID>-us-east-1 --query Role.PermissionsBoundary`
+> (expect null).
 
 The CDK app must then use the same qualifier, or it will look for
 default-named bootstrap resources and fail:
