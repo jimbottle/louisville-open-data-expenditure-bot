@@ -172,8 +172,21 @@ def test_dynamodb_outage_degrades_instead_of_500(dyn_client, monkeypatch):
     r = _post(c, "during an outage")
     assert r.status_code == 200
     assert "interpretation" in _types(_events(r))
+    # ... and the outage is VISIBLE where monitoring looks: the counters in
+    # the table read as zero, so health must say so via the backend status.
     h = c.get("/api/health").json()
-    assert h["status"] == "ok" and h["errors"]["errors_last_hour"] == 0
+    assert h["status"] == "degraded" and "state backend unavailable" in h["degraded_reason"]
+    assert h["state_backend"]["backend"] == "dynamodb" and h["state_backend"]["status"] == "degraded"
+    assert h["state_backend"]["errors_total"] >= 1
+    assert "ResourceNotFoundException" in h["state_backend"]["last_error"]
+
+
+def test_health_reports_the_local_backend_when_not_on_dynamodb(dyn_client, monkeypatch):
+    import app
+    c, *_ = dyn_client
+    monkeypatch.setattr(app, "STATE", None)
+    h = c.get("/api/health").json()
+    assert h["state_backend"] == {"backend": "local", "status": "ok", "errors_total": 0, "last_error": None}
 
 
 def test_cache_admin_endpoints_use_the_table(dyn_client, monkeypatch):

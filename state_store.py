@@ -57,7 +57,7 @@ def _best_effort(default):
             try:
                 return fn(self, *a, **k)
             except Exception as e:  # noqa: BLE001
-                log.error("%s: DynamoDB unavailable (%s: %s); degrading", fn.__name__, type(e).__name__, e)
+                self._note_backend_error(fn.__name__, e)
                 return default() if callable(default) else default
         return wrapper
     return deco
@@ -154,6 +154,31 @@ class DynamoState:
         self.rpm_limit = rpm_limit
         self.max_cache_entries = max_cache_entries
         self.cache_ttl_s = cache_ttl_days * 86400
+        # Degrading is deliberate, but it must not be invisible: while the
+        # table is unreachable there is no rate limit and no cache, and the
+        # error counters that would normally say so live in that same table.
+        # /api/health reads this instead (app.health -> backend_status).
+        self.last_backend_error: float | None = None
+        self.last_backend_error_detail: str | None = None
+        self.backend_errors = 0
+
+    def _note_backend_error(self, where: str, e: Exception) -> None:
+        self.last_backend_error = time.time()
+        self.last_backend_error_detail = f"{where}: {type(e).__name__}: {str(e)[:160]}"
+        self.backend_errors += 1
+        log.error("%s: DynamoDB unavailable (%s: %s); degrading", where, type(e).__name__, e)
+
+    def backend_status(self, now: float | None = None, window_s: float = 300.0) -> dict:
+        """For /api/health: degraded if any backend call failed in the last
+        window_s seconds (with the detail), else ok."""
+        now = time.time() if now is None else now
+        recent = self.last_backend_error is not None and now - self.last_backend_error < window_s
+        return {
+            "backend": "dynamodb",
+            "status": "degraded" if recent else "ok",
+            "errors_total": self.backend_errors,
+            "last_error": self.last_backend_error_detail if recent else None,
+        }
 
     # ── rate limit ──────────────────────────────────────────────────────────
 
@@ -176,6 +201,7 @@ class DynamoState:
         except self._c.exceptions.ConditionalCheckFailedException:
             return False
         except Exception as e:  # noqa: BLE001 — availability over enforcement
+            self._note_backend_error("rate_allow", e)
             log.error("Rate limiter unavailable (%s: %s); allowing request", type(e).__name__, e)
             return True
 

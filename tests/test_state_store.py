@@ -274,6 +274,11 @@ def test_cache_and_stats_degrade_when_dynamodb_is_unreachable(dynamo, caplog):
     assert s.stats_usage_get()["requests_today"] == 0
     assert s.stats_limits_get()["rpm"] is None
     assert "DynamoDB unavailable" in caplog.text
+    # Degrading is recorded, not hidden: health reads this.
+    st = s.backend_status()
+    assert st["status"] == "degraded" and st["errors_total"] >= 10 and "ResourceNotFoundException" in st["last_error"]
+    assert s.backend_status(now=time.time() + 3600)["status"] == "ok", "an old error ages out"
+    assert _state(dynamo).backend_status() == {"backend": "dynamodb", "status": "ok", "errors_total": 0, "last_error": None}
 
 
 def test_cache_hit_survives_eviction_between_read_and_touch(dynamo, monkeypatch):

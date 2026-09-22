@@ -917,10 +917,18 @@ async def health():
         degraded_reason = f"LLM funding failure: {errors['last_quota_error']}"
     elif errors["errors_last_hour"] > 5:
         degraded_reason = f"{errors['errors_last_hour']} errors in the last hour"
+    # On Lambda the counters above live in DynamoDB; if that table is
+    # unreachable they read as zero while the site runs with no rate limit and
+    # no cache. Surface it here, where the heartbeat and uptime.yml look.
+    backend = STATE.backend_status() if STATE else {"backend": "local", "status": "ok",
+                                                    "errors_total": 0, "last_error": None}
+    if backend["status"] != "ok" and not degraded_reason:
+        degraded_reason = f"state backend unavailable: {backend['last_error']}"
     status = "degraded" if degraded_reason else "ok"
     return {
         "status": status,
         "degraded_reason": degraded_reason,
+        "state_backend": backend,
         "tables": stats,
         # "model" is the model actually in use; if a provider deprecation
         # triggered a runtime fallback, model != model_configured and

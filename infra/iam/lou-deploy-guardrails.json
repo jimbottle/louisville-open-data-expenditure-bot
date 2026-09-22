@@ -34,8 +34,7 @@
       ],
       "Resource": [
         "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou/*"
-      ],
-      "Comment": "role/lou-* (path-less) is needed as well: CloudFormation's IAM handler calls GetRole by NAME before CreateRole, and for a role that does not exist yet IAM evaluates that against the path-less ARN \u2014 with only role/lou/* the first LouStack deploy failed on iam:GetRole (2026-09-22). The boundary Deny carries the same pattern so a lou-* role at any path still needs it."
+      ]
     },
     {
       "Sid": "GetRoleByNameBeforeCreate",
@@ -55,14 +54,15 @@
         "iam:AttachRolePolicy"
       ],
       "Resource": [
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou/*"
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou/*",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:role/lou-*"
       ],
       "Condition": {
         "StringNotEquals": {
           "iam:PermissionsBoundary": "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouPermissionsBoundary"
         }
       },
-      "Comment": "role/lou-* (path-less) is needed as well: CloudFormation's IAM handler calls GetRole by NAME before CreateRole, and for a role that does not exist yet IAM evaluates that against the path-less ARN \u2014 with only role/lou/* the first LouStack deploy failed on iam:GetRole (2026-09-22). The boundary Deny carries the same pattern so a lou-* role at any path still needs it."
+      "Comment": "Also covers the path-less role/lou-* form, so a lou-* role at ANY path needs the boundary regardless of what the Allow above grants."
     },
     {
       "Sid": "CannotEditOrDetachTheBoundaryItself",
