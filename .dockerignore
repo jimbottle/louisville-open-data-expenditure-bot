@@ -19,6 +19,17 @@ infra
 monitoring
 tools
 data_cincinnati
+# Not copied by either Dockerfile, but part of the build context: every edit
+# here changed the CDK image-asset hash and forced a needless image rebuild
+# and function update on the next deploy.
+.github
+*.md
+Dockerfile
+canonical_seed.py
+pull_arcgis.py
+pull_socrata.py
+refresh_data.py
+warm_cache.py
 # Data: only the two serving artifacts Dockerfile.lambda bakes in.
 data/*
 !data/lou.duckdb
