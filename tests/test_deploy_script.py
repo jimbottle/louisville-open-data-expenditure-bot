@@ -19,8 +19,15 @@ echo "aws $*" >>"$CALLS"
 case "$*" in
   *"configure export-credentials"*) echo 'export AWS_ACCESS_KEY_ID=x; export AWS_SECRET_ACCESS_KEY=y; export AWS_SESSION_TOKEN=z' ;;
   *"sts get-caller-identity"*) echo "arn:aws:sts::012146975534:assumed-role/lou-deploy/test" ;;
-  *"OutputKey=='PublicDomain'"*) printf '%s' "${LIVE_DOMAIN:-}" ;;
-  *"OutputKey=='CertificateArn'"*) printf '%s' "${LIVE_CERT:-}" ;;
+  *"describe-stacks"*)
+    case "${DESCRIBE_MODE:-ok}" in
+      throttle) echo "An error occurred (Throttling) when calling the DescribeStacks operation: Rate exceeded" >&2; exit 254 ;;
+      missing)  echo "An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id LouStack does not exist" >&2; exit 254 ;;
+    esac
+    case "$*" in
+      *"OutputKey=='PublicDomain'"*) printf '%s' "${LIVE_DOMAIN:-}" ;;
+      *"OutputKey=='CertificateArn'"*) printf '%s' "${LIVE_CERT:-}" ;;
+    esac ;;
   *) echo "" ;;
 esac
 '''
@@ -91,3 +98,21 @@ def test_refuses_to_run_as_anything_but_the_deploy_role(harness, tmp_path):
     proc, calls = harness("synth")
     assert proc.returncode == 1 and "refusing to run CDK as" in proc.stdout
     assert not _cdk_args(calls)
+
+
+def test_output_lookup_failure_fails_closed(harness):
+    """A throttle / expired session / permission error reading the stack's
+    outputs must stop the run — treating it as "no hostname" would deploy a
+    distribution without the alias (the silent detach, roborev 4749)."""
+    proc, calls = harness("synth", env={"DESCRIBE_MODE": "throttle"})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "cannot read LouStack outputs" in proc.stderr
+    assert not _cdk_args(calls)
+
+
+def test_missing_stack_is_the_only_no_domain_error(harness):
+    """First deploy: the stack does not exist yet, which legitimately means
+    no hostname is bound. The run proceeds without domain context."""
+    proc, calls = harness("synth", env={"DESCRIBE_MODE": "missing"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "lou:domain" not in _cdk_args(calls)[0]

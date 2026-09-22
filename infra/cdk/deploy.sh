@@ -60,10 +60,24 @@ CTX=()
 # fix, the monthly refresh's cdk deploy, another workstation) would synthesize
 # a distribution with no Aliases and detach production from CloudFront with no
 # error at deploy time. Dropping the hostname on purpose is LOU_DROP_DOMAIN=1.
-stack_out() { aws cloudformation describe-stacks --stack-name LouStack \
-  --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>/dev/null || true; }
+# Fail CLOSED: only "the stack does not exist yet" (the first deploy) means
+# "no hostname". Any other failure (throttle, expired session, permission)
+# stops the run — treating it as "no domain" would be the silent detach again.
+stack_out() {
+  local out
+  if out=$(aws cloudformation describe-stacks --stack-name LouStack \
+        --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>&1); then
+    printf '%s' "$out"
+  elif printf '%s' "$out" | grep -q 'does not exist'; then
+    printf ''
+  else
+    echo "!! cannot read LouStack outputs ($1): $out" >&2
+    return 1
+  fi
+}
 if [ -z "${LOU_DOMAIN:-}" ] && [ "${LOU_DROP_DOMAIN:-}" != "1" ]; then
-  live_domain=$(stack_out PublicDomain); live_cert=$(stack_out CertificateArn)
+  live_domain=$(stack_out PublicDomain) || exit 1
+  live_cert=$(stack_out CertificateArn) || exit 1
   if [ -n "$live_domain" ] && [ "$live_domain" != "None" ]; then
     [ -n "$live_cert" ] && [ "$live_cert" != "None" ] || { echo "!! stack has PublicDomain=$live_domain but no CertificateArn output; refusing"; exit 1; }
     LOU_DOMAIN=$live_domain; LOU_CERT_ARN=$live_cert
