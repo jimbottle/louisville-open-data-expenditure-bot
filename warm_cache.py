@@ -8,6 +8,8 @@ Usage:
 """
 
 import argparse
+import hashlib
+import json
 import os
 import sys
 import requests
@@ -126,9 +128,17 @@ def main():
     for i, q in enumerate(need_warming):
         print(f"  [{i+1}/{len(need_warming)}] {q[:55]}...")
         try:
+            # Behind CloudFront Origin Access Control the origin request is
+            # SigV4-signed with whatever body hash the viewer supplied; a POST
+            # body without x-amz-content-sha256 is a 403. Harmless elsewhere.
+            body = json.dumps({"question": q}).encode()
             resp = requests.post(
                 f"{args.host}/api/ask",
-                json={"question": q},
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-amz-content-sha256": hashlib.sha256(body).hexdigest(),
+                },
                 timeout=120,
             )
             has_interp = resp.text.count('"type": "interpretation"')

@@ -80,10 +80,19 @@ health=$(curl -fsS -m 10 "$BASE_URL/api/health" 2>/dev/null)
 # Probe 2: the API path itself is reachable end-to-end. An empty question
 # short-circuits to an SSE error with no LLM call, so this is free — and it is
 # the only probe that catches an edge rule blocking /api while / still loads.
+#
+# x-amz-content-sha256 is the SHA-256 of the exact body below. Behind CloudFront
+# Origin Access Control (the AWS migration) the origin request is SigV4-signed
+# with the body hash the VIEWER supplied, so a POST body without it is a 403
+# and this probe would page for a healthy site. Harmless on the current origin.
+# tests/test_heartbeat_script.py asserts the constant matches the body.
+ASK_BODY='{"question":""}'
+ASK_BODY_SHA256='38970a4cce54f144c511175b2ec2516bfc4cd53a966076c14d1735128a36d7a1'
 ask_code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 \
     -X POST "$BASE_URL/api/ask" \
     -H 'Content-Type: application/json' \
-    --data '{"question":""}' 2>/dev/null)
+    -H "x-amz-content-sha256: $ASK_BODY_SHA256" \
+    --data "$ASK_BODY" 2>/dev/null)
 
 # Match the status FIELD, not the payload. The health body carries table names
 # and raw exception text (app.py's `last_error`), and "token"/"max_tokens"

@@ -1106,6 +1106,21 @@ function buildReport(report, interpText) {
   return { subject, body, href };
 }
 
+// Behind CloudFront Origin Access Control (the AWS migration) the origin
+// request is SigV4-signed using whatever body hash the *viewer* supplied, so a
+// POST with a body and no x-amz-content-sha256 header is answered 403. The
+// header is ignored by every other origin, so it is always sent. crypto.subtle
+// only exists in secure contexts (https, localhost); on a plain-http LAN dev
+// URL the header is skipped, which is fine — there is no CloudFront there.
+async function sigv4BodyHeader(body) {
+  if (!(globalThis.crypto && crypto.subtle && typeof TextEncoder !== 'undefined')) return {};
+  try {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body));
+    const hex = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
+    return { 'x-amz-content-sha256': hex };
+  } catch { return {}; }
+}
+
 async function streamAnswer(question, opts = {}) {
   const isRetry = !!opts.isRetry;
   // A retry / "ask again" click can fire while a previous stream is still open
@@ -1267,10 +1282,11 @@ async function streamAnswer(question, opts = {}) {
   };
 
   try {
+    const body = JSON.stringify({ question, dev_mode: devMode, history: historyToSend });
     const resp = await fetch('/api/ask', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, dev_mode: devMode, history: historyToSend }),
+      headers: { 'Content-Type': 'application/json', ...(await sigv4BodyHeader(body)) },
+      body,
       signal: controller.signal,
     });
 

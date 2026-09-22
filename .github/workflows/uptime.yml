@@ -58,11 +58,16 @@ jobs:
 
       - name: API end-to-end probe (SSE handshake, no LLM cost)
         run: |
+          # x-amz-content-sha256 = sha256 of the body; required behind CloudFront
+          # OAC (SigV4 body hash), harmless on the current origin. Keep in sync
+          # with monitoring/louisville-bot-heartbeat.sh (test-asserted there).
+          body='{"question":""}'
           code_type=$(curl -sS -o /dev/null --max-time 30 \
             -w '%{http_code} %{content_type}' \
             -X POST https://louisville.raylytics.io/api/ask \
             -H 'Content-Type: application/json' \
-            --data '{"question":""}')
+            -H "x-amz-content-sha256: $(printf '%s' "$body" | sha256sum | cut -d' ' -f1)" \
+            --data "$body")
           echo "probe result: $code_type"
           case "$code_type" in
             "200 text/event-stream"*) echo "SSE probe ok" ;;
