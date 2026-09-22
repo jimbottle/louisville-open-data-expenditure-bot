@@ -53,6 +53,7 @@ if LOG_DIR:
 log = logging.getLogger("app")
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+import state_store
 
 from analytics_agent import (
     EmptyCompletionError,
@@ -217,11 +218,40 @@ IP_RPM_LIMIT = 5  # max requests per minute per IP
 # tunnel traffic together — so production MUST set TRUSTED_PROXY_IPS.
 TRUSTED_PROXY_IPS = {ip.strip() for ip in os.environ.get("TRUSTED_PROXY_IPS", "").split(",") if ip.strip()}
 
+# Where the client IP comes from. "peer" (default): the logic above — a
+# forwarded header only from a trusted peer. "cloudfront": the app sits behind
+# CloudFront with Origin Access Control on a Lambda Function URL, so NOTHING
+# but CloudFront can reach the origin (a direct request is refused with 403
+# before the app sees it) and the peer address is meaningless. CloudFront
+# appends the viewer's address as the LAST X-Forwarded-For hop — a client may
+# send its own X-Forwarded-For, but cannot append after CloudFront does — and,
+# when the origin request policy forwards it, sets CloudFront-Viewer-Address.
+# Anti-spoofing therefore comes from OAC, not from a peer allowlist.
+CLIENT_IP_SOURCE = os.environ.get("CLIENT_IP_SOURCE", "peer").strip().lower()
+if CLIENT_IP_SOURCE not in ("peer", "cloudfront"):
+    raise RuntimeError(f"CLIENT_IP_SOURCE must be 'peer' or 'cloudfront', got {CLIENT_IP_SOURCE!r}")
+
+# Shared state for Lambda (rate limit, cache, counters in DynamoDB) — None on
+# the self-hosted deploy, where the module dicts + JSON files below are used.
+STATE = state_store.from_env()
+
 
 def _client_ip(request: Request) -> str:
     """The client IP for rate limiting: the forwarded client only when the
     immediate peer is a trusted proxy, else the peer address itself."""
     peer = request.client.host if request.client else "unknown"
+    if CLIENT_IP_SOURCE == "cloudfront":
+        viewer = request.headers.get("cloudfront-viewer-address")
+        if viewer:
+            # "ip:port" for IPv4, "[v6]:port" or "v6:port" for IPv6 — drop the port.
+            v = viewer.strip()
+            if v.startswith("["):
+                return v[1:v.index("]")] if "]" in v else v
+            return v.rsplit(":", 1)[0] if v.count(":") == 1 else v
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[-1].strip()  # the hop CloudFront appended
+        return peer
     if peer in TRUSTED_PROXY_IPS:
         cf = request.headers.get("cf-connecting-ip")
         if cf:
@@ -235,6 +265,8 @@ def _client_ip(request: Request) -> str:
 
 def check_ip_rate_limit(ip: str) -> bool:
     """Returns True if IP is within rate limit."""
+    if STATE:
+        return STATE.rate_allow(ip)
     now = time.time()
     if ip not in ip_requests:
         ip_requests[ip] = []
@@ -326,6 +358,10 @@ QUOTA_CATEGORIES = ("quota", "daily_cap")
 
 def track_error(category: str, detail: str = ""):
     """Record an error occurrence."""
+    if STATE:
+        STATE.stats_error(category, detail)
+        log.warning("Error tracked [%s]: %s", category, detail[:200] if detail else "")
+        return
     now = time.time()
     with stats_lock:
         errs = persistent_stats["errors"]
@@ -344,6 +380,8 @@ def track_error(category: str, detail: str = ""):
 
 def get_error_summary() -> dict:
     """Return error stats for the health endpoint."""
+    if STATE:
+        return STATE.stats_error_summary()
     now = time.time()
     errs = persistent_stats["errors"]
     recent = [t for t in errs.get("errors_last_hour", []) if now - t < 3600]
@@ -369,6 +407,9 @@ def get_error_summary() -> dict:
 
 def track_usage(prompt_tokens: int = 0, completion_tokens: int = 0):
     """Record an LLM call's token usage."""
+    if STATE:
+        STATE.stats_usage(prompt_tokens, completion_tokens)
+        return
     with stats_lock:
         usage = persistent_stats["usage"]
         # Reset if new day
@@ -396,21 +437,26 @@ def update_limits_from_headers(response):
         "rpd_remaining": "x-ratelimit-remaining-requests-day",
         "tpd_remaining": "x-ratelimit-remaining-tokens-day",
     }
+    found = {}
+    for key, header in mapping.items():
+        val = headers.get(header)
+        if val is not None:
+            try:
+                found[key] = int(val)
+            except ValueError:
+                pass
+    if STATE:
+        STATE.stats_limits_set(found)
+        return
     with stats_lock:
-        for key, header in mapping.items():
-            val = headers.get(header)
-            if val is not None:
-                try:
-                    persistent_stats["api_limits"][key] = int(val)
-                except ValueError:
-                    pass
+        persistent_stats["api_limits"].update(found)
         _save_stats()
 
 
 def get_usage_summary() -> dict:
     """Return usage stats. Local counters for requests, API headers for tokens (more accurate)."""
-    limits = persistent_stats["api_limits"]
-    usage = persistent_stats["usage"]
+    limits = STATE.stats_limits_get() if STATE else persistent_stats["api_limits"]
+    usage = STATE.stats_usage_get() if STATE else persistent_stats["usage"]
     rpd = limits.get("rpd") or 14400
     rpm = limits.get("rpm") or 30
     rpm_remaining = limits.get("rpm_remaining")
@@ -733,7 +779,10 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
          + TRUNCATION_COUNTS_WITH_TOTALS + TOTALS_MOVED_NOTE
          + str(MAX_DISPLAY_ROWS) + grounding.GROUNDING_VERSION).encode()
     ).hexdigest()[:8]
-    stale = [k for k in response_cache if not k.startswith(CACHE_VERSION + ":")]
+    # On DynamoDB, keys of older versions simply never match again and the
+    # 30-day TTL reclaims them; a scan-and-delete on every cold start would be
+    # racy across containers and pointless.
+    stale = [] if STATE else [k for k in response_cache if not k.startswith(CACHE_VERSION + ":")]
     if stale:
         for k in stale:
             del response_cache[k]
@@ -770,15 +819,29 @@ async def index():
         return f.read()
 
 
+# Row counts per table, computed once. The data never changes after startup
+# (a read-only prebuilt artifact, or an in-memory build that is not mutated),
+# and the health endpoint is polled every 60s by the heartbeat — 43,200 times
+# a month — so counting 2.2M rows sixteen times per probe under db_lock was
+# pure waste, and on Lambda it is billed.
+TABLE_COUNTS: dict[str, int] | None = None
+
+
+def _table_counts() -> dict[str, int]:
+    global TABLE_COUNTS
+    if TABLE_COUNTS is None:
+        with db_lock:
+            TABLE_COUNTS = {
+                t: con.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                for (t,) in con.execute("SHOW TABLES").fetchall()
+            }
+    return TABLE_COUNTS
+
+
 @app.head("/api/health")
 @app.get("/api/health")
 async def health():
-    with db_lock:
-        tables = con.execute("SHOW TABLES").fetchall()
-        stats = {}
-        for (table_name,) in tables:
-            count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-            stats[table_name] = count
+    stats = _table_counts()
     errors = get_error_summary()
     # "degraded" on >5 errors in the last hour, or on ANY funding failure in
     # the last hour: out-of-credit takes every live question down while the
@@ -886,7 +949,7 @@ async def get_cache_status(request: Request):
     if denied is not None:
         return denied
     status = {}
-    for key, events in response_cache.items():
+    for key, events in _cache_items().items():
         has_interp = any('"type": "interpretation"' in e for e in events)
         has_error = any('"type": "error"' in e for e in events)
         status[key] = {"events": len(events), "has_interpretation": has_interp, "has_error": has_error}
@@ -904,15 +967,11 @@ async def clear_cache(request: Request):
     body = await request.json() if request.headers.get("content-type") == "application/json" else {}
     question = body.get("question", "").strip().lower()
     if question:
-        key = _cache_key(question)
-        if key in response_cache:
-            del response_cache[key]
-            _save_cache()
+        if _cache_delete(_cache_key(question)):
             return {"cleared": question}
         return {"error": "Not in cache"}
     else:
-        response_cache.clear()
-        _save_cache()
+        _cache_clear()
         return {"cleared": "all"}
 
 
@@ -961,6 +1020,9 @@ def _evict_to_cap() -> None:
 
 def _cache_put(key: str, events: list[str]) -> None:
     """Insert (or refresh) a cache entry, evicting the least-recent past the cap."""
+    if STATE:
+        STATE.cache_put(key, events)
+        return
     response_cache.pop(key, None)  # re-inserting moves the key to the end (MRU)
     response_cache[key] = events
     _evict_to_cap()
@@ -970,6 +1032,42 @@ def _cache_touch(key: str) -> None:
     """Mark a cache hit as most-recently-used so replay protects it from eviction."""
     if key in response_cache:
         response_cache[key] = response_cache.pop(key)
+
+
+def _cache_get(key: str) -> list[str] | None:
+    """The cached SSE frames for a key, or None. A hit is an LRU touch."""
+    if STATE:
+        return STATE.cache_get(key)
+    events = response_cache.get(key)
+    if events is not None:
+        _cache_touch(key)  # LRU: a served answer must not age out
+    return events
+
+
+def _cache_delete(key: str) -> bool:
+    if STATE:
+        return STATE.cache_delete(key)
+    if key in response_cache:
+        del response_cache[key]
+        _save_cache()
+        return True
+    return False
+
+
+def _cache_clear() -> None:
+    if STATE:
+        STATE.cache_clear()
+        return
+    response_cache.clear()
+    _save_cache()
+
+
+def _cache_items() -> dict[str, list[str]]:
+    """Every current-version entry (admin listing). Local keeps all versions in
+    memory but prunes them at startup, so the two agree in practice."""
+    if STATE:
+        return STATE.cache_items(prefix=CACHE_VERSION + ":")
+    return dict(response_cache)
 
 
 def _load_cache() -> dict[str, list[str]]:
@@ -1003,7 +1101,10 @@ def _load_cache() -> dict[str, list[str]]:
 
 
 def _save_cache():
-    """Persist cache to disk."""
+    """Persist cache to disk (no-op on the DynamoDB backend: every write is
+    already durable)."""
+    if STATE:
+        return
     try:
         with open(CACHE_FILE, "w") as f:
             json.dump(response_cache, f)
@@ -1183,10 +1284,9 @@ async def ask(request: Request):
 
     # Serve from cache if question is cached
     cache_key = _cache_key(question)
-    if cache_key in response_cache:
+    events = _cache_get(cache_key)
+    if events is not None:
         log.info("Cache hit: %s", question[:50])
-        events = response_cache[cache_key]
-        _cache_touch(cache_key)  # LRU: a served answer must not age out
         def cached_stream():
             for event in events:
                 yield event

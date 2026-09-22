@@ -1,0 +1,5 @@
+# The Lambda image (Dockerfile.lambda) adds boto3 for the DynamoDB state
+# backend. The self-hosted image does not need it: with STATE_BACKEND unset
+# the app never imports boto3.
+-r requirements.txt
+boto3>=1.34,<2

@@ -37,8 +37,9 @@ ENV HOME=/opt/lou-home \
     DUCKDB_TEMP_DIR=/tmp/duckdb
 
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-lambda.txt ./
+# requirements-lambda adds boto3 for the DynamoDB state backend (state_store.py).
+RUN pip install --no-cache-dir -r requirements-lambda.txt
 
 # Bake the DuckDB FTS extension. Retrieval LOADs it per query and LOAD does
 # not install; without this every answer silently loses its citations. LOAD
@@ -51,7 +52,7 @@ RUN mkdir -p "$HOME" \
  && chmod -R a+rX "$HOME" \
  && test -n "$(find "$HOME/.duckdb/extensions" -name 'fts.duckdb_extension' -print -quit)"
 
-COPY analytics_agent.py app.py data_model.py city_config.py rag.py grounding.py ./
+COPY analytics_agent.py app.py data_model.py city_config.py rag.py grounding.py state_store.py ./
 COPY cities/ cities/
 COPY static/ static/
 # The two serving inputs. Both are gitignored build products; the build fails

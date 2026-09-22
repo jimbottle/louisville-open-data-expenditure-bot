@@ -328,6 +328,19 @@ arm64, the prebuilt artifact and document corpus baked in, all writes on
 (`spike/lambda-image/results.md`). The self-hosted deploy keeps using
 `./Dockerfile`.
 
+**Shared state on Lambda** (`state_store.py`): with `STATE_BACKEND=dynamodb`
+and `STATE_TABLE=<table>` the rate-limit buckets, the response cache and the
+usage/error counters behind `/api/health` live in one on-demand DynamoDB
+table (pk `pk`, TTL attribute `ttl`) instead of the module dicts + JSON files,
+which would be per-container. `CLIENT_IP_SOURCE=cloudfront` makes the limiter
+key on the address CloudFront appended (last `X-Forwarded-For` hop, or
+`CloudFront-Viewer-Address`) — safe only behind OAC, where nothing else can
+reach the origin; the self-hosted deploy keeps `peer` + `TRUSTED_PROXY_IPS`.
+Leave both unset and the app never imports boto3. Tests run the backend
+against moto (`requirements-dev.txt`); the limiter is a fixed one-minute
+window and fails OPEN if DynamoDB is unreachable — reserved concurrency on
+the function is the hard ceiling.
+
 ### Prebuilt database artifact
 
 Startup has two paths. By default the app rebuilds everything from the CSVs in
