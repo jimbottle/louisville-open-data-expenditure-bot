@@ -72,6 +72,35 @@ cold start (`app._load_secrets_from_ssm`); put them there first
 cold start (`aws lambda update-function-configuration ... --environment`
 with a nonce, or just wait for the environments to recycle).
 
+## Cutover (louisville-open-data-lla)
+
+`cutover.sh` sequences it so nothing user-facing changes until the last step,
+and that step is yours in Cloudflare:
+
+1. `./infra/cdk/cutover.sh cert` — requests an ACM certificate for the
+   hostname (free, us-east-1, tagged `Project=lou`) and prints the validation
+   CNAME. Add it in Cloudflare as DNS-only.
+2. `./infra/cdk/cutover.sh wait` — until ACM reports ISSUED.
+3. `./infra/cdk/cutover.sh deploy` — the stack with the hostname and the
+   certificate attached (`LOU_DOMAIN` / `LOU_CERT_ARN` context; both or
+   neither). Users still reach the Air; CloudFront merely starts answering
+   for the name.
+4. `./infra/cdk/cutover.sh pretest` — pins the hostname to CloudFront with
+   `curl --resolve` and runs the full verification (TLS, health, SSE probe, a
+   real streamed answer) with public DNS untouched. This is the rollback
+   rehearsal the issue asks for: if it fails there is nothing to undo.
+5. Cloudflare: change the `louisville.raylytics.io` record from the
+   cloudflared tunnel to a CNAME to the `CloudFrontDomain` output, DNS-only
+   (grey cloud). Proxying through both adds a hop and a second place for an
+   `/api` block to hide, the documented 2026 precedent.
+6. `./infra/cdk/cutover.sh verify` — the mandatory end-to-end check through
+   the real hostname. Then on the Air: stop the container but keep it
+   (`docker stop louisville-bot`), and set `CONTAINER=` in the heartbeat
+   LaunchAgent; the tunnel can stay up.
+7. Rollback at any point: `./infra/cdk/cutover.sh rollback` prints it (DNS
+   back, `docker start`). Decommission the container only after a week of
+   clean monitoring.
+
 ## Destroy
 
 `npx aws-cdk@2 destroy LouStack --profile lou` removes everything except the

@@ -335,3 +335,30 @@ def test_data_bucket_expires_refresh_snapshots(resources):
     rules = b["LifecycleConfiguration"]["Rules"]
     snap = next(r for r in rules if r["Id"] == "expire-refresh-snapshots")
     assert snap["Prefix"] == "snapshots/" and snap["ExpirationInDays"] == 90 and snap["Status"] == "Enabled"
+
+
+# ── cutover: custom domain (louisville-open-data-lla) ──────────────────────
+
+def test_no_custom_domain_by_default(resources):
+    dist = _only(resources, "AWS::CloudFront::Distribution")["DistributionConfig"]
+    assert "Aliases" not in dist or not dist["Aliases"]
+    # No ViewerCertificate block at all = the default *.cloudfront.net certificate.
+    assert "ViewerCertificate" not in dist or dist["ViewerCertificate"].get("CloudFrontDefaultCertificate") is True
+
+
+def test_custom_domain_attaches_hostname_and_certificate():
+    arn = "arn:aws:acm:us-east-1:012146975534:certificate/00000000-0000-0000-0000-000000000000"
+    t = _synth(**{"lou:domain": "louisville.raylytics.io", "lou:certificateArn": arn})
+    res = t.to_json()["Resources"]
+    dist = _only(res, "AWS::CloudFront::Distribution")["DistributionConfig"]
+    assert dist["Aliases"] == ["louisville.raylytics.io"]
+    vc = dist["ViewerCertificate"]
+    assert vc["AcmCertificateArn"] == arn and vc["SslSupportMethod"] == "sni-only"
+    assert vc["MinimumProtocolVersion"] == "TLSv1.2_2021"
+    outs = t.to_json()["Outputs"]
+    assert outs["PublicUrl"]["Value"] == "https://louisville.raylytics.io/"
+
+
+def test_custom_domain_requires_both_values():
+    with pytest.raises(ValueError):
+        _synth(**{"lou:domain": "louisville.raylytics.io"})

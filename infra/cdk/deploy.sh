@@ -50,6 +50,10 @@ esac
 # the alarms and topic still exist, just with no subscriber.
 CTX=()
 [ -n "${LOU_ALERT_EMAIL:-}" ] && CTX=(-c "lou:alertEmail=$LOU_ALERT_EMAIL")
+# Cutover: the public hostname + its ACM certificate (see cutover.sh). Both or
+# neither; the stack refuses one without the other.
+[ -n "${LOU_DOMAIN:-}" ] && CTX+=(-c "lou:domain=$LOU_DOMAIN")
+[ -n "${LOU_CERT_ARN:-}" ] && CTX+=(-c "lou:certificateArn=$LOU_CERT_ARN")
 # ${CTX[@]+"${CTX[@]}"} expands to nothing when the array is empty: a plain
 # "${CTX[@]}" is an unbound-variable error under `set -u` on bash < 4.4
 # (macOS /bin/bash is 3.2).

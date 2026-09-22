@@ -34,6 +34,7 @@ from aws_cdk import (
     Size,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
+    aws_certificatemanager as acm,
     aws_cloudwatch as cw,
     aws_cloudwatch_actions as cw_actions,
     aws_codebuild as codebuild,
@@ -70,6 +71,15 @@ class LouStack(cdk.Stack):
         reserved = int(ctx("lou:reservedConcurrency") or 10)
         ssm_path = str(ctx("lou:ssmPath") or "/lou/prod").rstrip("/")
         waf_on = bool(ctx("lou:waf"))
+        # Cutover (louisville-open-data-lla): the public hostname + an ACM
+        # certificate for it in us-east-1, requested and DNS-validated OUTSIDE
+        # the stack (infra/cdk/cutover.sh) so CloudFormation never waits on a
+        # human adding a record. Both or neither; until then the distribution
+        # answers only on its *.cloudfront.net name.
+        domain = str(ctx("lou:domain") or "").strip() or None
+        cert_arn = str(ctx("lou:certificateArn") or "").strip() or None
+        if bool(domain) != bool(cert_arn):
+            raise ValueError("lou:domain and lou:certificateArn must be set together")
 
         # ── shared state ────────────────────────────────────────────────────
         # One on-demand table for the three things that are per-container on
@@ -236,6 +246,9 @@ class LouStack(cdk.Stack):
             http_version=cloudfront.HttpVersion.HTTP2_AND_3,
             price_class=cloudfront.PriceClass.PRICE_CLASS_100,
             web_acl_id=web_acl.attr_arn if web_acl else None,
+            domain_names=[domain] if domain else None,
+            certificate=acm.Certificate.from_certificate_arn(self, "Cert", cert_arn) if cert_arn else None,
+            minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021 if domain else None,
         )
 
         # Since Oct 2025 a Function URL needs BOTH grants: InvokeFunctionUrl
@@ -365,6 +378,10 @@ class LouStack(cdk.Stack):
         cdk.CfnOutput(self, "RefreshProject", value=build.project_name)
         cdk.CfnOutput(self, "AlertsTopic", value=alerts.topic_arn)
         cdk.CfnOutput(self, "CloudFrontUrl", value=f"https://{dist.distribution_domain_name}/")
+        cdk.CfnOutput(self, "CloudFrontDomain", value=dist.distribution_domain_name,
+                      description="CNAME target for the public hostname at cutover")
+        if domain:
+            cdk.CfnOutput(self, "PublicUrl", value=f"https://{domain}/")
         cdk.CfnOutput(self, "DistributionId", value=dist.distribution_id)
         cdk.CfnOutput(self, "FunctionUrl", value=fn_url.url,
                       description="IAM-auth, CloudFront-only; direct requests are 403 by design")

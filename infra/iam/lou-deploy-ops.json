@@ -96,6 +96,45 @@
         "wafv2:ListTagsForResource"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "AcmForTheCustomDomain",
+      "Comment": "The cutover certificate (louisville-open-data-lla). Certificate ARNs are random, so scoping is by the Project tag: only lou-tagged certificates can be requested, read or deleted.",
+      "Effect": "Allow",
+      "Action": [
+        "acm:RequestCertificate",
+        "acm:AddTagsToCertificate"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestTag/Project": "lou"
+        }
+      }
+    },
+    {
+      "Sid": "AcmReadDeleteLouTaggedOnly",
+      "Effect": "Allow",
+      "Action": [
+        "acm:DescribeCertificate",
+        "acm:DeleteCertificate",
+        "acm:ListTagsForCertificate",
+        "acm:GetCertificate"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/Project": "lou"
+        }
+      }
+    },
+    {
+      "Sid": "AcmListHasNoResourceScope",
+      "Effect": "Allow",
+      "Action": [
+        "acm:ListCertificates"
+      ],
+      "Resource": "*"
     }
   ]
 }
