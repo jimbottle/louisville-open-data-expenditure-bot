@@ -428,7 +428,9 @@ class LouStack(cdk.Stack):
                         "cd \"$CODEBUILD_SRC_DIR/src\" && SNAP=$(date -u +%Y-%m-%d) && aws s3 sync data/ \"s3://$LOU_DATA_BUCKET/snapshots/$SNAP/\" --exclude '.*' --only-show-errors",
                         "cd \"$CODEBUILD_SRC_DIR/src\" && aws s3 cp data/lou.duckdb \"s3://$LOU_DATA_BUCKET/latest/lou.duckdb\" --only-show-errors && aws s3 cp data/rag_documents.duckdb \"s3://$LOU_DATA_BUCKET/latest/rag_documents.duckdb\" --only-show-errors",
                         # 4. Build + push the image and update the function (the stack is the deploy).
-                        "cd \"$CODEBUILD_SRC_DIR/src/infra/cdk\" && npx --yes aws-cdk@2 -c \"lou:alertEmail=$LOU_ALERT_EMAIL\" deploy LouStack --require-approval never --outputs-file /tmp/outputs.json",
+                        #    Same rule as deploy.sh: the live stack's hostname binding is re-applied,
+                        #    or this monthly deploy would detach production from CloudFront.
+                        "cd \"$CODEBUILD_SRC_DIR/src/infra/cdk\" && D=$(aws cloudformation describe-stacks --stack-name LouStack --query \"Stacks[0].Outputs[?OutputKey=='PublicDomain'].OutputValue\" --output text) && C=$(aws cloudformation describe-stacks --stack-name LouStack --query \"Stacks[0].Outputs[?OutputKey=='CertificateArn'].OutputValue\" --output text) && CTX=\"\" && if [ -n \"$D\" ] && [ \"$D\" != None ]; then CTX=\"-c lou:domain=$D -c lou:certificateArn=$C\"; echo \"keeping hostname $D\"; fi && npx --yes aws-cdk@2 -c \"lou:alertEmail=$LOU_ALERT_EMAIL\" $CTX deploy LouStack --require-approval never --outputs-file /tmp/outputs.json",
                     ],
                 },
                 "post_build": {

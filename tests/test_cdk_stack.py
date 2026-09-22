@@ -295,6 +295,10 @@ def test_refresh_build_uses_the_human_created_build_role_and_docker_on_arm(resou
     for step in ("refresh_data.py --skip-graph", "rag.py ingest", "--materialize data/lou.duckdb",
                  "s3 sync data/", "cdk@2", "deploy LouStack", "warm_cache.py"):
         assert step in cmds, step
+    # The monthly deploy must keep the live hostname binding (roborev 4747).
+    deploy_cmd = next(c for c in spec["phases"]["build"]["commands"] if "deploy LouStack" in c)
+    assert "OutputKey=='PublicDomain'" in deploy_cmd and "OutputKey=='CertificateArn'" in deploy_cmd
+    assert "lou:domain=$D" in deploy_cmd and "lou:certificateArn=$C" in deploy_cmd
     # The cache clear must be able to FAIL the build: a bare curl -f, not the
     # deliberately non-fatal refresh_data.clear_response_cache.
     assert 'curl -sf' in cmds and '-X DELETE "${CF}api/cache"' in cmds and "clear_response_cache" not in cmds
