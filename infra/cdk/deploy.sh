@@ -45,7 +45,12 @@ case "$caller" in
   *:assumed-role/lou-deploy/*) echo "== caller: $caller" ;;
   *) echo "!! refusing to run CDK as $caller (expected assumed-role/lou-deploy)"; exit 1 ;;
 esac
-cdk() { npx --yes aws-cdk@2 "$@"; }
+# Alarm e-mail (SNS subscription; louisville-open-data-5cn). Passed as CDK
+# context so the address never lands in the public repo. Optional: without it
+# the alarms and topic still exist, just with no subscriber.
+CTX=()
+[ -n "${LOU_ALERT_EMAIL:-}" ] && CTX=(-c "lou:alertEmail=$LOU_ALERT_EMAIL")
+cdk() { npx --yes aws-cdk@2 "${CTX[@]}" "$@"; }
 
 case "$STEP" in
   synth) cdk synth --quiet && echo "template: cdk.out/LouStack.template.json" ;;

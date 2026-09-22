@@ -100,11 +100,13 @@ class Harness:
     def state_dir(self):
         return self.home / "Library" / "Application Support" / "louisville-bot-heartbeat"
 
-    def run(self, health="", ask="000", state="", now=1000000, start_ok=True, day="2026-01-01"):
+    def run(self, health="", ask="000", state="", now=1000000, start_ok=True, day="2026-01-01",
+            extra_env=None):
         """One invocation of the script. Returns the list of outbound calls."""
         self.calls.write_text("")
         env = dict(
             os.environ,
+            **(extra_env or {}),
             PATH=f"{self.bin}:{os.environ['PATH']}",
             HOME=str(self.home),
             CALLS=str(self.calls),
@@ -317,3 +319,13 @@ def test_script_is_posix_sh_clean():
     assert shutil.which("sh")
     proc = subprocess.run(["/bin/sh", "-n", str(SCRIPT)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_no_container_configured_skips_the_self_heal_entirely(hb):
+    """On the Lambda deployment (louisville-open-data-5cn) there is no
+    container on this host: CONTAINER='' must withhold the ping and touch
+    docker not at all — no inspect, no start, no push about a restart."""
+    calls = hb.run(health="", ask="000", state="exited", extra_env={"CONTAINER": ""})
+    assert not any(c.startswith("DOCKER") for c in calls), calls
+    assert "PING" not in calls, "ping must be withheld"
+    assert not any(c.startswith("NTFY") for c in calls), "no restart push either"

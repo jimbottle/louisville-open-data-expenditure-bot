@@ -1,6 +1,6 @@
 {
   "Version": "2012-10-17",
-  "Comment": "Part 1 of 2 of the deploy-time ceiling (IAM caps a managed policy at 6144 characters, whitespace excluded, and the combined policy was 6680). This half is the SERVICES Lou is built from. It is the half that GROWS: when a deploy surfaces a missing action, it almost always belongs here. Pair with LouDeployGuardrails -- neither is safe alone, and both are attached to lou-deploy and passed to cdk bootstrap.",
+  "Comment": "Deploy-time ceiling, part 1 of 2: what may be BUILT, every resource scoped to the lou-* namespace. Part 2 (guardrails) carries IAM/STS and every Deny. See README.",
   "Statement": [
     {
       "Sid": "CloudFormationOnLouStacksOnly",
@@ -61,7 +61,7 @@
     },
     {
       "Sid": "S3OnLouAndCdkAssetBuckets",
-      "Comment": "S3 bucket ARNs carry NO account ID and bucket names are globally unique, so a bare arn:aws:s3:::lou-* would also match a lou-prefixed bucket owned by a different AWS customer. Buckets are therefore named lou-<purpose>-<account>-<region>, matching the convention CDK already uses for its own assets bucket. See also the S3ResourceAccountPin deny below, which is the control that actually holds if a bucket is ever misnamed.",
+      "Comment": "Buckets must be lou-<purpose>-<account>-<region> (see README naming rules); plus the lou0 CDK asset bucket. ResourceAccount pin blocks a same-named bucket in another account.",
       "Effect": "Allow",
       "Action": "s3:*",
       "Resource": [
@@ -142,6 +142,24 @@
         "cloudwatch:ListMetrics"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "SnsOnLouTopics",
+      "Comment": "Alarm notifications: one lou-* topic with an email subscription.",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:GetTopicAttributes",
+        "sns:SetTopicAttributes",
+        "sns:Subscribe",
+        "sns:Unsubscribe",
+        "sns:ListSubscriptionsByTopic",
+        "sns:TagResource",
+        "sns:UntagResource",
+        "sns:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:sns:us-east-1:${AWS_ACCOUNT_ID}:lou-*"
     },
     {
       "Sid": "SchedulerOnLouSchedules",

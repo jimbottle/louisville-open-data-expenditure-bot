@@ -34,12 +34,16 @@ from aws_cdk import (
     Size,
     aws_cloudfront as cloudfront,
     aws_cloudfront_origins as origins,
+    aws_cloudwatch as cw,
+    aws_cloudwatch_actions as cw_actions,
     aws_dynamodb as dynamodb,
     aws_ecr_assets as ecr_assets,
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_logs as logs,
     aws_s3 as s3,
+    aws_sns as sns,
+    aws_sns_subscriptions as subs,
     aws_wafv2 as wafv2,
 )
 from constructs import Construct
@@ -234,7 +238,48 @@ class LouStack(cdk.Stack):
                 resource_name=dist.distribution_id),
         )
 
+        # ── alarms ──────────────────────────────────────────────────────────
+        # Internal signals the external dead-man's switch (healthchecks.io,
+        # monitoring/README.md) cannot see: function errors, throttles at the
+        # concurrency ceiling (the abuse signal), and requests near the 120 s
+        # timeout. One SNS topic; the email is a context value (lou:alertEmail,
+        # kept out of git) so the public repo does not carry an address.
+        # Alarms are $0.10/month each — three of them, inside the envelope.
+        alerts = sns.Topic(self, "Alerts", topic_name="lou-alerts", display_name="Lou bot alerts")
+        alert_email = ctx("lou:alertEmail")
+        if alert_email:
+            alerts.add_subscription(subs.EmailSubscription(str(alert_email)))
+        notify = cw_actions.SnsAction(alerts)
+
+        def alarm(cid: str, name: str, metric: cw.Metric, threshold: float, description: str,
+                  periods: int = 1, comparison=cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD):
+            a = cw.Alarm(
+                self, cid, alarm_name=name, alarm_description=description, metric=metric,
+                threshold=threshold, evaluation_periods=periods, comparison_operator=comparison,
+                treat_missing_data=cw.TreatMissingData.NOT_BREACHING,
+            )
+            a.add_alarm_action(notify)
+            a.add_ok_action(notify)
+            return a
+
+        alarm("ErrorsAlarm", f"{FUNCTION_NAME}-errors",
+              fn.metric_errors(period=Duration.minutes(5), statistic="Sum"), 1,
+              "lou-bot: one or more invocation errors (init failure, timeout, unhandled exception) in 5 min")
+        alarm("ThrottlesAlarm", f"{FUNCTION_NAME}-throttles",
+              fn.metric_throttles(period=Duration.minutes(5), statistic="Sum"), 1,
+              f"lou-bot: reserved concurrency ({reserved}) hit — a burst or abuse; the DynamoDB limiter should have caught it first")
+        alarm("DurationAlarm", f"{FUNCTION_NAME}-duration-near-timeout",
+              fn.metric_duration(period=Duration.minutes(5), statistic="Maximum"), 110_000,
+              "lou-bot: a request ran within 10 s of the 120 s timeout (stalled upstream stream or pathological retry ladder)")
+        if web_acl:
+            alarm("WafBlockedAlarm", "lou-edge-blocked-spike",
+                  cw.Metric(namespace="AWS/WAFV2", metric_name="BlockedRequests", statistic="Sum",
+                            period=Duration.minutes(5),
+                            dimensions_map={"WebACL": "lou-edge-rate-limit", "Region": "Global", "Rule": "ALL"}),
+                  50, "lou edge: the WAF rate rule is blocking a spike of requests")
+
         # ── outputs ─────────────────────────────────────────────────────────
+        cdk.CfnOutput(self, "AlertsTopic", value=alerts.topic_arn)
         cdk.CfnOutput(self, "CloudFrontUrl", value=f"https://{dist.distribution_domain_name}/")
         cdk.CfnOutput(self, "DistributionId", value=dist.distribution_id)
         cdk.CfnOutput(self, "FunctionUrl", value=fn_url.url,

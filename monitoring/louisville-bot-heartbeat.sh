@@ -14,7 +14,11 @@
 CHECK_UUID='e5f9d7ce-478f-49c5-b3c3-f3be7a7442e6'
 BASE_URL='https://louisville.raylytics.io'
 NTFY_TOPIC='air-server-evan-ee4b28dd81'
-CONTAINER='louisville-bot'
+# The container to `docker start` when it has exited (the self-heal below).
+# Set CONTAINER='' in the LaunchAgent environment once the hostname points at
+# the AWS Lambda deployment (louisville-open-data-lla): there is no container
+# on this host to heal, and the probes above are the whole job.
+CONTAINER="${CONTAINER-louisville-bot}"
 # Overridable so the test harness can point at a stub; production leaves it be.
 DOCKER="${DOCKER:-/usr/local/bin/docker}"
 LOG_DIR="$HOME/Library/Logs"
@@ -169,6 +173,9 @@ rm -f "$DEGRADED_COUNT_FILE" 2>/dev/null
 # Self-heal the one gap autoheal cannot cover: autoheal restarts containers that
 # are running-but-unhealthy, and does nothing for a container that has fully
 # exited (which is how the 2026-08-11 outage stayed down for 5 hours).
+# No container configured (the Lambda deployment): the withheld ping is the
+# whole alert, nothing here can be restarted.
+[ -n "$CONTAINER" ] || exit 0
 [ -x "$DOCKER" ] || exit 0
 
 state=$("$DOCKER" inspect -f '{{.State.Status}}' "$CONTAINER" 2>/dev/null)

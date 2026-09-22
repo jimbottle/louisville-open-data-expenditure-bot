@@ -141,7 +141,33 @@ the recovery reset, and the unwritable-state case. Runs as part of `python -m py
 Worth keeping: every failure mode here is silent by construction and only manifests
 during an outage, which is when nobody is reading the script.
 
-## Deploy / update
+## AWS Lambda deployment (louisville-open-data-5cn)
+
+The same three-layer story applies to LouStack (`infra/cdk`), with one layer
+swapped:
+
+1. **External dead-man's switch — unchanged.** The heartbeat probes the public
+   hostname, which does not change at the cutover. What changes: there is no
+   container on the Air to restart, so the LaunchAgent gets `CONTAINER=` (empty)
+   in its environment and the self-heal section is skipped (test-pinned). The
+   60 s interval is 43,200 invocations/month — over half the projected Lambda
+   compute and enough to keep the function warm, so consider `StartInterval`
+   300 (5 min) and healthchecks period 5m / grace 10m after the cutover.
+2. **`uptime.yml`** now probes BOTH URLs (a matrix: production and the
+   CloudFront URL) and also fails on `state_backend.status != ok` — the
+   DynamoDB table holding the counters is the one dependency the health
+   endpoint reports on separately.
+3. **CloudWatch alarms in the stack** (`lou_stack.py`), notifying the SNS
+   topic `lou-alerts` (email subscription supplied at deploy time as
+   `LOU_ALERT_EMAIL`, confirm the subscription e-mail once):
+   `lou-bot-errors` (any invocation error in 5 min — init failures, timeouts,
+   unhandled exceptions), `lou-bot-throttles` (the reserved-concurrency
+   ceiling was hit: a burst or abuse), `lou-bot-duration-near-timeout` (a
+   request within 10 s of the 120 s timeout). Plus `lou-edge-blocked-spike`
+   when the opt-in WAF is on. Verified 2026-09-22 by deliberately breaking the
+   function configuration: see the bd issue for the timing.
+
+
 
 The MCP shell runner takes one command at a time (no `&&`, `;`, `|`, or redirection):
 

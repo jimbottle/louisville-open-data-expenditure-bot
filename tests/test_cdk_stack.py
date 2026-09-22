@@ -229,3 +229,37 @@ def test_every_runtime_grant_is_inside_the_permissions_boundary(resources):
     assert granted, "no runtime grants found"
     outside = sorted(a for a in granted if not _boundary_allows(a, boundary))
     assert not outside, f"granted to the function but outside the boundary (dead at runtime): {outside}"
+
+
+# ── alarms (louisville-open-data-5cn) ──────────────────────────────────────
+
+def test_alarms_cover_errors_throttles_and_duration_and_notify_the_topic(resources):
+    topic = _only(resources, "AWS::SNS::Topic")
+    assert topic["TopicName"] == "lou-alerts"
+    topic_ref = next(k for k, r in resources.items() if r["Type"] == "AWS::SNS::Topic")
+    alarms = {r["Properties"]["AlarmName"]: r["Properties"]
+              for r in resources.values() if r["Type"] == "AWS::CloudWatch::Alarm"}
+    assert set(alarms) == {"lou-bot-errors", "lou-bot-throttles", "lou-bot-duration-near-timeout"}
+    for name, a in alarms.items():
+        assert a["Namespace"] == "AWS/Lambda", name
+        assert a["AlarmActions"] == [{"Ref": topic_ref}] and a["OKActions"] == [{"Ref": topic_ref}], name
+        assert a["TreatMissingData"] == "notBreaching", name
+        assert a["Period"] == 300, name
+    assert alarms["lou-bot-errors"]["MetricName"] == "Errors" and alarms["lou-bot-errors"]["Threshold"] == 1
+    assert alarms["lou-bot-throttles"]["MetricName"] == "Throttles"
+    d = alarms["lou-bot-duration-near-timeout"]
+    assert d["MetricName"] == "Duration" and d["Statistic"] == "Maximum" and d["Threshold"] == 110000
+    # No subscriber without the context value: the address stays out of git.
+    assert not any(r["Type"] == "AWS::SNS::Subscription" for r in resources.values())
+
+
+def test_alert_email_becomes_a_subscription_only_via_context():
+    t = _synth(**{"lou:alertEmail": "ops@example.invalid"})
+    sub = _only(t.to_json()["Resources"], "AWS::SNS::Subscription")
+    assert sub["Protocol"] == "email" and sub["Endpoint"] == "ops@example.invalid"
+
+
+def test_waf_alarm_only_when_waf_is_on():
+    res = _synth(**{"lou:waf": True}).to_json()["Resources"]
+    names = {r["Properties"]["AlarmName"] for r in res.values() if r["Type"] == "AWS::CloudWatch::Alarm"}
+    assert "lou-edge-blocked-spike" in names

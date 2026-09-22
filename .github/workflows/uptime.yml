@@ -30,6 +30,22 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Production (the Air, via the cloudflared tunnel) until the DNS
+          # cutover (louisville-open-data-lla); after it, the same hostname
+          # points at CloudFront and this row is the only one needed.
+          - name: production
+            base: https://louisville.raylytics.io
+          # The AWS deployment (LouStack, louisville-open-data-i0q), probed in
+          # parallel so the cutover starts from a known-green monitor.
+          - name: aws-lambda
+            base: https://daiothak3jrp6.cloudfront.net
+    name: probe (${{ matrix.name }})
+    env:
+      BASE: ${{ matrix.base }}
     steps:
       - name: Keep-alive (reset the 60-day scheduled-workflow auto-disable)
         env:
@@ -39,7 +55,7 @@ jobs:
             || echo "::warning::keep-alive re-enable failed (non-fatal)"
       - name: Health probe
         run: |
-          body=$(curl -sS --fail --max-time 20 https://louisville.raylytics.io/api/health)
+          body=$(curl -sS --fail --max-time 20 "$BASE/api/health")
           echo "$body" | jq .
           status=$(echo "$body" | jq -r .status)
           fallback=$(echo "$body" | jq -c '.model_fallback // empty')
@@ -55,6 +71,13 @@ jobs:
           if [ "$errs" != "0" ]; then
             echo "::warning::errors_last_hour=$errs (status still ok — likely rate-limit noise)"
           fi
+          # On the Lambda deployment the counters live in DynamoDB; the app
+          # reports that backend's own health separately (state_backend).
+          backend=$(echo "$body" | jq -r '.state_backend.status // "ok"')
+          if [ "$backend" != "ok" ]; then
+            echo "::error::state backend degraded: $(echo "$body" | jq -c .state_backend)"
+            exit 1
+          fi
 
       - name: API end-to-end probe (SSE handshake, no LLM cost)
         run: |
@@ -64,7 +87,7 @@ jobs:
           body='{"question":""}'
           code_type=$(curl -sS -o /dev/null --max-time 30 \
             -w '%{http_code} %{content_type}' \
-            -X POST https://louisville.raylytics.io/api/ask \
+            -X POST "$BASE/api/ask" \
             -H 'Content-Type: application/json' \
             -H "x-amz-content-sha256: $(printf '%s' "$body" | sha256sum | cut -d' ' -f1)" \
             --data "$body")
