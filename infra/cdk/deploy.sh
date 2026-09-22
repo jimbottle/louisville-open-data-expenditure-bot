@@ -63,15 +63,18 @@ CTX=()
 # Fail CLOSED: only "the stack does not exist yet" (the first deploy) means
 # "no hostname". Any other failure (throttle, expired session, permission)
 # stops the run — treating it as "no domain" would be the silent detach again.
+# stderr goes to a temp file, never into the value: the CLI writes warnings
+# to stderr on SUCCESSFUL calls too (urllib3/LibreSSL, deprecation notices),
+# and a merged stream would hand CDK a hostname with a warning glued on.
 stack_out() {
-  local out
+  local out err; err=$(mktemp)
   if out=$(aws cloudformation describe-stacks --stack-name LouStack \
-        --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>&1); then
-    printf '%s' "$out"
-  elif printf '%s' "$out" | grep -q 'does not exist'; then
-    printf ''
+        --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>"$err"); then
+    rm -f "$err"; printf '%s' "$out"
+  elif grep -q 'does not exist' "$err"; then
+    rm -f "$err"; printf ''
   else
-    echo "!! cannot read LouStack outputs ($1): $out" >&2
+    echo "!! cannot read LouStack outputs ($1): $(cat "$err")" >&2; rm -f "$err"
     return 1
   fi
 }

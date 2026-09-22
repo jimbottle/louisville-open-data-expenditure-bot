@@ -20,6 +20,7 @@ case "$*" in
   *"configure export-credentials"*) echo 'export AWS_ACCESS_KEY_ID=x; export AWS_SECRET_ACCESS_KEY=y; export AWS_SESSION_TOKEN=z' ;;
   *"sts get-caller-identity"*) echo "arn:aws:sts::012146975534:assumed-role/lou-deploy/test" ;;
   *"describe-stacks"*)
+    [ -n "${WARN_STDERR:-}" ] && echo "urllib3 NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+" >&2
     case "${DESCRIBE_MODE:-ok}" in
       throttle) echo "An error occurred (Throttling) when calling the DescribeStacks operation: Rate exceeded" >&2; exit 254 ;;
       missing)  echo "An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id LouStack does not exist" >&2; exit 254 ;;
@@ -116,3 +117,14 @@ def test_missing_stack_is_the_only_no_domain_error(harness):
     proc, calls = harness("synth", env={"DESCRIBE_MODE": "missing"})
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "lou:domain" not in _cdk_args(calls)[0]
+
+
+def test_cli_warnings_on_stderr_do_not_pollute_the_hostname(harness):
+    """The AWS CLI warns on stderr while exiting 0 (LibreSSL, deprecations);
+    the adopted value must be the bare hostname (roborev 4751)."""
+    proc, calls = harness("synth", env={"WARN_STDERR": "1", "LIVE_DOMAIN": "louisville.raylytics.io",
+                                        "LIVE_CERT": "arn:aws:acm:us-east-1:012146975534:certificate/abc"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    npx = _cdk_args(calls)[0]
+    assert "-c lou:domain=louisville.raylytics.io -c" in npx, npx
+    assert "NotOpenSSLWarning" not in npx
