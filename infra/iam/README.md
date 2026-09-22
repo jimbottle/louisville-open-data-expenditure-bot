@@ -244,9 +244,21 @@ npx cdk bootstrap aws://<ACCOUNT_ID>/us-east-1 \
   --qualifier lou0 \
   --toolkit-stack-name CDKToolkit-Lou \
   --cloudformation-execution-policies arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployServices,arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployGuardrails \
-  --custom-permissions-boundary LouPermissionsBoundary \
   --trust <ACCOUNT_ID>
 ```
+
+> **Do NOT pass `--custom-permissions-boundary LouPermissionsBoundary` here.**
+> That flag puts the boundary on the CloudFormation *execution* role — the
+> deployer — and the boundary is the **runtime** ceiling: it allows only what
+> the running function needs and explicitly denies `lambda:CreateFunction`.
+> Capped by it, the deployer cannot create a single resource; the first
+> LouStack deploy failed with "no permissions boundary allows
+> ssm:GetParameters" (2026-09-22) before it got to anything else. The
+> boundary reaches the roles the *stack* creates by a different route:
+> `LouDeployGuardrails` denies `iam:CreateRole` without it, and the stack sets
+> it explicitly (`infra/cdk/lou_stack.py`). If a bootstrap already carries the
+> flag, re-run the command above without it — the bootstrap stack update
+> removes the boundary from the execution role.
 
 The CDK app must then use the same qualifier, or it will look for
 default-named bootstrap resources and fail:
