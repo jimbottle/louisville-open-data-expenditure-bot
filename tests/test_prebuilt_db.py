@@ -196,3 +196,26 @@ def test_artifact_omits_internal_helper_tables(real_artifact):
     assert [t for t in tables if t.startswith("_")] == ["_value_index"], tables
     assert "expenditures" in tables
     assert "summary_agency_spend" in tables
+
+
+def test_prebuilt_honors_duckdb_temp_dir(tmp_path, monkeypatch):
+    """Lambda's filesystem is read-only except /tmp; a spill to the default
+    `<db>.tmp` beside the artifact would fail the query. DUCKDB_TEMP_DIR
+    redirects it, must be applied before the lockdown (which freezes
+    directory settings), and must create the directory."""
+    db = _tiny_db(str(tmp_path / "t.duckdb"))
+    spill = tmp_path / "spill" / "duckdb"
+    monkeypatch.setenv("DUCKDB_TEMP_DIR", str(spill))
+    con = dm.load_prebuilt(db)
+    assert con.execute("SELECT current_setting('temp_directory')").fetchone()[0] == str(spill)
+    assert spill.is_dir()
+    # Lockdown still applied on top of it.
+    with pytest.raises(duckdb.Error):
+        con.execute("SELECT * FROM read_csv('/etc/passwd')")
+
+
+def test_prebuilt_without_duckdb_temp_dir_leaves_the_default(tmp_path, monkeypatch):
+    db = _tiny_db(str(tmp_path / "t.duckdb"))
+    monkeypatch.delenv("DUCKDB_TEMP_DIR", raising=False)
+    con = dm.load_prebuilt(db)
+    assert con.execute("SELECT current_setting('temp_directory')").fetchone()[0].endswith("t.duckdb.tmp")

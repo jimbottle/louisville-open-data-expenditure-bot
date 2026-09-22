@@ -1,0 +1,82 @@
+# Lambda container image for the Lou bot (louisville-open-data-n8w).
+#
+# Differs from ./Dockerfile (the self-hosted Docker image) in four ways:
+#   1. Lambda Web Adapter rides along as an extension and proxies each invoke
+#      to uvicorn; AWS_LWA_INVOKE_MODE=response_stream keeps /api/ask
+#      streaming token-by-token (verified: spike/sse-lwa/results.md).
+#   2. The finished DuckDB artifact and the document corpus are BAKED IN. The
+#      531 MB of CSVs are build inputs only and are not in the image; the
+#      artifact is produced beforehand with `python data_model.py --materialize
+#      data/lou.duckdb` and the corpus with `python rag.py ingest`.
+#   3. The filesystem is read-only at runtime except /tmp, so everything the
+#      app writes (stats, response cache, DuckDB spill files) is pointed there.
+#      HOME is fixed to a baked, world-readable directory so DuckDB finds the
+#      FTS extension installed at build time — Lambda does not set HOME, and
+#      it runs the container as a non-root uid, so /root would be unreadable.
+#   4. arm64 (Graviton): ~20% cheaper per ms and native to build on Apple
+#      silicon. Build with:  docker buildx build --platform linux/arm64 -f Dockerfile.lambda .
+#
+# Nothing here is exercised by the self-hosted deploy; that keeps using ./Dockerfile.
+FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.0 AS lwa
+
+FROM python:3.12-slim
+COPY --from=lwa /lambda-adapter /opt/extensions/lambda-adapter
+
+# HOME must be set before the INSTALL below so the extension lands where the
+# runtime will look for it. /opt is on the image, readable by any uid.
+ENV HOME=/opt/lou-home \
+    PYTHONUNBUFFERED=1 \
+    PORT=8000 \
+    AWS_LWA_PORT=8000 \
+    AWS_LWA_INVOKE_MODE=response_stream \
+    AWS_LWA_READINESS_CHECK_PATH=/api/health \
+    AWS_LWA_READINESS_CHECK_PROTOCOL=http \
+    DATA_DIR=/app/data \
+    PREBUILT_DB=/app/data/lou.duckdb \
+    STATS_DIR=/tmp \
+    DUCKDB_TEMP_DIR=/tmp/duckdb
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Bake the DuckDB FTS extension. Retrieval LOADs it per query and LOAD does
+# not install; without this every answer silently loses its citations. LOAD
+# here as well: an INSTALL that succeeds while LOAD fails (partial download,
+# build/runtime mismatch) is exactly the failure being defended against and
+# would otherwise ship green. Then make the tree readable by the non-root uid
+# Lambda runs as.
+RUN mkdir -p "$HOME" \
+ && python -c "import duckdb; duckdb.connect().execute('INSTALL fts; LOAD fts')" \
+ && chmod -R a+rX "$HOME" \
+ && test -n "$(find "$HOME/.duckdb/extensions" -name 'fts.duckdb_extension' -print -quit)"
+
+COPY analytics_agent.py app.py data_model.py city_config.py rag.py grounding.py ./
+COPY cities/ cities/
+COPY static/ static/
+# The two serving inputs. Both are gitignored build products; the build fails
+# loudly here if either is missing rather than shipping an image that boots
+# (PREBUILT_DB missing fails at startup on purpose) or answers uncited.
+COPY data/lou.duckdb data/rag_documents.duckdb data/
+RUN chmod -R a+rX /app
+
+# Prove, inside the image, that the serving path works as a non-root uid with
+# HOME as set: the artifact opens read-only, the corpus is queryable WITH FTS
+# (a real retrieve, not a stat), and the temp directory setting sticks.
+USER 1000:1000
+RUN python - <<'PY'
+import os, duckdb, rag
+from data_model import load_prebuilt
+con = load_prebuilt(os.environ["PREBUILT_DB"])
+assert con.execute("SELECT COUNT(*) FROM expenditures").fetchone()[0] > 1_000_000
+assert con.execute("SELECT current_setting('temp_directory')").fetchone()[0] == os.environ["DUCKDB_TEMP_DIR"]
+db = os.path.join(os.environ["DATA_DIR"], "rag_documents.duckdb")
+assert rag.corpus_size(db) > 0, "empty corpus"
+assert rag.retrieve("budget", k=1, db_path=db, min_score=0.0), "FTS retrieve returned nothing"
+print("image self-check ok")
+PY
+USER root
+
+# Single worker: the whole point of Lambda is one request per execution
+# environment; a second worker would only double the resident DuckDB.
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--timeout-keep-alive", "30"]

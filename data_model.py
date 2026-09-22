@@ -452,6 +452,15 @@ def load_prebuilt(db_path: str) -> duckdb.DuckDBPyConnection:
             f"python data_model.py --materialize {db_path}"
         )
     con = duckdb.connect(db_path, read_only=True)
+    # DuckDB spills sorts/aggregates that exceed its memory limit to
+    # `<db_path>.tmp` by default. On Lambda the image filesystem is read-only
+    # and only /tmp is writable, so a spill there would fail the query instead
+    # of the query merely slowing down. Must be set BEFORE _lock_down: once
+    # external access is off, DuckDB refuses to change directory settings.
+    temp_dir = os.environ.get("DUCKDB_TEMP_DIR")
+    if temp_dir:
+        os.makedirs(temp_dir, exist_ok=True)
+        con.execute(f"SET temp_directory = '{temp_dir.replace(chr(39), chr(39) * 2)}'")
     _lock_down(con)
     return con
 

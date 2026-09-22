@@ -1,0 +1,25 @@
+# Keep the build context small. Neither Dockerfile copies these; without this
+# file every `docker build` shipped the 531 MB of CSVs (plus the second city's
+# data, tests, eval results and .git) to the daemon for nothing.
+.git
+.beads
+.claude
+__pycache__
+**/__pycache__
+*.pyc
+.env
+.venv
+venv
+tests
+eval
+docs
+spike
+graph
+infra
+monitoring
+tools
+data_cincinnati
+# Data: only the two serving artifacts Dockerfile.lambda bakes in.
+data/*
+!data/lou.duckdb
+!data/rag_documents.duckdb
