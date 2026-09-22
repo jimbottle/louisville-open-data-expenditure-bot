@@ -51,6 +51,37 @@ if LOG_DIR:
         print(f"Warning: could not set up file logging in {LOG_DIR}: {e}")
 
 log = logging.getLogger("app")
+
+
+def _load_secrets_from_ssm() -> int:
+    """On Lambda the secrets live in SSM Parameter Store as SecureStrings under
+    SSM_PARAMETER_PATH (e.g. /lou/prod/OPENROUTER_API_KEY), not in the function
+    configuration, where they would sit in plain text in every CloudFormation
+    template and console view. Read once at cold start into os.environ, so the
+    rest of the app keeps its plain `os.environ.get(...)` reads. An explicitly
+    set environment variable wins over the parameter of the same name. Values
+    are never logged. Unset SSM_PARAMETER_PATH (the self-hosted deploy) and this
+    is a no-op that never imports boto3.
+
+    Runs at import, before ADMIN_TOKEN and the LLM clients read the env."""
+    path = os.environ.get("SSM_PARAMETER_PATH", "").strip().rstrip("/")
+    if not path:
+        return 0
+    import boto3
+    ssm = boto3.client("ssm")
+    loaded = 0
+    for page in ssm.get_paginator("get_parameters_by_path").paginate(Path=path, WithDecryption=True):
+        for prm in page.get("Parameters", []):
+            name = prm["Name"].rsplit("/", 1)[-1]
+            if name and name not in os.environ:
+                os.environ[name] = prm["Value"]
+                loaded += 1
+    log.info("Loaded %d secret(s) from SSM under %s", loaded, path)
+    return loaded
+
+
+_load_secrets_from_ssm()
+
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 import state_store
@@ -801,7 +832,10 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
     # A deploy that forgets TRUSTED_PROXY_IPS silently collapses the per-IP rate
     # limit to one site-wide bucket behind the tunnel (every request shares the
     # bridge-gateway peer). Make that misconfiguration loud, not silent.
-    if not TRUSTED_PROXY_IPS:
+    if CLIENT_IP_SOURCE == "cloudfront":
+        log.info("Client IP from the CloudFront-appended hop (CLIENT_IP_SOURCE=cloudfront); "
+                 "TRUSTED_PROXY_IPS not used")
+    elif not TRUSTED_PROXY_IPS:
         log.warning("TRUSTED_PROXY_IPS is unset — forwarded client-IP headers "
                     "are not trusted, so ALL proxied traffic shares ONE rate-limit "
                     "bucket (the per-IP %d/min limit acts site-wide). Set "

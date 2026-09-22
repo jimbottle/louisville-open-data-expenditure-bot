@@ -25,3 +25,5 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Run tests (data-bound tests auto-skip without the gitignored data)
         run: python -m pytest -q -rs
+        env:
+          JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION: "1"

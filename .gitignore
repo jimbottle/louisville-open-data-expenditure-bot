@@ -20,3 +20,6 @@ data_cincinnati/
 # Rendered IAM policies contain the AWS account ID (repo is public)
 infra/iam/rendered/
 spike/sse-lwa/.deploy-state.json
+cdk.out/
+infra/cdk/cdk.out/
+cdk.context.json
