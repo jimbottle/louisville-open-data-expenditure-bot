@@ -331,9 +331,15 @@ class LouStack(cdk.Stack):
         )
         # Monthly, 1st at 09:00 UTC (early morning US Eastern). Manual runs:
         # aws codebuild start-build --project-name lou-refresh --profile lou
+        # In its own lou-* schedule group: the deploy policy scopes Scheduler to
+        # schedule/lou-*/* and schedule-group/lou-*, and the "default" group's
+        # ARN (schedule/default/<name>) would fall outside that.
+        group = scheduler.ScheduleGroup(self, "RefreshGroup", schedule_group_name="lou-refresh",
+                                        removal_policy=cdk.RemovalPolicy.DESTROY)
         scheduler.Schedule(
             self, "RefreshSchedule",
             schedule_name="lou-refresh-monthly",
+            schedule_group=group,
             description="Lou data refresh + redeploy",
             schedule=scheduler.ScheduleExpression.cron(minute="0", hour="9", day="1", month="*", year="*"),
             target=scheduler_targets.CodeBuildStartBuild(build, role=build_role),

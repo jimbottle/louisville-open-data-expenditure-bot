@@ -304,6 +304,11 @@ def test_refresh_is_scheduled_monthly_and_failures_alert(resources):
     sched = _only(resources, "AWS::Scheduler::Schedule")
     assert sched["Name"] == "lou-refresh-monthly"
     assert sched["ScheduleExpression"] == "cron(0 9 1 * ? *)"
+    # Not the "default" group: its ARN is schedule/default/<name>, outside the
+    # deploy policy's schedule/lou-*/* scope (first 0nu deploy failed on it).
+    grp = _only(resources, "AWS::Scheduler::ScheduleGroup")
+    assert grp["Name"] == "lou-refresh"
+    assert sched["GroupName"] == "lou-refresh"
     assert "role/lou/lou-build" in json.dumps(sched["Target"]["RoleArn"])
     proj_id = next(k for k, r in resources.items() if r["Type"] == "AWS::CodeBuild::Project")
     assert sched["Target"]["Arn"] == {"Fn::GetAtt": [proj_id, "Arn"]}
