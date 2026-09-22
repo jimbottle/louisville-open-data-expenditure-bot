@@ -24,7 +24,6 @@ cd "$(dirname "$0")"
 P="--profile lou"
 STEP=${1:-deploy}
 
-echo "== caller: $(aws sts get-caller-identity $P --query Arn --output text)"
 [ -f ../../data/lou.duckdb ] || { echo "data/lou.duckdb missing — run: python data_model.py --materialize data/lou.duckdb"; exit 1; }
 [ -f ../../data/rag_documents.duckdb ] || { echo "data/rag_documents.duckdb missing — run: python rag.py ingest"; exit 1; }
 
@@ -32,16 +31,40 @@ echo "== caller: $(aws sts get-caller-identity $P --query Arn --output text)"
 # a script, and does not read the AWS CLI's cached session. Hand it the session
 # the CLI already holds (primed by `aws sts get-caller-identity --profile lou`)
 # as environment variables — inside this process only; nothing is printed.
-eval "$(aws configure export-credentials $P --format env)"
+# Fail CLOSED: if the export fails or yields no session, stop here rather than
+# let the CDK CLI fall through to the default credential chain (the
+# workstation's `default` profile is another workload's key and must never
+# deploy Lou). Then assert the identity the CLI will actually see.
+creds=$(aws configure export-credentials $P --format env) \
+  || { echo "!! no cached lou session — run: aws sts get-caller-identity --profile lou"; exit 1; }
+eval "$creds"; unset creds
+[ -n "${AWS_SESSION_TOKEN:-}" ] || { echo "!! export-credentials produced no session token"; exit 1; }
+export AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1
+caller=$(aws sts get-caller-identity --query Arn --output text) || { echo "!! identity check failed"; exit 1; }
+case "$caller" in
+  *:assumed-role/lou-deploy/*) echo "== caller: $caller" ;;
+  *) echo "!! refusing to run CDK as $caller (expected assumed-role/lou-deploy)"; exit 1 ;;
+esac
 cdk() { npx --yes aws-cdk@2 "$@"; }
 
 case "$STEP" in
   synth) cdk synth --quiet && echo "template: cdk.out/LouStack.template.json" ;;
   diff)  cdk diff ;;
   deploy)
-    cdk diff || true
-    # Approval is the human reading the diff above (this script is driven from
-    # a non-interactive shell, where the CLI's own prompt cannot be answered).
+    cdk diff
+    # Security-relevant changes (IAM statements, resource policies, security
+    # groups) fail closed: the CLI's interactive prompt cannot be answered from
+    # the shell this runs in, so the gate is explicit. Read `./deploy.sh diff`,
+    # then re-run with LOU_ALLOW_BROADENING=1 for that one deploy. Changes with
+    # no security impact deploy without it.
+    if ! cdk diff --security-only --fail >/dev/null 2>&1; then
+      if [ "${LOU_ALLOW_BROADENING:-}" != "1" ]; then
+        echo "!! this deploy widens IAM/security state (see the diff above)."
+        echo "!! re-run with LOU_ALLOW_BROADENING=1 ./infra/cdk/deploy.sh after reading it."
+        exit 1
+      fi
+      echo "== broadening changes approved for this run (LOU_ALLOW_BROADENING=1)"
+    fi
     # The image is built (arm64, needs Docker) and pushed here.
     cdk deploy --require-approval never --outputs-file cdk.out/outputs.json
     CF=$(python3 -c "import json; print(json.load(open('cdk.out/outputs.json'))['LouStack']['CloudFrontUrl'])")

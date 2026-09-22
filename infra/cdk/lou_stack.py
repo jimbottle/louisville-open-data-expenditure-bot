@@ -101,9 +101,12 @@ class LouStack(cdk.Stack):
                 self, "Boundary", "LouPermissionsBoundary"),
             description="Runtime role for the Lou bot Lambda",
         )
+        # Every action here must also be allowed by LouPermissionsBoundary
+        # (the effective permission is the intersection); tests/test_cdk_stack.py
+        # checks that against infra/iam/lou-permissions-boundary.json.
         role.add_to_policy(iam.PolicyStatement(
             sid="ReadSecretsAtColdStart",
-            actions=["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
+            actions=["ssm:GetParameter", "ssm:GetParameters"],   # by name; no path listing
             resources=[self.format_arn(service="ssm", resource="parameter", resource_name="lou/*")],
         ))
         role.add_to_policy(iam.PolicyStatement(
@@ -112,7 +115,14 @@ class LouStack(cdk.Stack):
             resources=["*"],
             conditions={"StringEquals": {"kms:ViaService": f"ssm.{self.region}.amazonaws.com"}},
         ))
-        table.grant_read_write_data(role)
+        role.add_to_policy(iam.PolicyStatement(
+            sid="StateTable",
+            # Exactly what state_store.py calls — not grant_read_write_data,
+            # which also grants stream actions the boundary does not.
+            actions=["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:DeleteItem",
+                     "dynamodb:Query", "dynamodb:Scan", "dynamodb:BatchWriteItem"],
+            resources=[table.table_arn],
+        ))
 
         # ── logs ────────────────────────────────────────────────────────────
         log_group = logs.LogGroup(
@@ -170,6 +180,21 @@ class LouStack(cdk.Stack):
         # origin request because Function URLs reject a forwarded Host;
         # compression stays off — it would buffer the stream (spike 4l4).
         web_acl = self._web_acl() if waf_on else None
+        # Custom origin request policy rather than the managed
+        # AllViewerExceptHostHeader: that one forwards viewer headers only, and
+        # the rate limiter keys on CloudFront-Viewer-Address, a CloudFront-added
+        # header. Allow-list the viewer headers the app actually reads plus that
+        # one; Host stays out (Function URLs reject a forwarded Host).
+        origin_request_policy = cloudfront.OriginRequestPolicy(
+            self, "OriginRequest",
+            origin_request_policy_name="lou-viewer-headers-and-address",
+            comment="App headers + CloudFront-Viewer-Address; never Host",
+            header_behavior=cloudfront.OriginRequestHeaderBehavior.allow_list(
+                "CloudFront-Viewer-Address", "Content-Type", "Accept", "Accept-Language",
+                "User-Agent", "Origin", "X-Admin-Token", "x-amz-content-sha256"),
+            query_string_behavior=cloudfront.OriginRequestQueryStringBehavior.all(),
+            cookie_behavior=cloudfront.OriginRequestCookieBehavior.none(),
+        )
         dist = cloudfront.Distribution(
             self, "Cdn",
             comment="Lou bot (lou-bot Function URL, OAC)",
@@ -183,7 +208,7 @@ class LouStack(cdk.Stack):
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
                 cached_methods=cloudfront.CachedMethods.CACHE_GET_HEAD,
                 cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
-                origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                origin_request_policy=origin_request_policy,
                 compress=False,
             ),
             http_version=cloudfront.HttpVersion.HTTP2_AND_3,

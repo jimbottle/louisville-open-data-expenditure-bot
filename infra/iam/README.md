@@ -351,6 +351,29 @@ aws iam create-policy-version \
 
 Commit the template change so the policy stays reviewable in git.
 
+What the first LouStack deploys (2026-09-22) actually surfaced, so the next
+person knows the shape of these:
+
+- `ssm:GetParameters` on `/cdk-bootstrap/lou0/*` — every CDK template
+  resolves its BootstrapVersion parameter from SSM at changeset time.
+- `cloudfront:CreateDistributionWithTags`, `ListTagsForResource`,
+  `UntagResource`, and the `*OriginRequestPolicy` calls — CloudFormation uses
+  the tag-aware API for a tagged distribution, and the stack defines a custom
+  origin request policy.
+- `iam:GetRole` on the path-less `role/lou-*` (guardrails) — CloudFormation
+  calls GetRole by name before CreateRole, and for a role that does not exist
+  yet IAM evaluates that against an ARN without the path. Read-only; every
+  write stays on `/lou/`.
+- `dynamodb:Scan` in the **boundary** — the cache cap eviction and the admin
+  listing scan the small `cache#` prefix.
+
+A failed CREATE can leave the stack in `ROLLBACK_FAILED` when the rollback's
+DeleteRole hits the same by-name evaluation on a role that was never created.
+Fix the policy, then delete the stack — `aws cloudformation delete-stack
+--stack-name LouStack --retain-resources <LogicalId>` for the resource that
+refuses — and deploy again; `cdk deploy` cannot proceed from `ROLLBACK_FAILED`
+on its own.
+
 ## Teardown
 
 ```bash

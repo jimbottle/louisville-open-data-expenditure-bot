@@ -77,7 +77,8 @@ def test_role_policy_is_minimal(resources):
         for st in p["PolicyDocument"]["Statement"]:
             a = st["Action"]
             actions.update(a if isinstance(a, list) else [a])
-    assert {"ssm:GetParametersByPath", "kms:Decrypt", "dynamodb:PutItem", "logs:PutLogEvents"} <= actions
+    assert {"ssm:GetParameters", "kms:Decrypt", "dynamodb:PutItem", "dynamodb:Scan", "logs:PutLogEvents"} <= actions
+    assert "ssm:GetParametersByPath" not in actions, "outside the boundary; the loader fetches by name"
     assert not any(a.startswith(("iam:", "ec2:", "s3:Delete", "lambda:")) for a in actions), actions
 
 
@@ -140,7 +141,18 @@ def test_cloudfront_uses_oac_no_cache_no_compress_no_host(resources):
     assert origin["CustomOriginConfig"]["OriginReadTimeout"] == 60
     b = dist["DefaultCacheBehavior"]
     assert b["CachePolicyId"] == "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"          # Managed-CachingDisabled
-    assert b["OriginRequestPolicyId"] == "b689b0a8-53d0-40ab-baf2-68738e2966ac"  # Managed-AllViewerExceptHostHeader
+    # Custom origin request policy: the app's viewer headers plus the
+    # CloudFront-added viewer address the rate limiter keys on; never Host.
+    orp = _only(resources, "AWS::CloudFront::OriginRequestPolicy")["OriginRequestPolicyConfig"]
+    assert b["OriginRequestPolicyId"] == {"Ref": next(
+        k for k, r in resources.items() if r["Type"] == "AWS::CloudFront::OriginRequestPolicy")}
+    headers = orp["HeadersConfig"]
+    assert headers["HeaderBehavior"] == "whitelist"
+    names = {h.lower() for h in headers["Headers"]}
+    assert {"cloudfront-viewer-address", "content-type", "x-amz-content-sha256", "x-admin-token"} <= names
+    assert "host" not in names
+    assert orp["QueryStringsConfig"]["QueryStringBehavior"] == "all"
+    assert orp["CookiesConfig"]["CookieBehavior"] == "none"
     assert b["Compress"] is False
     assert set(b["AllowedMethods"]) >= {"GET", "POST", "OPTIONS"}
     assert b["ViewerProtocolPolicy"] == "redirect-to-https"
@@ -184,3 +196,35 @@ def test_memory_and_concurrency_are_context_tunable():
     fn = _only(_synth(**{"lou:memoryMb": 2048, "lou:reservedConcurrency": 3}).to_json()["Resources"],
                "AWS::Lambda::Function")
     assert fn["MemorySize"] == 2048 and fn["ReservedConcurrentExecutions"] == 3
+
+
+# ── the boundary is the effective ceiling ──────────────────────────────────
+
+def _boundary_allows(action: str, boundary: dict) -> bool:
+    import fnmatch
+    allowed = denied = False
+    for st in boundary["Statement"]:
+        acts = st["Action"] if isinstance(st["Action"], list) else [st["Action"]]
+        hit = any(fnmatch.fnmatchcase(action, a) for a in acts)
+        if hit and st["Effect"] == "Allow":
+            allowed = True
+        if hit and st["Effect"] == "Deny":
+            denied = True
+    return allowed and not denied
+
+
+def test_every_runtime_grant_is_inside_the_permissions_boundary(resources):
+    """The exec role's effective permissions are the intersection of its
+    policy and LouPermissionsBoundary. A grant the boundary does not allow is
+    silently dead at runtime — exactly how ssm:GetParametersByPath and
+    dynamodb:Scan were missing on the first deploy attempt."""
+    boundary = json.loads((ROOT / "infra" / "iam" / "lou-permissions-boundary.json").read_text())
+    granted = set()
+    for r in resources.values():
+        if r["Type"] == "AWS::IAM::Policy":
+            for st in r["Properties"]["PolicyDocument"]["Statement"]:
+                a = st["Action"]
+                granted.update(a if isinstance(a, list) else [a])
+    assert granted, "no runtime grants found"
+    outside = sorted(a for a in granted if not _boundary_allows(a, boundary))
+    assert not outside, f"granted to the function but outside the boundary (dead at runtime): {outside}"

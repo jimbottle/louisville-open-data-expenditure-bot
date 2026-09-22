@@ -166,7 +166,7 @@
     },
     {
       "Sid": "CdkBootstrapVersionParameterRead",
-      "Comment": "Every CDK template carries a BootstrapVersion parameter resolved from SSM at changeset time; the cfn-exec role (which carries this policy) must read it. Found on the first LouStack deploy (2026-09-22). Read-only, and only Lou's own qualifier.",
+      "Comment": "CDK templates resolve BootstrapVersion from SSM at changeset time. Read-only, lou0 only.",
       "Effect": "Allow",
       "Action": [
         "ssm:GetParameter",
@@ -190,6 +190,7 @@
     },
     {
       "Sid": "CloudFrontHasNoResourceLevelPermissionsSeeReadme",
+      "Comment": "CloudFront has no resource-level scoping (README). Tag-aware + origin-request-policy calls: CloudFormation needs them.",
       "Effect": "Allow",
       "Action": [
         "cloudfront:CreateDistribution",
@@ -214,10 +215,13 @@
         "cloudfront:DeleteResponseHeadersPolicy",
         "cloudfront:CreateDistributionWithTags",
         "cloudfront:ListTagsForResource",
-        "cloudfront:UntagResource"
+        "cloudfront:UntagResource",
+        "cloudfront:CreateOriginRequestPolicy",
+        "cloudfront:GetOriginRequestPolicy",
+        "cloudfront:UpdateOriginRequestPolicy",
+        "cloudfront:DeleteOriginRequestPolicy"
       ],
-      "Resource": "*",
-      "Comment": "CreateDistributionWithTags/ListTagsForResource/UntagResource: CloudFormation uses the tag-aware calls for a tagged distribution (first LouStack deploy, 2026-09-22)."
+      "Resource": "*"
     },
     {
       "Sid": "WafV2ForCloudFrontSeeReadme",

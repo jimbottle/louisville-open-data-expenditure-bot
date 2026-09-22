@@ -255,3 +255,34 @@ def test_ensure_table_is_idempotent_and_enables_ttl(dynamo):
     ss.ensure_table(dynamo, TABLE)
     ttl = dynamo.describe_time_to_live(TableName=TABLE)["TimeToLiveDescription"]
     assert ttl["TimeToLiveStatus"] == "ENABLED" and ttl["AttributeName"] == "ttl"
+
+
+# ── availability over bookkeeping ───────────────────────────────────────────
+
+def test_cache_and_stats_degrade_when_dynamodb_is_unreachable(dynamo, caplog):
+    s = _state(dynamo)
+    s.table = "no-such-table"
+    assert s.cache_get("v:q") is None
+    s.cache_put("v:q", FRAMES)                 # no raise
+    assert s.cache_delete("v:q") is False
+    assert s.cache_clear() == 0
+    assert s.cache_items() == {} and s.cache_len() == 0
+    s.stats_error("sql_gen", "x")               # no raise
+    s.stats_usage(1, 1)
+    s.stats_limits_set({"rpm": 1})
+    assert set(s.stats_error_summary()) == HEALTH_ERROR_KEYS
+    assert s.stats_usage_get()["requests_today"] == 0
+    assert s.stats_limits_get()["rpm"] is None
+    assert "DynamoDB unavailable" in caplog.text
+
+
+def test_cache_hit_survives_eviction_between_read_and_touch(dynamo, monkeypatch):
+    s = _state(dynamo)
+    s.cache_put("v:q", FRAMES)
+    real_update = s._c.update_item
+    def delete_then_update(**kw):
+        if "touched" in kw.get("UpdateExpression", ""):
+            s._c.delete_item(TableName=TABLE, Key=kw["Key"])
+        return real_update(**kw)
+    monkeypatch.setattr(s._c, "update_item", delete_then_update)
+    assert s.cache_get("v:q") == FRAMES, "a hit that lost the touch race is still a hit"

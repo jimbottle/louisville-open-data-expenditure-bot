@@ -52,6 +52,8 @@ if LOG_DIR:
 
 log = logging.getLogger("app")
 
+SSM_SECRET_NAMES = ("OPENROUTER_API_KEY", "CEREBRAS_PAID_API_KEY", "ADMIN_TOKEN")
+
 
 def _load_secrets_from_ssm() -> int:
     """On Lambda the secrets live in SSM Parameter Store as SecureStrings under
@@ -67,17 +69,28 @@ def _load_secrets_from_ssm() -> int:
     path = os.environ.get("SSM_PARAMETER_PATH", "").strip().rstrip("/")
     if not path:
         return 0
+    # Named parameters, not a path listing: the permissions boundary allows
+    # ssm:GetParameter(s) on /lou/* but not GetParametersByPath, and naming
+    # them also stops an unrelated sibling parameter from landing in the env.
+    names = [n.strip() for n in os.environ.get("SSM_SECRET_NAMES", ",".join(SSM_SECRET_NAMES)).split(",") if n.strip()]
+    wanted = [n for n in names if n not in os.environ]
+    if not wanted:
+        log.info("All %d secrets already set in the environment; SSM not consulted", len(names))
+        return 0
     import boto3
-    ssm = boto3.client("ssm")
+    resp = boto3.client("ssm").get_parameters(Names=[f"{path}/{n}" for n in wanted], WithDecryption=True)
     loaded = 0
-    for page in ssm.get_paginator("get_parameters_by_path").paginate(Path=path, WithDecryption=True):
-        for prm in page.get("Parameters", []):
-            name = prm["Name"].rsplit("/", 1)[-1]
-            if name and name not in os.environ:
-                os.environ[name] = prm["Value"]
-                loaded += 1
+    for prm in resp.get("Parameters", []):
+        name = prm["Name"].rsplit("/", 1)[-1]
+        if name in wanted:
+            os.environ[name] = prm["Value"]
+            loaded += 1
+    missing = [p.rsplit("/", 1)[-1] for p in resp.get("InvalidParameters", [])]
+    if missing:
+        log.warning("SSM parameter(s) not found under %s: %s", path, ", ".join(missing))
     log.info("Loaded %d secret(s) from SSM under %s", loaded, path)
     return loaded
+
 
 
 _load_secrets_from_ssm()
@@ -267,6 +280,18 @@ if CLIENT_IP_SOURCE not in ("peer", "cloudfront"):
 STATE = state_store.from_env()
 
 
+_viewer_address_warned = False
+
+
+def _warn_missing_viewer_address_once() -> None:
+    global _viewer_address_warned
+    if not _viewer_address_warned:
+        _viewer_address_warned = True
+        log.error("CLIENT_IP_SOURCE=cloudfront but no CloudFront-Viewer-Address header arrived; "
+                  "falling back to the last X-Forwarded-For hop. Check the distribution's origin "
+                  "request policy forwards CloudFront-Viewer-Address (infra/cdk/lou_stack.py).")
+
+
 def _client_ip(request: Request) -> str:
     """The client IP for rate limiting: the forwarded client only when the
     immediate peer is a trusted proxy, else the peer address itself."""
@@ -274,14 +299,21 @@ def _client_ip(request: Request) -> str:
     if CLIENT_IP_SOURCE == "cloudfront":
         viewer = request.headers.get("cloudfront-viewer-address")
         if viewer:
-            # "ip:port" for IPv4, "[v6]:port" or "v6:port" for IPv6 — drop the port.
+            # The header ALWAYS carries the source port: "ip:port" for IPv4,
+            # "v6:port" (or "[v6]:port") for IPv6. Strip exactly one.
             v = viewer.strip()
             if v.startswith("["):
                 return v[1:v.index("]")] if "]" in v else v
-            return v.rsplit(":", 1)[0] if v.count(":") == 1 else v
+            return v.rsplit(":", 1)[0]
         xff = request.headers.get("x-forwarded-for")
         if xff:
-            return xff.split(",")[-1].strip()  # the hop CloudFront appended
+            # Only a fallback: the stack's origin request policy forwards
+            # CloudFront-Viewer-Address, so reaching here means the policy
+            # is wrong. Behind a Function URL the last XFF hop may be the
+            # CloudFront edge rather than the viewer, which would collapse
+            # the limit to one site-wide bucket — fail-safe, but loud.
+            _warn_missing_viewer_address_once()
+            return xff.split(",")[-1].strip()
         return peer
     if peer in TRUSTED_PROXY_IPS:
         cf = request.headers.get("cf-connecting-ip")

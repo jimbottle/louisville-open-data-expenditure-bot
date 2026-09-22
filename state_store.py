@@ -36,6 +36,7 @@ not take the site down with it.
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -43,6 +44,31 @@ import time
 from datetime import date, datetime
 
 log = logging.getLogger("state_store")
+
+
+def _best_effort(default):
+    """Availability over bookkeeping: a DynamoDB error in a cache or stats call
+    is logged and the call degrades (a miss, a no-op, zeros) instead of turning
+    the request into a 500. The limiter's fail-open in rate_allow is the same
+    stance. `default` may be a value or a zero-arg callable."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(self, *a, **k):
+            try:
+                return fn(self, *a, **k)
+            except Exception as e:  # noqa: BLE001
+                log.error("%s: DynamoDB unavailable (%s: %s); degrading", fn.__name__, type(e).__name__, e)
+                return default() if callable(default) else default
+        return wrapper
+    return deco
+
+
+def _empty_error_summary() -> dict:
+    return {
+        "total_errors": 0, "errors_last_hour": 0, "sql_gen_errors": 0, "sql_exec_errors": 0,
+        "interpretation_errors": 0, "rate_limit_errors": 0, "quota_errors": 0,
+        "last_quota_error": None, "quota_error_recent": False, "last_error": None, "last_error_time": None,
+    }
 
 DEAD_LINK_MARKER = "LegislationDetail.aspx"
 QUOTA_CATEGORIES = ("quota", "daily_cap")
@@ -155,6 +181,7 @@ class DynamoState:
 
     # ── response cache ──────────────────────────────────────────────────────
 
+    @_best_effort(None)
     def cache_get(self, key: str, now: float | None = None) -> list[str] | None:
         now = time.time() if now is None else now
         pk = f"cache#{key}"
@@ -170,15 +197,20 @@ class DynamoState:
             log.info("Dropped cached answer carrying a dead citation link: %s", key[:60])
             return None
         # LRU touch: a served answer must not age out, and its TTL moves too.
-        self._c.update_item(
-            TableName=self.table, Key={"pk": _s(pk)},
-            UpdateExpression="SET touched = :now, #ttl = :ttl",
-            ConditionExpression="attribute_exists(pk)",
-            ExpressionAttributeNames={"#ttl": "ttl"},
-            ExpressionAttributeValues={":now": _n(now), ":ttl": _n(now + self.cache_ttl_s)},
-        )
+        # Evicted between the read and the touch? Still a hit — serve it.
+        try:
+            self._c.update_item(
+                TableName=self.table, Key={"pk": _s(pk)},
+                UpdateExpression="SET touched = :now, #ttl = :ttl",
+                ConditionExpression="attribute_exists(pk)",
+                ExpressionAttributeNames={"#ttl": "ttl"},
+                ExpressionAttributeValues={":now": _n(now), ":ttl": _n(now + self.cache_ttl_s)},
+            )
+        except self._c.exceptions.ConditionalCheckFailedException:
+            pass
         return events
 
+    @_best_effort(None)
     def cache_put(self, key: str, events: list[str], now: float | None = None) -> None:
         now = time.time() if now is None else now
         self._c.put_item(TableName=self.table, Item={
@@ -187,16 +219,19 @@ class DynamoState:
         })
         self._evict_to_cap()
 
+    @_best_effort(False)
     def cache_delete(self, key: str) -> bool:
         r = self._c.delete_item(TableName=self.table, Key={"pk": _s(f"cache#{key}")},
                                 ReturnValues="ALL_OLD")
         return "Attributes" in r
 
+    @_best_effort(0)
     def cache_clear(self) -> int:
         keys = [pk for pk, _ in self._scan_cache(prefix="", with_touched=False)]
         self._batch_delete(keys)
         return len(keys)
 
+    @_best_effort(dict)
     def cache_items(self, prefix: str = "") -> dict[str, list[str]]:
         """key -> events for entries whose key starts with prefix (the current
         prompt version, normally). Admin listing + warm_cache verification."""
@@ -205,6 +240,7 @@ class DynamoState:
             out[pk[len("cache#"):]] = json.loads(_str(item, "events", "[]"))
         return out
 
+    @_best_effort(0)
     def cache_len(self, prefix: str = "") -> int:
         return sum(1 for _ in self._scan_cache(prefix=prefix, with_touched=False))
 
@@ -243,6 +279,7 @@ class DynamoState:
 
     # ── stats ───────────────────────────────────────────────────────────────
 
+    @_best_effort(None)
     def stats_error(self, category: str, detail: str = "", now: float | None = None) -> None:
         now = time.time() if now is None else now
         msg = f"{category}: {detail}" if detail else category
@@ -269,6 +306,7 @@ class DynamoState:
                                 UpdateExpression="SET recent = :r",
                                 ExpressionAttributeValues={":r": {"L": keep}})
 
+    @_best_effort(_empty_error_summary)
     def stats_error_summary(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
         item = self._c.get_item(TableName=self.table, Key={"pk": _s("stats#errors")}).get("Item", {})
@@ -288,6 +326,7 @@ class DynamoState:
             "last_error_time": _str(item, "last_error_time"),
         }
 
+    @_best_effort(None)
     def stats_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0,
                     today: str | None = None) -> None:
         today = today or date.today().isoformat()
@@ -302,6 +341,7 @@ class DynamoState:
                                        ":ttl": _n(time.time() + 3 * 86400)},
         )
 
+    @_best_effort(lambda: {"requests_today": 0, "tokens_today": 0, "prompt_tokens_today": 0, "completion_tokens_today": 0, "date": date.today().isoformat()})
     def stats_usage_get(self, today: str | None = None) -> dict:
         today = today or date.today().isoformat()
         item = self._c.get_item(TableName=self.table, Key={"pk": _s(f"stats#usage#{today}")}).get("Item", {})
@@ -313,6 +353,7 @@ class DynamoState:
             "date": today,
         }
 
+    @_best_effort(None)
     def stats_limits_set(self, limits: dict[str, int]) -> None:
         if not limits:
             return
@@ -324,6 +365,7 @@ class DynamoState:
             ExpressionAttributeNames=names, ExpressionAttributeValues=values,
         )
 
+    @_best_effort(lambda: {k: None for k in ("rpm", "rpd", "tpm", "tpd", "rpm_remaining", "rpd_remaining", "tpm_remaining", "tpd_remaining")})
     def stats_limits_get(self) -> dict:
         item = self._c.get_item(TableName=self.table, Key={"pk": _s("stats#limits")}).get("Item", {})
         return {k: _num(item, k, None) for k in

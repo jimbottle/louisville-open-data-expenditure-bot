@@ -5,7 +5,11 @@
     {
       "Sid": "WriteItsOwnLogs",
       "Effect": "Allow",
-      "Action": ["logs:CreateLogStream", "logs:PutLogEvents", "logs:CreateLogGroup"],
+      "Action": [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:CreateLogGroup"
+      ],
       "Resource": [
         "arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:/aws/lambda/lou-*",
         "arn:aws:logs:us-east-1:${AWS_ACCOUNT_ID}:log-group:/aws/lambda/lou-*:*"
@@ -22,17 +26,22 @@
         "dynamodb:Query",
         "dynamodb:BatchGetItem",
         "dynamodb:BatchWriteItem",
-        "dynamodb:ConditionCheckItem"
+        "dynamodb:ConditionCheckItem",
+        "dynamodb:Scan"
       ],
       "Resource": [
         "arn:aws:dynamodb:us-east-1:${AWS_ACCOUNT_ID}:table/lou-*",
         "arn:aws:dynamodb:us-east-1:${AWS_ACCOUNT_ID}:table/lou-*/index/*"
-      ]
+      ],
+      "Comment": "Scan: the cache cap eviction and the admin listing scan the cache# prefix of a <=500-item table."
     },
     {
       "Sid": "ReadItsOwnSecrets",
       "Effect": "Allow",
-      "Action": ["ssm:GetParameter", "ssm:GetParameters"],
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ],
       "Resource": "arn:aws:ssm:us-east-1:${AWS_ACCOUNT_ID}:parameter/lou/*"
     },
     {
@@ -41,20 +50,27 @@
       "Action": "kms:Decrypt",
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "kms:ViaService": "ssm.us-east-1.amazonaws.com" }
+        "StringEquals": {
+          "kms:ViaService": "ssm.us-east-1.amazonaws.com"
+        }
       }
     },
     {
       "Sid": "ReadBuildInputsFromItsOwnBuckets",
       "Comment": "Account-suffixed for the same reason as the service policy: S3 bucket ARNs have no account field and the name namespace is global, so arn:aws:s3:::lou-* alone would also match another customer's bucket.",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:ListBucket"],
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
       "Resource": [
         "arn:aws:s3:::lou-*-${AWS_ACCOUNT_ID}-us-east-1",
         "arn:aws:s3:::lou-*-${AWS_ACCOUNT_ID}-us-east-1/*"
       ],
       "Condition": {
-        "StringEquals": { "aws:ResourceAccount": "${AWS_ACCOUNT_ID}" }
+        "StringEquals": {
+          "aws:ResourceAccount": "${AWS_ACCOUNT_ID}"
+        }
       }
     },
     {
@@ -64,7 +80,9 @@
       "Action": "s3:*",
       "Resource": "*",
       "Condition": {
-        "StringNotEqualsIfExists": { "aws:ResourceAccount": "${AWS_ACCOUNT_ID}" }
+        "StringNotEqualsIfExists": {
+          "aws:ResourceAccount": "${AWS_ACCOUNT_ID}"
+        }
       }
     },
     {
@@ -73,7 +91,9 @@
       "Action": "cloudwatch:PutMetricData",
       "Resource": "*",
       "Condition": {
-        "StringEquals": { "cloudwatch:namespace": "Lou" }
+        "StringEquals": {
+          "cloudwatch:namespace": "Lou"
+        }
       }
     },
     {

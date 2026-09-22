@@ -43,6 +43,8 @@ def test_loads_secure_strings_into_env_without_logging_values(loader, monkeypatc
         assert "NOT_MINE" not in os.environ
         assert "or-secret-1" not in caplog.text and "adm-secret-2" not in caplog.text
         assert "Loaded 2 secret(s)" in caplog.text
+        # The third expected name was absent: reported by NAME, values never.
+        assert "not found under /lou/test: CEREBRAS_PAID_API_KEY" in caplog.text
 
 
 def test_explicit_env_wins_over_the_parameter(loader, monkeypatch):

@@ -140,8 +140,8 @@ def _rl_pk(ip, ddb):
 
 @pytest.mark.parametrize("header,expected", [
     ("198.51.100.7:4433", "198.51.100.7"),
+    ("2001:db8::1:46532", "2001:db8::1"),   # IPv6 as CloudFront sends it: unbracketed, port appended
     ("[2001:db8::1]:443", "2001:db8::1"),
-    ("2001:db8::1", "2001:db8::1"),
 ])
 def test_cloudfront_viewer_address_header_wins_and_drops_the_port(dyn_client, monkeypatch, header, expected):
     import app
@@ -149,6 +149,31 @@ def test_cloudfront_viewer_address_header_wins_and_drops_the_port(dyn_client, mo
     monkeypatch.setattr(app, "CLIENT_IP_SOURCE", "cloudfront")
     _post(c, "viewer header", **{"CloudFront-Viewer-Address": header, "X-Forwarded-For": "9.9.9.9, 8.8.8.8"})
     assert _rl_pk(expected, ddb)
+
+
+def test_missing_viewer_address_falls_back_loudly_once(dyn_client, monkeypatch, caplog):
+    import app
+    c, state, ddb = dyn_client
+    monkeypatch.setattr(app, "CLIENT_IP_SOURCE", "cloudfront")
+    monkeypatch.setattr(app, "_viewer_address_warned", False)
+    with caplog.at_level("ERROR"):
+        _post(c, "no viewer header", **{"X-Forwarded-For": "9.9.9.9, 203.0.113.9"})
+        _post(c, "again", **{"X-Forwarded-For": "9.9.9.9, 203.0.113.9"})
+    assert caplog.text.count("no CloudFront-Viewer-Address header") == 1
+    assert _rl_pk("203.0.113.9", ddb)
+
+
+def test_dynamodb_outage_degrades_instead_of_500(dyn_client, monkeypatch):
+    """The cache read runs before any LLM work on every question; an outage
+    must be a miss, not a 500, and the answer must still stream."""
+    import app
+    c, state, ddb = dyn_client
+    state.table = "no-such-table"
+    r = _post(c, "during an outage")
+    assert r.status_code == 200
+    assert "interpretation" in _types(_events(r))
+    h = c.get("/api/health").json()
+    assert h["status"] == "ok" and h["errors"]["errors_last_hour"] == 0
 
 
 def test_cache_admin_endpoints_use_the_table(dyn_client, monkeypatch):
