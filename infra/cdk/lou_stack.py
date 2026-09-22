@@ -189,9 +189,13 @@ class LouStack(cdk.Stack):
             self, "OriginRequest",
             origin_request_policy_name="lou-viewer-headers-and-address",
             comment="App headers + CloudFront-Viewer-Address; never Host",
+            # x-amz-content-sha256 (the OAC body hash, 22e) is deliberately NOT
+            # listed: CloudFront rejects x-amz-* headers in a policy ("not
+            # allowed") because it consumes them for SigV4 itself — the spike's
+            # POSTs through OAC never had it forwarded and worked.
             header_behavior=cloudfront.OriginRequestHeaderBehavior.allow_list(
                 "CloudFront-Viewer-Address", "Content-Type", "Accept", "Accept-Language",
-                "User-Agent", "Origin", "X-Admin-Token", "x-amz-content-sha256"),
+                "User-Agent", "Origin", "X-Admin-Token"),
             query_string_behavior=cloudfront.OriginRequestQueryStringBehavior.all(),
             cookie_behavior=cloudfront.OriginRequestCookieBehavior.none(),
         )

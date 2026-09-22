@@ -149,8 +149,9 @@ def test_cloudfront_uses_oac_no_cache_no_compress_no_host(resources):
     headers = orp["HeadersConfig"]
     assert headers["HeaderBehavior"] == "whitelist"
     names = {h.lower() for h in headers["Headers"]}
-    assert {"cloudfront-viewer-address", "content-type", "x-amz-content-sha256", "x-admin-token"} <= names
+    assert {"cloudfront-viewer-address", "content-type", "x-admin-token"} <= names
     assert "host" not in names
+    assert not any(n.startswith("x-amz-") for n in names), "CloudFront rejects x-amz-* in a policy; OAC handles them"
     assert orp["QueryStringsConfig"]["QueryStringBehavior"] == "all"
     assert orp["CookiesConfig"]["CookieBehavior"] == "none"
     assert b["Compress"] is False
