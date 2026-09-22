@@ -62,6 +62,12 @@ bd close <id>         # Complete work
 >
 > When asked to "test the bot on the site" or to "publish/deploy," the target is
 > **https://louisville.raylytics.io/**. Verify changes there, not at a LAN IP.
+>
+> **AWS parallel deployment (migration, not yet cut over):** LouStack serves the
+> same app at `https://daiothak3jrp6.cloudfront.net/` (CloudFront → OAC →
+> Lambda `lou-bot`, deployed 2026-09-22 via `infra/cdk/deploy.sh`). It is a
+> second, independent deployment with its own state table and secrets; it is
+> NOT production until the DNS cutover (bd `louisville-open-data-lla`).
 
 ### Production path (how the URL maps to the app)
 
