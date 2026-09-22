@@ -274,7 +274,7 @@ def main():
             clear_response_cache(args.data_dir)
             elapsed = time.time() - start
             print(f"\nData pull complete in {elapsed / 60:.1f} minutes.")
-            return
+            return 0 if success else 1
 
         # Step 2: Build contractor profiles
         success = build_profiles(args.data_dir, args.skip_sos, args.profile_top) and success
@@ -307,7 +307,11 @@ def main():
     print(f"\n  Data directory: {args.data_dir}")
     print(f"  CSV files: {csv_count}")
     print(f"\n  IMPORTANT: Re-warm starter question caches after restarting the bot")
+    # A truthful exit code: the scheduled AWS build (lou-refresh) runs this
+    # unattended, and a partial pull must fail the build rather than flow into
+    # a materialize + deploy of half the data. Interactive use is unchanged.
+    return 0 if success else 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -336,7 +336,7 @@ class LouStack(cdk.Stack):
         # ARN (schedule/default/<name>) would fall outside that.
         group = scheduler.ScheduleGroup(self, "RefreshGroup", schedule_group_name="lou-refresh",
                                         removal_policy=cdk.RemovalPolicy.DESTROY)
-        scheduler.Schedule(
+        sched = scheduler.Schedule(
             self, "RefreshSchedule",
             schedule_name="lou-refresh-monthly",
             schedule_group=group,
@@ -344,6 +344,10 @@ class LouStack(cdk.Stack):
             schedule=scheduler.ScheduleExpression.cron(minute="0", hour="9", day="1", month="*", year="*"),
             target=scheduler_targets.CodeBuildStartBuild(build, role=build_role),
         )
+        # The L2 emits the group NAME, not a Ref, so CloudFormation would
+        # otherwise create both in parallel and CreateSchedule can race the
+        # group ("schedule group does not exist").
+        sched.node.add_dependency(group)
         # A failed or stopped build is a silent stale-data outage otherwise.
         events.Rule(
             self, "RefreshFailed",
@@ -410,7 +414,11 @@ class LouStack(cdk.Stack):
                     "commands": [
                         # 5. Verify through CloudFront, invalidate the cache (data changed under it), re-warm.
                         "export CF=$(python3 -c \"import json; print(json.load(open('/tmp/outputs.json'))['LouStack']['CloudFrontUrl'])\") && curl -sf --max-time 60 \"${CF}api/health\" >/dev/null",
-                        "cd \"$CODEBUILD_SRC_DIR/src\" && LOU_API_BASE=\"$CF\" python -c \"import refresh_data; refresh_data.clear_response_cache('data')\"",
+                        # Fail CLOSED: refresh_data.clear_response_cache is deliberately
+                        # non-fatal for the self-hosted flow; here a wrong token or an
+                        # edge block would otherwise leave last month's answers cached
+                        # while the build reports SUCCEEDED.
+                        "curl -sf --max-time 30 -X DELETE \"${CF}api/cache\" -H \"X-Admin-Token: $ADMIN_TOKEN\" && echo cache-cleared",
                         "cd \"$CODEBUILD_SRC_DIR/src\" && python warm_cache.py --host \"${CF%/}\" --delay 5",
                     ],
                 },

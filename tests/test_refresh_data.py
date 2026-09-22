@@ -44,3 +44,22 @@ def test_cache_clear_targets_lou_api_base_without_a_body(tmp_path, monkeypatch):
     assert seen["url"] == "https://example.cloudfront.net/api/cache"
     assert "json" not in seen["kw"] and "data" not in seen["kw"]
     assert seen["kw"]["headers"] == {"X-Admin-Token": "t0k"}
+
+
+def test_main_exit_code_reflects_failed_steps(monkeypatch):
+    """The unattended build must not deploy a partial refresh: a failed pull
+    (or profiles/ingest) makes main() return 1, which sys.exit turns into a
+    failed CodeBuild phase and a lou-alerts notification."""
+    import refresh_data
+    monkeypatch.setattr(refresh_data, "clear_response_cache", lambda *a, **k: None)
+    monkeypatch.setattr(refresh_data, "pull_datasets", lambda *a, **k: False)
+    monkeypatch.setattr("sys.argv", ["refresh_data.py", "--pull-only", "-o", "/tmp"])
+    assert refresh_data.main() == 1
+    monkeypatch.setattr(refresh_data, "pull_datasets", lambda *a, **k: True)
+    assert refresh_data.main() == 0
+    # Full path: a failing ingest after a good pull is still a failure.
+    monkeypatch.setattr(refresh_data, "build_profiles", lambda *a, **k: True)
+    monkeypatch.setattr(refresh_data, "scrape_officers", lambda *a, **k: True)
+    monkeypatch.setattr(refresh_data, "ingest_documents", lambda *a, **k: False)
+    monkeypatch.setattr("sys.argv", ["refresh_data.py", "--skip-graph", "-o", "/tmp"])
+    assert refresh_data.main() == 1

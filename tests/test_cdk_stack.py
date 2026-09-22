@@ -293,8 +293,14 @@ def test_refresh_build_uses_the_human_created_build_role_and_docker_on_arm(resou
     assert spec["env"]["parameter-store"]["ADMIN_TOKEN"] == "/lou/prod/ADMIN_TOKEN"
     cmds = " ".join(spec["phases"]["build"]["commands"] + spec["phases"]["post_build"]["commands"])
     for step in ("refresh_data.py --skip-graph", "rag.py ingest", "--materialize data/lou.duckdb",
-                 "s3 sync data/", "cdk@2", "deploy LouStack", "clear_response_cache", "warm_cache.py"):
+                 "s3 sync data/", "cdk@2", "deploy LouStack", "warm_cache.py"):
         assert step in cmds, step
+    # The cache clear must be able to FAIL the build: a bare curl -f, not the
+    # deliberately non-fatal refresh_data.clear_response_cache.
+    assert 'curl -sf' in cmds and '-X DELETE "${CF}api/cache"' in cmds and "clear_response_cache" not in cmds
+    # Every command anchors on an absolute path: CodeBuild keeps the cwd between commands.
+    all_cmds = [c for ph in spec["phases"].values() for c in ph.get("commands", [])]
+    assert all("$CODEBUILD_SRC_DIR" in c or c.startswith("export CF=") or c.startswith("curl ") for c in all_cmds), all_cmds
     # No CDK-created role for the build: the stack references, never creates, it.
     roles = [r["Properties"]["RoleName"] for r in resources.values() if r["Type"] == "AWS::IAM::Role"]
     assert roles == ["lou-lambda-exec"], roles
@@ -309,6 +315,9 @@ def test_refresh_is_scheduled_monthly_and_failures_alert(resources):
     grp = _only(resources, "AWS::Scheduler::ScheduleGroup")
     assert grp["Name"] == "lou-refresh"
     assert sched["GroupName"] == "lou-refresh"
+    grp_id = next(k for k, r in resources.items() if r["Type"] == "AWS::Scheduler::ScheduleGroup")
+    sched_res = next(r for r in resources.values() if r["Type"] == "AWS::Scheduler::Schedule")
+    assert grp_id in sched_res.get("DependsOn", []), "schedule must wait for its group (create-order race)"
     assert "role/lou/lou-build" in json.dumps(sched["Target"]["RoleArn"])
     proj_id = next(k for k, r in resources.items() if r["Type"] == "AWS::CodeBuild::Project")
     assert sched["Target"]["Arn"] == {"Fn::GetAtt": [proj_id, "Arn"]}
