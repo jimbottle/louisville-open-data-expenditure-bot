@@ -26,7 +26,7 @@ if ! printf '%s' "$AWS_ACCOUNT_ID" | grep -Eq '^[0-9]{12}$'; then
   exit 1
 fi
 
-for f in lou-dev-user-policy lou-deploy-trust lou-deploy-services lou-deploy-guardrails lou-permissions-boundary; do
+for f in lou-dev-user-policy lou-deploy-trust lou-deploy-services lou-deploy-guardrails lou-deploy-ops lou-permissions-boundary; do
   # Drop the "Comment" keys: they document intent here but IAM rejects them.
   python3 - "$f.json" "$OUT/$f.json" "$AWS_ACCOUNT_ID" <<'PY'
 import json, sys

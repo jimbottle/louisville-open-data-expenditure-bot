@@ -1,6 +1,6 @@
 {
   "Version": "2012-10-17",
-  "Comment": "Deploy-time ceiling, part 1 of 2: what may be BUILT, every resource scoped to the lou-* namespace. Part 2 (guardrails) carries IAM/STS and every Deny. See README.",
+  "Comment": "Deploy-time ceiling, part 1 of 3: the serving plane that may be BUILT (CloudFormation, Lambda, DynamoDB, S3, ECR, logs, SSM, CloudFront), scoped to lou-*. Part 2 = guardrails (IAM/STS + every Deny), part 3 = ops (automation + observability). Split for the 6144-char IAM limit. Rationale: infra/iam/README.md.",
   "Statement": [
     {
       "Sid": "CloudFormationOnLouStacksOnly",
@@ -61,7 +61,6 @@
     },
     {
       "Sid": "S3OnLouAndCdkAssetBuckets",
-      "Comment": "Buckets must be lou-<purpose>-<account>-<region> (see README naming rules); plus the lou0 CDK asset bucket. ResourceAccount pin blocks a same-named bucket in another account.",
       "Effect": "Allow",
       "Action": "s3:*",
       "Resource": [
@@ -121,56 +120,6 @@
       "Resource": "*"
     },
     {
-      "Sid": "CloudWatchAlarmsOnLouOnly",
-      "Effect": "Allow",
-      "Action": [
-        "cloudwatch:PutMetricAlarm",
-        "cloudwatch:DeleteAlarms",
-        "cloudwatch:EnableAlarmActions",
-        "cloudwatch:DisableAlarmActions",
-        "cloudwatch:TagResource"
-      ],
-      "Resource": "arn:aws:cloudwatch:us-east-1:${AWS_ACCOUNT_ID}:alarm:lou-*"
-    },
-    {
-      "Sid": "CloudWatchReadIsAccountLevelOnly",
-      "Effect": "Allow",
-      "Action": [
-        "cloudwatch:DescribeAlarms",
-        "cloudwatch:GetMetricData",
-        "cloudwatch:GetMetricStatistics",
-        "cloudwatch:ListMetrics"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "SnsOnLouTopics",
-      "Comment": "Alarm notifications: one lou-* topic with an email subscription.",
-      "Effect": "Allow",
-      "Action": [
-        "sns:CreateTopic",
-        "sns:DeleteTopic",
-        "sns:GetTopicAttributes",
-        "sns:SetTopicAttributes",
-        "sns:Subscribe",
-        "sns:Unsubscribe",
-        "sns:ListSubscriptionsByTopic",
-        "sns:TagResource",
-        "sns:UntagResource",
-        "sns:ListTagsForResource"
-      ],
-      "Resource": "arn:aws:sns:us-east-1:${AWS_ACCOUNT_ID}:lou-*"
-    },
-    {
-      "Sid": "SchedulerOnLouSchedules",
-      "Effect": "Allow",
-      "Action": "scheduler:*",
-      "Resource": [
-        "arn:aws:scheduler:us-east-1:${AWS_ACCOUNT_ID}:schedule/lou-*/*",
-        "arn:aws:scheduler:us-east-1:${AWS_ACCOUNT_ID}:schedule-group/lou-*"
-      ]
-    },
-    {
       "Sid": "SsmReadLouParametersOnly",
       "Effect": "Allow",
       "Action": [
@@ -184,7 +133,6 @@
     },
     {
       "Sid": "CdkBootstrapVersionParameterRead",
-      "Comment": "CDK templates resolve BootstrapVersion from SSM at changeset time. Read-only, lou0 only.",
       "Effect": "Allow",
       "Action": [
         "ssm:GetParameter",
@@ -208,7 +156,6 @@
     },
     {
       "Sid": "CloudFrontHasNoResourceLevelPermissionsSeeReadme",
-      "Comment": "CloudFront has no resource-level scoping (README). Tag-aware + origin-request-policy calls: CloudFormation needs them.",
       "Effect": "Allow",
       "Action": [
         "cloudfront:CreateDistribution",
@@ -238,22 +185,6 @@
         "cloudfront:GetOriginRequestPolicy",
         "cloudfront:UpdateOriginRequestPolicy",
         "cloudfront:DeleteOriginRequestPolicy"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "WafV2ForCloudFrontSeeReadme",
-      "Effect": "Allow",
-      "Action": [
-        "wafv2:CreateWebACL",
-        "wafv2:UpdateWebACL",
-        "wafv2:DeleteWebACL",
-        "wafv2:GetWebACL",
-        "wafv2:ListWebACLs",
-        "wafv2:AssociateWebACL",
-        "wafv2:DisassociateWebACL",
-        "wafv2:TagResource",
-        "wafv2:ListTagsForResource"
       ],
       "Resource": "*"
     }

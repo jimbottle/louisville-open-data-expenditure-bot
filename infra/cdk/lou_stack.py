@@ -36,12 +36,17 @@ from aws_cdk import (
     aws_cloudfront_origins as origins,
     aws_cloudwatch as cw,
     aws_cloudwatch_actions as cw_actions,
+    aws_codebuild as codebuild,
     aws_dynamodb as dynamodb,
     aws_ecr_assets as ecr_assets,
+    aws_events as events,
+    aws_events_targets as events_targets,
     aws_iam as iam,
     aws_lambda as lambda_,
     aws_logs as logs,
     aws_s3 as s3,
+    aws_scheduler as scheduler,
+    aws_scheduler_targets as scheduler_targets,
     aws_sns as sns,
     aws_sns_subscriptions as subs,
     aws_wafv2 as wafv2,
@@ -92,6 +97,12 @@ class LouStack(cdk.Stack):
             encryption=s3.BucketEncryption.S3_MANAGED,
             enforce_ssl=True,
             removal_policy=cdk.RemovalPolicy.RETAIN,
+            lifecycle_rules=[s3.LifecycleRule(
+                id="expire-refresh-snapshots",
+                prefix="snapshots/",
+                expiration=Duration.days(90),
+                abort_incomplete_multipart_upload_after=Duration.days(2),
+            )],
         )
 
         # ── execution role ──────────────────────────────────────────────────
@@ -281,7 +292,67 @@ class LouStack(cdk.Stack):
                             dimensions_map={"WebACL": WAF_METRIC_NAME, "Region": "Global", "Rule": "ALL"}),
                   50, "lou edge: the WAF rate rule is blocking a spike of requests")
 
+        # ── the build plane: scheduled data refresh ─────────────────────────
+        # (louisville-open-data-0nu) CodeBuild, not Lambda: the refresh pulls
+        # 531 MB of CSVs plus KY SOS lookups (well past the 15-minute cap) and
+        # then builds and pushes the container image, which needs Docker. The
+        # build role is NOT created here: the guardrails force the runtime
+        # boundary onto every role the stack creates, and that boundary denies
+        # deploying (sts:AssumeRole, lambda:UpdateFunctionCode) by design. So
+        # the human creates /lou/lou-build once (infra/iam/README.md) with the
+        # same deploy ceiling the human's own principal has, trusting both
+        # codebuild and scheduler, and the stack only references it.
+        build_role_arn = ctx("lou:buildRoleArn") or self.format_arn(
+            service="iam", region="", resource="role", resource_name="lou/lou-build")
+        build_role = iam.Role.from_role_arn(self, "BuildRole", build_role_arn, mutable=False)
+        build_logs = logs.LogGroup(
+            self, "BuildLogs", log_group_name="/lou/build",
+            retention=logs.RetentionDays.ONE_MONTH, removal_policy=cdk.RemovalPolicy.DESTROY)
+        build = codebuild.Project(
+            self, "Refresh",
+            project_name="lou-refresh",
+            description="Monthly data refresh: pull CSVs, profiles, corpus -> DuckDB artifact -> image -> deploy -> re-warm cache",
+            role=build_role,
+            environment=codebuild.BuildEnvironment(
+                build_image=codebuild.LinuxArmBuildImage.AMAZON_LINUX_2023_STANDARD_3_0,
+                compute_type=codebuild.ComputeType.SMALL,
+                privileged=True,   # Docker, for the arm64 image build
+            ),
+            environment_variables={
+                "LOU_ALERT_EMAIL": codebuild.BuildEnvironmentVariable(value=str(alert_email or "")),
+                "LOU_DATA_BUCKET": codebuild.BuildEnvironmentVariable(value=data_bucket.bucket_name),
+                "LOU_SSM_PATH": codebuild.BuildEnvironmentVariable(value=ssm_path),
+                "LOU_REPO": codebuild.BuildEnvironmentVariable(
+                    value=str(ctx("lou:repoUrl") or "https://github.com/jimbottle/louisville-open-data-expenditure-bot.git")),
+            },
+            timeout=Duration.hours(3),
+            logging=codebuild.LoggingOptions(cloud_watch=codebuild.CloudWatchLoggingOptions(log_group=build_logs)),
+            build_spec=codebuild.BuildSpec.from_object(self._refresh_buildspec()),
+        )
+        # Monthly, 1st at 09:00 UTC (early morning US Eastern). Manual runs:
+        # aws codebuild start-build --project-name lou-refresh --profile lou
+        scheduler.Schedule(
+            self, "RefreshSchedule",
+            schedule_name="lou-refresh-monthly",
+            description="Lou data refresh + redeploy",
+            schedule=scheduler.ScheduleExpression.cron(minute="0", hour="9", day="1", month="*", year="*"),
+            target=scheduler_targets.CodeBuildStartBuild(build, role=build_role),
+        )
+        # A failed or stopped build is a silent stale-data outage otherwise.
+        events.Rule(
+            self, "RefreshFailed",
+            rule_name="lou-refresh-failed",
+            description="Lou refresh build failed/stopped/timed out -> lou-alerts",
+            event_pattern=events.EventPattern(
+                source=["aws.codebuild"],
+                detail_type=["CodeBuild Build State Change"],
+                detail={"project-name": [build.project_name], "build-status": ["FAILED", "STOPPED", "TIMED_OUT"]},
+            ),
+            targets=[events_targets.SnsTopic(alerts)],
+        )
+
         # ── outputs ─────────────────────────────────────────────────────────
+        cdk.CfnOutput(self, "RefreshProject", value=build.project_name)
         cdk.CfnOutput(self, "AlertsTopic", value=alerts.topic_arn)
         cdk.CfnOutput(self, "CloudFrontUrl", value=f"https://{dist.distribution_domain_name}/")
         cdk.CfnOutput(self, "DistributionId", value=dist.distribution_id)
@@ -291,6 +362,52 @@ class LouStack(cdk.Stack):
         cdk.CfnOutput(self, "StateTable", value=table.table_name)
         cdk.CfnOutput(self, "DataBucket", value=data_bucket.bucket_name)
         cdk.CfnOutput(self, "LogGroup", value=log_group.log_group_name)
+
+    @staticmethod
+    def _refresh_buildspec() -> dict:
+        """The scheduled refresh, end to end, with no manual step
+        (louisville-open-data-0nu). Each phase fails the build on error, which
+        the RefreshFailed rule turns into an alert."""
+        return {
+            "version": "0.2",
+            "env": {
+                # ADMIN_TOKEN gates /api/cache; read from SSM at build time,
+                # never stored on the project.
+                "parameter-store": {"ADMIN_TOKEN": "/lou/prod/ADMIN_TOKEN"},
+            },
+            "phases": {
+                "install": {
+                    "runtime-versions": {"python": "3.12", "nodejs": "20"},
+                    "commands": [
+                        "git clone --depth 1 \"$LOU_REPO\" src && cd src && git rev-parse --short HEAD",
+                        "cd src && pip install -q -r requirements.txt -r infra/cdk/requirements.txt beautifulsoup4",
+                    ],
+                },
+                "build": {
+                    "commands": [
+                        # 1. Pull every dataset, rebuild contractor profiles (+SOS), re-ingest the corpus.
+                        #    No Neo4j on this plane (graph/ is local tooling).
+                        "cd src && python refresh_data.py --skip-graph",
+                        "cd src && python rag.py ingest",
+                        # 2. The serving artifact (schema snapshot included).
+                        "cd src && python data_model.py --materialize data/lou.duckdb",
+                        # 3. Keep the inputs + artifact: a dated snapshot (90-day lifecycle) and latest/.
+                        "cd src && SNAP=$(date -u +%Y-%m-%d) && aws s3 sync data/ \"s3://$LOU_DATA_BUCKET/snapshots/$SNAP/\" --exclude '.*' --only-show-errors",
+                        "cd src && aws s3 cp data/lou.duckdb \"s3://$LOU_DATA_BUCKET/latest/lou.duckdb\" --only-show-errors && aws s3 cp data/rag_documents.duckdb \"s3://$LOU_DATA_BUCKET/latest/rag_documents.duckdb\" --only-show-errors",
+                        # 4. Build + push the image and update the function (the stack is the deploy).
+                        "cd src/infra/cdk && npx --yes aws-cdk@2 -c \"lou:alertEmail=$LOU_ALERT_EMAIL\" deploy LouStack --require-approval never --outputs-file /tmp/outputs.json",
+                    ],
+                },
+                "post_build": {
+                    "commands": [
+                        # 5. Verify through CloudFront, invalidate the cache (data changed under it), re-warm.
+                        "export CF=$(python3 -c \"import json; print(json.load(open('/tmp/outputs.json'))['LouStack']['CloudFrontUrl'])\") && curl -sf --max-time 60 \"${CF}api/health\" >/dev/null",
+                        "cd src && LOU_API_BASE=\"$CF\" python -c \"import refresh_data; refresh_data.clear_response_cache('data')\"",
+                        "cd src && python warm_cache.py --host \"${CF%/}\" --delay 5",
+                    ],
+                },
+            },
+        }
 
     def _web_acl(self) -> wafv2.CfnWebACL:
         """Optional edge rate rule: blocks an IP past 300 requests per 5 min

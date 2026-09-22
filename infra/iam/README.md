@@ -131,7 +131,12 @@ done
 > billed check, other Access Analyzer APIs are — so it falls under "ask first"
 > per the AWS interaction policy in `CLAUDE.md`.
 
-## Step 2 — Create the three managed policies
+## Step 2 — Create the four managed policies
+
+> The deploy ceiling is three policies since 2026-09-22 (`LouDeployOps` split
+> out for the size limit: CloudWatch alarms, SNS, Scheduler, EventBridge
+> rules, CodeBuild, WAF). The rendered helper `04-build-role.sh` creates it
+> and attaches it; the commands below are the manual equivalent.
 
 Boundary first: `LouDeployGuardrails` references it by ARN in a Deny.
 
@@ -149,7 +154,12 @@ aws iam create-policy \
 aws iam create-policy \
   --policy-name LouDeployGuardrails \
   --policy-document file://infra/iam/rendered/lou-deploy-guardrails.json \
-  --description "Deploy-time ceiling, part 2 of 2: IAM grants and every Deny"
+  --description "Deploy-time ceiling, part 2 of 3: IAM grants and every Deny"
+
+aws iam create-policy \
+  --policy-name LouDeployOps \
+  --policy-document file://infra/iam/rendered/lou-deploy-ops.json \
+  --description "Deploy-time ceiling, part 3 of 3: automation + observability"
 ```
 
 > If you already created `LouServicePolicy` from an earlier revision, delete it
@@ -203,9 +213,13 @@ aws iam attach-role-policy \
 aws iam attach-role-policy \
   --role-name lou-deploy \
   --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployGuardrails
+
+aws iam attach-role-policy \
+  --role-name lou-deploy \
+  --policy-arn arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployOps
 ```
 
-Both are required. `LouDeployServices` alone grants no IAM and carries none of
+All three are required. `LouDeployServices` alone grants no IAM and carries none of
 the Deny guardrails; `LouDeployGuardrails` alone can build nothing.
 
 ## Step 5 — Configure the local profile
@@ -243,7 +257,7 @@ anything else in this account.
 npx cdk bootstrap aws://<ACCOUNT_ID>/us-east-1 \
   --qualifier lou0 \
   --toolkit-stack-name CDKToolkit-Lou \
-  --cloudformation-execution-policies arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployServices,arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployGuardrails \
+  --cloudformation-execution-policies arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployServices,arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployGuardrails,arn:aws:iam::<ACCOUNT_ID>:policy/LouDeployOps \
   --trust <ACCOUNT_ID>
 ```
 
@@ -275,6 +289,16 @@ DefaultStackSynthesizer(qualifier="lou0")
 > **Cost note (Tier 2):** bootstrap creates an S3 bucket and an ECR repository.
 > Empty they are effectively free; the ECR repo becomes the ~$0.06/month line
 > once Lou's ~600 MB image lands, after the 12-month 500 MB free tier.
+
+## Step 6b — The build principal (scheduled refresh)
+
+The scheduled data refresh (`lou-refresh`, a CodeBuild project in LouStack)
+must deploy, and the runtime boundary forbids deploying — so its role cannot
+be created by the stack. Create `/lou/lou-build` once, as admin, with the same
+three deploy policies, trusting `codebuild.amazonaws.com` and
+`scheduler.amazonaws.com`; the stack references it by ARN. The rendered
+`04-build-role.sh` does exactly this (and creates/updates `LouDeployOps`).
+Re-run the bootstrap afterwards so the execution role carries `LouDeployOps`.
 
 ## Step 7 — Verify the boundaries actually hold
 

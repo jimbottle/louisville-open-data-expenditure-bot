@@ -1,0 +1,101 @@
+{
+  "Version": "2012-10-17",
+  "Comment": "Deploy-time ceiling, part 3 of 3: automation + observability \u2014 CloudWatch alarms, SNS, EventBridge Scheduler + rules, CodeBuild, WAF \u2014 scoped to lou-*. Attached to lou-deploy, lou-build and the CDK execution role together with parts 1 and 2. Rationale: infra/iam/README.md.",
+  "Statement": [
+    {
+      "Sid": "CloudWatchAlarmsOnLouOnly",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DeleteAlarms",
+        "cloudwatch:EnableAlarmActions",
+        "cloudwatch:DisableAlarmActions",
+        "cloudwatch:TagResource"
+      ],
+      "Resource": "arn:aws:cloudwatch:us-east-1:${AWS_ACCOUNT_ID}:alarm:lou-*"
+    },
+    {
+      "Sid": "CloudWatchReadIsAccountLevelOnly",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:GetMetricData",
+        "cloudwatch:GetMetricStatistics",
+        "cloudwatch:ListMetrics"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SnsOnLouTopics",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:DeleteTopic",
+        "sns:GetTopicAttributes",
+        "sns:SetTopicAttributes",
+        "sns:Subscribe",
+        "sns:Unsubscribe",
+        "sns:ListSubscriptionsByTopic",
+        "sns:TagResource",
+        "sns:UntagResource",
+        "sns:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:sns:us-east-1:${AWS_ACCOUNT_ID}:lou-*"
+    },
+    {
+      "Sid": "SchedulerOnLouSchedules",
+      "Effect": "Allow",
+      "Action": "scheduler:*",
+      "Resource": [
+        "arn:aws:scheduler:us-east-1:${AWS_ACCOUNT_ID}:schedule/lou-*/*",
+        "arn:aws:scheduler:us-east-1:${AWS_ACCOUNT_ID}:schedule-group/lou-*"
+      ]
+    },
+    {
+      "Sid": "EventsOnLouRules",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:DeleteRule",
+        "events:DescribeRule",
+        "events:PutTargets",
+        "events:RemoveTargets",
+        "events:ListTargetsByRule",
+        "events:TagResource",
+        "events:UntagResource"
+      ],
+      "Resource": "arn:aws:events:us-east-1:${AWS_ACCOUNT_ID}:rule/lou-*"
+    },
+    {
+      "Sid": "CodeBuildOnLouProjects",
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:CreateProject",
+        "codebuild:UpdateProject",
+        "codebuild:DeleteProject",
+        "codebuild:BatchGetProjects",
+        "codebuild:StartBuild",
+        "codebuild:StopBuild",
+        "codebuild:BatchGetBuilds",
+        "codebuild:ListBuildsForProject"
+      ],
+      "Resource": "arn:aws:codebuild:us-east-1:${AWS_ACCOUNT_ID}:project/lou-*"
+    },
+    {
+      "Sid": "WafV2ForCloudFrontSeeReadme",
+      "Effect": "Allow",
+      "Action": [
+        "wafv2:CreateWebACL",
+        "wafv2:UpdateWebACL",
+        "wafv2:DeleteWebACL",
+        "wafv2:GetWebACL",
+        "wafv2:ListWebACLs",
+        "wafv2:AssociateWebACL",
+        "wafv2:DisassociateWebACL",
+        "wafv2:TagResource",
+        "wafv2:ListTagsForResource"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

@@ -37,6 +37,21 @@ viewer ─HTTPS─▶ CloudFront ─OAC─▶ Function URL (RESPONSE_STREAM) ─
 - DynamoDB table `lou-state`, `pk` string key, TTL on `ttl`, on-demand.
 - Every resource that supports tags carries `Project=lou`.
 
+## The build plane (scheduled refresh, louisville-open-data-0nu)
+
+`lou-refresh` is a CodeBuild project (arm64, Docker-capable, 3 h timeout)
+started by EventBridge Scheduler on the 1st of each month at 09:00 UTC, or by
+hand: `aws codebuild start-build --project-name lou-refresh --profile lou`.
+Its buildspec (in `lou_stack.py`) clones `main`, runs
+`refresh_data.py --skip-graph` + `rag.py ingest`, materialises the DuckDB
+artifact, snapshots `data/` to `s3://lou-data-…/snapshots/<date>/` (90-day
+lifecycle) and `latest/`, runs `cdk deploy` (new image, new function
+version), verifies `/api/health` through CloudFront, clears the response
+cache (`DELETE /api/cache` with the token from SSM) and re-warms it with
+`warm_cache.py`. A FAILED/STOPPED/TIMED_OUT build hits the `lou-alerts`
+topic via the `lou-refresh-failed` rule. The build runs as the
+human-created `/lou/lou-build` role (see `infra/iam/README.md` step 6b).
+
 ## Deploy
 
 ```bash

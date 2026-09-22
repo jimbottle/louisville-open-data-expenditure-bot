@@ -78,7 +78,8 @@
       "Resource": [
         "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouPermissionsBoundary",
         "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouDeployServices",
-        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouDeployGuardrails"
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouDeployGuardrails",
+        "arn:aws:iam::${AWS_ACCOUNT_ID}:policy/LouDeployOps"
       ]
     },
     {
@@ -91,7 +92,8 @@
           "iam:PassedToService": [
             "lambda.amazonaws.com",
             "scheduler.amazonaws.com",
-            "edgelambda.amazonaws.com"
+            "edgelambda.amazonaws.com",
+            "codebuild.amazonaws.com"
           ]
         }
       }

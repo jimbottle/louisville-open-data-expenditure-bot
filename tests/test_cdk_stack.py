@@ -89,10 +89,12 @@ def test_no_custom_resources(resources):
     assert not any(t.startswith("Custom::") or t == "AWS::CloudFormation::CustomResource" for t in types), types
 
 
-def test_log_group_has_retention(resources):
-    lg = _only(resources, "AWS::Logs::LogGroup")
-    assert lg["LogGroupName"] == "/aws/lambda/lou-bot"
-    assert lg["RetentionInDays"] == 7
+def test_log_groups_have_retention(resources):
+    groups = {r["Properties"]["LogGroupName"]: r["Properties"]
+              for r in resources.values() if r["Type"] == "AWS::Logs::LogGroup"}
+    assert set(groups) == {"/aws/lambda/lou-bot", "/lou/build"}, groups.keys()
+    assert groups["/aws/lambda/lou-bot"]["RetentionInDays"] == 7
+    assert groups["/lou/build"]["RetentionInDays"] == 30
 
 
 def test_every_taggable_resource_carries_project_lou(resources):
@@ -271,3 +273,51 @@ def test_waf_alarm_only_when_waf_is_on():
     assert dims["WebACL"] == acl["VisibilityConfig"]["MetricName"]
     assert dims["WebACL"] != acl["Name"]
     assert dims["Region"] == "Global" and dims["Rule"] == "ALL"
+
+
+# ── build plane: the scheduled refresh (louisville-open-data-0nu) ──────────
+
+def test_refresh_build_uses_the_human_created_build_role_and_docker_on_arm(resources):
+    proj = _only(resources, "AWS::CodeBuild::Project")
+    assert proj["Name"] == "lou-refresh"
+    assert "role/lou/lou-build" in json.dumps(proj["ServiceRole"])
+    env = proj["Environment"]
+    assert env["Type"] == "ARM_CONTAINER" and env["PrivilegedMode"] is True
+    assert env["ComputeType"] == "BUILD_GENERAL1_SMALL"
+    names = {v["Name"]: v for v in env["EnvironmentVariables"]}
+    assert {"LOU_DATA_BUCKET", "LOU_REPO", "LOU_SSM_PATH", "LOU_ALERT_EMAIL"} <= set(names)
+    assert proj["TimeoutInMinutes"] == 180
+    assert "BuildLogs" in json.dumps(proj["LogsConfig"]["CloudWatchLogs"]["GroupName"])
+    assert proj["Source"]["Type"] == "NO_SOURCE"
+    spec = json.loads(proj["Source"]["BuildSpec"]) if isinstance(proj["Source"]["BuildSpec"], str) else proj["Source"]["BuildSpec"]
+    assert spec["env"]["parameter-store"]["ADMIN_TOKEN"] == "/lou/prod/ADMIN_TOKEN"
+    cmds = " ".join(spec["phases"]["build"]["commands"] + spec["phases"]["post_build"]["commands"])
+    for step in ("refresh_data.py --skip-graph", "rag.py ingest", "--materialize data/lou.duckdb",
+                 "s3 sync data/", "cdk@2", "deploy LouStack", "clear_response_cache", "warm_cache.py"):
+        assert step in cmds, step
+    # No CDK-created role for the build: the stack references, never creates, it.
+    roles = [r["Properties"]["RoleName"] for r in resources.values() if r["Type"] == "AWS::IAM::Role"]
+    assert roles == ["lou-lambda-exec"], roles
+
+
+def test_refresh_is_scheduled_monthly_and_failures_alert(resources):
+    sched = _only(resources, "AWS::Scheduler::Schedule")
+    assert sched["Name"] == "lou-refresh-monthly"
+    assert sched["ScheduleExpression"] == "cron(0 9 1 * ? *)"
+    assert "role/lou/lou-build" in json.dumps(sched["Target"]["RoleArn"])
+    proj_id = next(k for k, r in resources.items() if r["Type"] == "AWS::CodeBuild::Project")
+    assert sched["Target"]["Arn"] == {"Fn::GetAtt": [proj_id, "Arn"]}
+    rule = _only(resources, "AWS::Events::Rule")
+    assert rule["Name"] == "lou-refresh-failed"
+    pat = rule["EventPattern"]
+    assert pat["source"] == ["aws.codebuild"]
+    assert set(pat["detail"]["build-status"]) == {"FAILED", "STOPPED", "TIMED_OUT"}
+    topic_ref = next(k for k, r in resources.items() if r["Type"] == "AWS::SNS::Topic")
+    assert rule["Targets"][0]["Arn"] == {"Ref": topic_ref}
+
+
+def test_data_bucket_expires_refresh_snapshots(resources):
+    b = _only(resources, "AWS::S3::Bucket")
+    rules = b["LifecycleConfiguration"]["Rules"]
+    snap = next(r for r in rules if r["Id"] == "expire-refresh-snapshots")
+    assert snap["Prefix"] == "snapshots/" and snap["ExpirationInDays"] == 90 and snap["Status"] == "Enabled"

@@ -22,3 +22,25 @@ def test_pull_only_path_invalidates_the_cache(monkeypatch):
     monkeypatch.setattr("sys.argv", ["refresh_data.py", "--pull-only", "-o", "/tmp"])
     refresh_data.main()
     assert called["cleared"], "--pull-only returned without invalidating the cache"
+
+
+def test_cache_clear_targets_lou_api_base_without_a_body(tmp_path, monkeypatch):
+    """The scheduled AWS build clears the CloudFront deployment's cache; a
+    DELETE with a body would need the OAC body-hash header, so none is sent
+    and the endpoint's no-body branch (clear all) is what runs."""
+    import refresh_data
+    import requests
+    seen = {}
+
+    def fake_delete(url, **kw):
+        seen.update(url=url, kw=kw)
+        class R: status_code = 200
+        return R()
+
+    monkeypatch.setattr(requests, "delete", fake_delete)
+    monkeypatch.setenv("ADMIN_TOKEN", "t0k")
+    monkeypatch.setenv("LOU_API_BASE", "https://example.cloudfront.net/")
+    refresh_data.clear_response_cache(str(tmp_path))
+    assert seen["url"] == "https://example.cloudfront.net/api/cache"
+    assert "json" not in seen["kw"] and "data" not in seen["kw"]
+    assert seen["kw"]["headers"] == {"X-Admin-Token": "t0k"}

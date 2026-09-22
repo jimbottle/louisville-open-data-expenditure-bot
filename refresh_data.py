@@ -221,8 +221,14 @@ def clear_response_cache(data_dir):
                   "The running bot will keep serving stale answers until you set "
                   "ADMIN_TOKEN and re-run, or restart the container.")
         else:
-            resp = requests.delete("http://localhost:8000/api/cache",
-                                   json={}, timeout=5, headers={"X-Admin-Token": token})
+            # LOU_API_BASE: the running bot to invalidate. Default is the
+            # self-hosted container beside this script; the scheduled AWS
+            # build sets the CloudFront URL. No body: behind CloudFront OAC a
+            # body would need the SigV4 hash header, and the endpoint treats
+            # "no JSON body" as "clear everything".
+            base = os.environ.get("LOU_API_BASE", "http://localhost:8000").rstrip("/")
+            resp = requests.delete(f"{base}/api/cache", timeout=15,
+                                   headers={"X-Admin-Token": token})
             if resp.status_code == 200:
                 print("  Live bot cache also cleared via API")
             else:

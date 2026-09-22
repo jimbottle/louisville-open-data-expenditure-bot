@@ -30,7 +30,7 @@ PLACEHOLDER = "${AWS_ACCOUNT_ID}"
 # 6680. Statements may move between these two files freely, so every
 # deploy-side assertion below runs against their UNION rather than naming a
 # file — otherwise a future re-split silently stops testing a control.
-DEPLOY_POLICIES = ["lou-deploy-services.json", "lou-deploy-guardrails.json"]
+DEPLOY_POLICIES = ["lou-deploy-services.json", "lou-deploy-guardrails.json", "lou-deploy-ops.json"]
 BOUNDARY = "lou-permissions-boundary.json"
 
 # Policies that grant permissions, checked for account scoping.
