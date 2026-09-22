@@ -259,14 +259,24 @@ def main():
     os.makedirs(args.data_dir, exist_ok=True)
 
     start = time.time()
+    # Two verdicts. `success` drives the banner and covers every step.
+    # `data_ok` drives the EXIT CODE and covers only the steps whose output the
+    # serving artifact is built from (the pull, the contractor profiles): the
+    # scheduled AWS build (lou-refresh) runs this unattended and must not
+    # deploy a partial pull — but a flaky KY SOS scrape or a Legistar hiccup
+    # is best-effort by design (see ingest_documents) and must not throw away
+    # a good pull either. rag.py ingest runs as its own build step anyway.
     success = True
+    data_ok = True
 
     if args.graph_only:
         success = reload_graph(args.neo4j_uri, args.neo4j_password, args.data_dir)
+        data_ok = success
     else:
         # Step 1: Pull data
         if not args.skip_pull:
-            success = pull_datasets(args.data_dir) and success
+            data_ok = pull_datasets(args.data_dir)
+            success = data_ok and success
 
         if args.pull_only:
             # The data changed, so the cache is stale even though we skip the
@@ -274,10 +284,12 @@ def main():
             clear_response_cache(args.data_dir)
             elapsed = time.time() - start
             print(f"\nData pull complete in {elapsed / 60:.1f} minutes.")
-            return 0 if success else 1
+            return 0 if data_ok else 1
 
-        # Step 2: Build contractor profiles
-        success = build_profiles(args.data_dir, args.skip_sos, args.profile_top) and success
+        # Step 2: Build contractor profiles (a table in the artifact — data)
+        profiles_ok = build_profiles(args.data_dir, args.skip_sos, args.profile_top)
+        data_ok = data_ok and profiles_ok
+        success = profiles_ok and success
 
         # Step 3: Scrape officers for agent-service companies
         if not args.skip_sos:
@@ -307,10 +319,9 @@ def main():
     print(f"\n  Data directory: {args.data_dir}")
     print(f"  CSV files: {csv_count}")
     print(f"\n  IMPORTANT: Re-warm starter question caches after restarting the bot")
-    # A truthful exit code: the scheduled AWS build (lou-refresh) runs this
-    # unattended, and a partial pull must fail the build rather than flow into
-    # a materialize + deploy of half the data. Interactive use is unchanged.
-    return 0 if success else 1
+    # Exit code = the data steps only (see the two verdicts above). A failed
+    # enrichment step is visible in the banner and the log, never fatal.
+    return 0 if data_ok else 1
 
 
 if __name__ == "__main__":

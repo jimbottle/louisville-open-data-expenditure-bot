@@ -46,20 +46,30 @@ def test_cache_clear_targets_lou_api_base_without_a_body(tmp_path, monkeypatch):
     assert seen["kw"]["headers"] == {"X-Admin-Token": "t0k"}
 
 
-def test_main_exit_code_reflects_failed_steps(monkeypatch):
-    """The unattended build must not deploy a partial refresh: a failed pull
-    (or profiles/ingest) makes main() return 1, which sys.exit turns into a
-    failed CodeBuild phase and a lou-alerts notification."""
+def _stub_steps(monkeypatch, pull=True, profiles=True, sos=True, ingest=True):
     import refresh_data
     monkeypatch.setattr(refresh_data, "clear_response_cache", lambda *a, **k: None)
-    monkeypatch.setattr(refresh_data, "pull_datasets", lambda *a, **k: False)
+    monkeypatch.setattr(refresh_data, "pull_datasets", lambda *a, **k: pull)
+    monkeypatch.setattr(refresh_data, "build_profiles", lambda *a, **k: profiles)
+    monkeypatch.setattr(refresh_data, "scrape_officers", lambda *a, **k: sos)
+    monkeypatch.setattr(refresh_data, "ingest_documents", lambda *a, **k: ingest)
+    return refresh_data
+
+
+def test_exit_code_fails_on_data_steps_only(monkeypatch):
+    """The unattended build must not deploy a partial refresh — a failed pull
+    or profile build is exit 1 — but the enrichment steps (KY SOS scrape,
+    document ingest) are best-effort by design and must not throw a good pull
+    away: they print in the banner and exit 0."""
+    argv_full = ["refresh_data.py", "--skip-graph", "-o", "/tmp"]
+    rd = _stub_steps(monkeypatch, pull=False)
     monkeypatch.setattr("sys.argv", ["refresh_data.py", "--pull-only", "-o", "/tmp"])
-    assert refresh_data.main() == 1
-    monkeypatch.setattr(refresh_data, "pull_datasets", lambda *a, **k: True)
-    assert refresh_data.main() == 0
-    # Full path: a failing ingest after a good pull is still a failure.
-    monkeypatch.setattr(refresh_data, "build_profiles", lambda *a, **k: True)
-    monkeypatch.setattr(refresh_data, "scrape_officers", lambda *a, **k: True)
-    monkeypatch.setattr(refresh_data, "ingest_documents", lambda *a, **k: False)
-    monkeypatch.setattr("sys.argv", ["refresh_data.py", "--skip-graph", "-o", "/tmp"])
-    assert refresh_data.main() == 1
+    assert rd.main() == 1, "failed pull (pull-only)"
+    monkeypatch.setattr("sys.argv", argv_full)
+    assert rd.main() == 1, "failed pull (full)"
+    rd = _stub_steps(monkeypatch, profiles=False)
+    assert rd.main() == 1, "failed profiles: a table in the artifact"
+    rd = _stub_steps(monkeypatch, sos=False, ingest=False)
+    assert rd.main() == 0, "enrichment failures are best-effort"
+    rd = _stub_steps(monkeypatch)
+    assert rd.main() == 0
