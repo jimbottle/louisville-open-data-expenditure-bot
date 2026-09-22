@@ -385,31 +385,33 @@ class LouStack(cdk.Stack):
                 "install": {
                     "runtime-versions": {"python": "3.12", "nodejs": "20"},
                     "commands": [
-                        "git clone --depth 1 \"$LOU_REPO\" src && cd src && git rev-parse --short HEAD",
-                        "cd src && pip install -q -r requirements.txt -r infra/cdk/requirements.txt beautifulsoup4",
+                        # CodeBuild keeps the working directory between commands,
+                        # so every command below anchors itself with an absolute cd.
+                        "git clone --depth 1 \"$LOU_REPO\" \"$CODEBUILD_SRC_DIR/src\" && git -C \"$CODEBUILD_SRC_DIR/src\" rev-parse --short HEAD",
+                        "cd \"$CODEBUILD_SRC_DIR/src\" && pip install -q -r requirements.txt -r infra/cdk/requirements.txt beautifulsoup4",
                     ],
                 },
                 "build": {
                     "commands": [
                         # 1. Pull every dataset, rebuild contractor profiles (+SOS), re-ingest the corpus.
                         #    No Neo4j on this plane (graph/ is local tooling).
-                        "cd src && python refresh_data.py --skip-graph",
-                        "cd src && python rag.py ingest",
+                        "cd \"$CODEBUILD_SRC_DIR/src\" && python refresh_data.py --skip-graph",
+                        "cd \"$CODEBUILD_SRC_DIR/src\" && python rag.py ingest",
                         # 2. The serving artifact (schema snapshot included).
-                        "cd src && python data_model.py --materialize data/lou.duckdb",
+                        "cd \"$CODEBUILD_SRC_DIR/src\" && python data_model.py --materialize data/lou.duckdb",
                         # 3. Keep the inputs + artifact: a dated snapshot (90-day lifecycle) and latest/.
-                        "cd src && SNAP=$(date -u +%Y-%m-%d) && aws s3 sync data/ \"s3://$LOU_DATA_BUCKET/snapshots/$SNAP/\" --exclude '.*' --only-show-errors",
-                        "cd src && aws s3 cp data/lou.duckdb \"s3://$LOU_DATA_BUCKET/latest/lou.duckdb\" --only-show-errors && aws s3 cp data/rag_documents.duckdb \"s3://$LOU_DATA_BUCKET/latest/rag_documents.duckdb\" --only-show-errors",
+                        "cd \"$CODEBUILD_SRC_DIR/src\" && SNAP=$(date -u +%Y-%m-%d) && aws s3 sync data/ \"s3://$LOU_DATA_BUCKET/snapshots/$SNAP/\" --exclude '.*' --only-show-errors",
+                        "cd \"$CODEBUILD_SRC_DIR/src\" && aws s3 cp data/lou.duckdb \"s3://$LOU_DATA_BUCKET/latest/lou.duckdb\" --only-show-errors && aws s3 cp data/rag_documents.duckdb \"s3://$LOU_DATA_BUCKET/latest/rag_documents.duckdb\" --only-show-errors",
                         # 4. Build + push the image and update the function (the stack is the deploy).
-                        "cd src/infra/cdk && npx --yes aws-cdk@2 -c \"lou:alertEmail=$LOU_ALERT_EMAIL\" deploy LouStack --require-approval never --outputs-file /tmp/outputs.json",
+                        "cd \"$CODEBUILD_SRC_DIR/src/infra/cdk\" && npx --yes aws-cdk@2 -c \"lou:alertEmail=$LOU_ALERT_EMAIL\" deploy LouStack --require-approval never --outputs-file /tmp/outputs.json",
                     ],
                 },
                 "post_build": {
                     "commands": [
                         # 5. Verify through CloudFront, invalidate the cache (data changed under it), re-warm.
                         "export CF=$(python3 -c \"import json; print(json.load(open('/tmp/outputs.json'))['LouStack']['CloudFrontUrl'])\") && curl -sf --max-time 60 \"${CF}api/health\" >/dev/null",
-                        "cd src && LOU_API_BASE=\"$CF\" python -c \"import refresh_data; refresh_data.clear_response_cache('data')\"",
-                        "cd src && python warm_cache.py --host \"${CF%/}\" --delay 5",
+                        "cd \"$CODEBUILD_SRC_DIR/src\" && LOU_API_BASE=\"$CF\" python -c \"import refresh_data; refresh_data.clear_response_cache('data')\"",
+                        "cd \"$CODEBUILD_SRC_DIR/src\" && python warm_cache.py --host \"${CF%/}\" --delay 5",
                     ],
                 },
             },
