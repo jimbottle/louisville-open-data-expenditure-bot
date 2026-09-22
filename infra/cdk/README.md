@@ -101,6 +101,12 @@ and that step is yours in Cloudflare:
    back, `docker start`). Decommission the container only after a week of
    clean monitoring.
 
+Once bound, the hostname is durable: `deploy.sh` reads `PublicDomain` and
+`CertificateArn` from the live stack and re-applies them on every deploy that
+was not given `LOU_DOMAIN`/`LOU_CERT_ARN`, and its post-deploy probe hits the
+hostname pinned to CloudFront. Detaching it is an explicit `LOU_DROP_DOMAIN=1`.
+`tests/test_deploy_script.py` pins that against stubbed CLIs.
+
 ## Destroy
 
 `npx aws-cdk@2 destroy LouStack --profile lou` removes everything except the

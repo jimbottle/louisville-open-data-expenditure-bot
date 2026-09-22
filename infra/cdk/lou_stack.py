@@ -382,6 +382,10 @@ class LouStack(cdk.Stack):
                       description="CNAME target for the public hostname at cutover")
         if domain:
             cdk.CfnOutput(self, "PublicUrl", value=f"https://{domain}/")
+            # deploy.sh reads these two back so an ordinary deploy keeps the
+            # binding instead of silently detaching the production hostname.
+            cdk.CfnOutput(self, "PublicDomain", value=domain)
+            cdk.CfnOutput(self, "CertificateArn", value=cert_arn)
         cdk.CfnOutput(self, "DistributionId", value=dist.distribution_id)
         cdk.CfnOutput(self, "FunctionUrl", value=fn_url.url,
                       description="IAM-auth, CloudFront-only; direct requests are 403 by design")

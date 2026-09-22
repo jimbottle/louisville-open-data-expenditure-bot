@@ -1,0 +1,93 @@
+"""infra/cdk/deploy.sh against stubbed aws/npx/curl/dig binaries.
+
+The one invariant that matters (roborev 4747): once the live stack binds the
+public hostname, an ordinary deploy that was not told about it must KEEP it —
+never synthesize a distribution without the alias and detach production.
+"""
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parent.parent / "infra" / "cdk" / "deploy.sh"
+
+AWS_STUB = r'''#!/bin/sh
+# Records every call; answers the few queries deploy.sh makes.
+echo "aws $*" >>"$CALLS"
+case "$*" in
+  *"configure export-credentials"*) echo 'export AWS_ACCESS_KEY_ID=x; export AWS_SECRET_ACCESS_KEY=y; export AWS_SESSION_TOKEN=z' ;;
+  *"sts get-caller-identity"*) echo "arn:aws:sts::012146975534:assumed-role/lou-deploy/test" ;;
+  *"OutputKey=='PublicDomain'"*) printf '%s' "${LIVE_DOMAIN:-}" ;;
+  *"OutputKey=='CertificateArn'"*) printf '%s' "${LIVE_CERT:-}" ;;
+  *) echo "" ;;
+esac
+'''
+NPX_STUB = r'''#!/bin/sh
+echo "npx $*" >>"$CALLS"
+exit 0
+'''
+
+
+@pytest.fixture
+def harness(tmp_path):
+    bin_ = tmp_path / "bin"; bin_.mkdir()
+    for name, body in (("aws", AWS_STUB), ("npx", NPX_STUB)):
+        p = bin_ / name; p.write_text(body); p.chmod(0o755)
+    data = tmp_path / "data"; data.mkdir()
+    (data / "lou.duckdb").write_bytes(b"x"); (data / "rag_documents.duckdb").write_bytes(b"x")
+    calls = tmp_path / "calls"
+
+    def run(step="synth", env=None):
+        calls.write_text("")
+        e = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", CALLS=str(calls),
+                 LOU_DATA_DIR=str(data), **(env or {}))
+        e.pop("LOU_DOMAIN", None) if not (env and "LOU_DOMAIN" in env) else None
+        proc = subprocess.run(["/bin/bash", str(SCRIPT), step], env=e, capture_output=True, text=True, timeout=60)
+        return proc, calls.read_text()
+    return run
+
+
+def _cdk_args(calls):
+    return [l for l in calls.splitlines() if l.startswith("npx ")]
+
+
+def test_plain_deploy_keeps_the_live_hostname_binding(harness):
+    proc, calls = harness("synth", env={"LIVE_DOMAIN": "louisville.raylytics.io",
+                                        "LIVE_CERT": "arn:aws:acm:us-east-1:012146975534:certificate/abc"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "keeping the live public hostname louisville.raylytics.io" in proc.stdout
+    npx = _cdk_args(calls)[0]
+    assert "lou:domain=louisville.raylytics.io" in npx
+    assert "lou:certificateArn=arn:aws:acm:us-east-1:012146975534:certificate/abc" in npx
+
+
+def test_no_live_hostname_means_no_domain_context(harness):
+    proc, calls = harness("synth")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "lou:domain" not in _cdk_args(calls)[0]
+
+
+def test_explicit_env_overrides_and_drop_flag_detaches_deliberately(harness):
+    live = {"LIVE_DOMAIN": "louisville.raylytics.io", "LIVE_CERT": "arn:aws:acm:us-east-1:012146975534:certificate/abc"}
+    proc, calls = harness("synth", env={**live, "LOU_DOMAIN": "other.example", "LOU_CERT_ARN": "arn:x"})
+    assert "lou:domain=other.example" in _cdk_args(calls)[0]
+    proc, calls = harness("synth", env={**live, "LOU_DROP_DOMAIN": "1"})
+    assert proc.returncode == 0
+    assert "lou:domain" not in _cdk_args(calls)[0]
+
+
+def test_live_domain_without_certificate_output_refuses(harness):
+    proc, calls = harness("synth", env={"LIVE_DOMAIN": "louisville.raylytics.io", "LIVE_CERT": ""})
+    assert proc.returncode == 1
+    assert "refusing" in proc.stdout
+    assert not _cdk_args(calls), "must not reach the CDK CLI"
+
+
+def test_refuses_to_run_as_anything_but_the_deploy_role(harness, tmp_path):
+    bad = tmp_path / "bin" / "aws"
+    bad.write_text(AWS_STUB.replace("assumed-role/lou-deploy/test", "user/airflow-user"))
+    proc, calls = harness("synth")
+    assert proc.returncode == 1 and "refusing to run CDK as" in proc.stdout
+    assert not _cdk_args(calls)

@@ -24,8 +24,9 @@ cd "$(dirname "$0")"
 P="--profile lou"
 STEP=${1:-deploy}
 
-[ -f ../../data/lou.duckdb ] || { echo "data/lou.duckdb missing — run: python data_model.py --materialize data/lou.duckdb"; exit 1; }
-[ -f ../../data/rag_documents.duckdb ] || { echo "data/rag_documents.duckdb missing — run: python rag.py ingest"; exit 1; }
+DATA=${LOU_DATA_DIR:-../../data}
+[ -f "$DATA/lou.duckdb" ] || { echo "data/lou.duckdb missing — run: python data_model.py --materialize data/lou.duckdb"; exit 1; }
+[ -f "$DATA/rag_documents.duckdb" ] || { echo "data/rag_documents.duckdb missing — run: python rag.py ingest"; exit 1; }
 
 # The CDK CLI (JS SDK) cannot drive the MFA prompt of the `lou` profile from
 # a script, and does not read the AWS CLI's cached session. Hand it the session
@@ -52,6 +53,23 @@ CTX=()
 [ -n "${LOU_ALERT_EMAIL:-}" ] && CTX=(-c "lou:alertEmail=$LOU_ALERT_EMAIL")
 # Cutover: the public hostname + its ACM certificate (see cutover.sh). Both or
 # neither; the stack refuses one without the other.
+#
+# The LIVE STACK is the durable source of truth for the binding. If the
+# deployed distribution already answers for a hostname and this run was not
+# given one, adopt the live values — otherwise an ordinary deploy (a build-spec
+# fix, the monthly refresh's cdk deploy, another workstation) would synthesize
+# a distribution with no Aliases and detach production from CloudFront with no
+# error at deploy time. Dropping the hostname on purpose is LOU_DROP_DOMAIN=1.
+stack_out() { aws cloudformation describe-stacks --stack-name LouStack \
+  --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text 2>/dev/null || true; }
+if [ -z "${LOU_DOMAIN:-}" ] && [ "${LOU_DROP_DOMAIN:-}" != "1" ]; then
+  live_domain=$(stack_out PublicDomain); live_cert=$(stack_out CertificateArn)
+  if [ -n "$live_domain" ] && [ "$live_domain" != "None" ]; then
+    [ -n "$live_cert" ] && [ "$live_cert" != "None" ] || { echo "!! stack has PublicDomain=$live_domain but no CertificateArn output; refusing"; exit 1; }
+    LOU_DOMAIN=$live_domain; LOU_CERT_ARN=$live_cert
+    echo "== keeping the live public hostname $LOU_DOMAIN (set LOU_DROP_DOMAIN=1 to detach it deliberately)"
+  fi
+fi
 [ -n "${LOU_DOMAIN:-}" ] && CTX+=(-c "lou:domain=$LOU_DOMAIN")
 [ -n "${LOU_CERT_ARN:-}" ] && CTX+=(-c "lou:certificateArn=$LOU_CERT_ARN")
 # ${CTX[@]+"${CTX[@]}"} expands to nothing when the array is empty: a plain
@@ -93,6 +111,17 @@ case "$STEP" in
       -H "x-amz-content-sha256: $(printf '%s' "$body" | shasum -a 256 | cut -d' ' -f1)" --data "$body")
     echo "SSE probe: $code_type"
     case "$code_type" in "200 text/event-stream"*) echo "== DEPLOY VERIFIED: $CF" ;; *) echo "!! API probe failed"; exit 1 ;; esac
+    # The public hostname, when bound: pinned to CloudFront with --resolve so
+    # this holds before AND after the DNS cutover (before it, public DNS still
+    # points at the Air). A stripped alias or wrong certificate fails HERE.
+    if [ -n "${LOU_DOMAIN:-}" ]; then
+      CFD=$(python3 -c "import json; print(json.load(open('cdk.out/outputs.json'))['LouStack']['CloudFrontDomain'])")
+      IP=$(dig +short "$CFD" A | head -1)
+      [ -n "$IP" ] || { echo "!! cannot resolve $CFD"; exit 1; }
+      hn=$(curl -sS --resolve "$LOU_DOMAIN:443:$IP" -o /dev/null --max-time 30 -w '%{http_code}' "https://$LOU_DOMAIN/api/health" || echo "curl-failed")
+      [ "$hn" = "200" ] && echo "== HOSTNAME VERIFIED on CloudFront: https://$LOU_DOMAIN/" \
+        || { echo "!! https://$LOU_DOMAIN/ on CloudFront answered $hn — alias or certificate problem"; exit 1; }
+    fi
     ;;
   *) echo "usage: $0 [synth|diff|deploy]"; exit 2 ;;
 esac

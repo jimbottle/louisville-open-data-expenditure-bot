@@ -357,6 +357,9 @@ def test_custom_domain_attaches_hostname_and_certificate():
     assert vc["MinimumProtocolVersion"] == "TLSv1.2_2021"
     outs = t.to_json()["Outputs"]
     assert outs["PublicUrl"]["Value"] == "https://louisville.raylytics.io/"
+    # deploy.sh reads these back to keep the binding on ordinary deploys.
+    assert outs["PublicDomain"]["Value"] == "louisville.raylytics.io"
+    assert outs["CertificateArn"]["Value"] == arn
 
 
 def test_custom_domain_requires_both_values():
