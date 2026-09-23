@@ -179,6 +179,12 @@ launchctl bootstrap gui/501 /Users/macserver/Library/LaunchAgents/com.raylytics.
 
 If the plist itself changed, `cp` it into `~/Library/LaunchAgents/` before bootstrapping.
 
+> The plist uses `StartCalendarInterval` (every minute), **not** `StartInterval`:
+> launchd holds `StartInterval` jobs pending while the GUI session is idle or
+> locked, which stopped this heartbeat unnoticed from ~2026-09-01 to 2026-09-23.
+> It also sets `CONTAINER=""` since the AWS cutover (no container to self-heal);
+> restore `louisville-bot` there only when rolling back to the Air.
+
 > ⚠️ **LaunchAgents only run inside a logged-in GUI session.** The Air auto-logs-in as
 > `macserver`, so this is fine — but if auto-login is ever disabled, the heartbeat dies
 > at the login screen and you get a false "down" alert after every reboot.

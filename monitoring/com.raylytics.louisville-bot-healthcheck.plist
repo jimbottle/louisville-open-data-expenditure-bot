@@ -9,8 +9,20 @@
         <string>/bin/sh</string>
         <string>/Users/macserver/projects/louisville-open-data/monitoring/louisville-bot-heartbeat.sh</string>
     </array>
-    <key>StartInterval</key>
-    <integer>60</integer>
+    <!-- StartCalendarInterval with only Minute unset = every minute. NOT
+         StartInterval: launchd holds StartInterval jobs pending while the GUI
+         session is idle or locked, which silently stopped this heartbeat from
+         ~2026-09-01 to 09-23 (same fix as com.raylytics.healthcheck, 2026-09-03). -->
+    <key>StartCalendarInterval</key>
+    <dict/>
+    <!-- Production is on AWS since the 2026-09-23 cutover: there is no container
+         on this host to self-heal. Set CONTAINER to louisville-bot again only
+         when rolling back to the Air. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CONTAINER</key>
+        <string></string>
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>
