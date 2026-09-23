@@ -2278,8 +2278,7 @@ def test_year_of_label(label, year):
 def test_period_context_picks_the_salary_basis_only_for_salary_queries():
     assert _FY_PERIOD == {"basis": "expenditures", "partial_year": 2026,
                           "through": "2026-03-16", "last_complete_year": 2025, "prefix": "FY",
-                          "by_axis": {"fiscal": {"partial_year": 2026, "through": "2026-03-16"},
-                                      "calendar": {"partial_year": 2026, "through": "2026-03-16"}}}
+                          "by_axis": {"fiscal": {"partial_year": 2026, "through": "2026-03-16"}}}
     sal = period_context(_YC, "SELECT CalYear, SUM(Annual_Rate) FROM salary_data GROUP BY 1")
     assert sal["basis"] == "salary" and sal["partial_year"] == 2026 and sal["through"] is None
     # A join that reads expenditures stays on the fiscal-year basis.
@@ -2415,32 +2414,31 @@ def test_axis_basis(labels, col, basis):
 
 
 def test_partial_markers_follow_the_axis_kind_not_the_fiscal_year():
-    assert _OCT["by_axis"] == {"fiscal": {"partial_year": 2027, "through": "2026-10-01"},
-                               "calendar": {"partial_year": 2026, "through": "2026-10-01"}}
-    # A calendar axis marks 2026 (partial), not 2027 (a year it doesn't have).
-    assert chart_partial_markers(["2024", "2025", "2026"], "CalYear", _OCT) == {
-        "partial_labels": ["2026"], "data_through": "2026-10-01"}
+    assert _OCT["by_axis"] == {"fiscal": {"partial_year": 2027, "through": "2026-10-01"}}
     # A fiscal axis marks FY2027; FY2026 is complete.
     assert chart_partial_markers(["2025", "2026", "2027"], "fiscal_year", _OCT) == {
         "partial_labels": ["2027"], "data_through": "2026-10-01"}
-    # A bare `year` could be either: no marker at all.
+    # The fiscal partial year is never pinned on a calendar or ambiguous axis
+    # (2027 isn't even on it; 2026 there is a different, partial, year).
+    assert chart_partial_markers(["2024", "2025", "2026"], "CalYear", _OCT) == {}
     assert chart_partial_markers(["2025", "2026"], "year", _OCT) == {}
 
 
-def test_calendar_series_never_headlines_its_partial_year_as_complete():
-    df = pd.DataFrame({"CalYear": [2024, 2025, 2026], "total_spend": [5e8, 6e8, 4.5e8]})
-    h = headline(df, "SELECT ... FROM expenditures", _OCT)
-    assert h["label"] == "2025 Total Spend"
-    assert h["partial_label"] == "2026"
-    # The same frame on an ambiguous axis gets no headline.
-    amb = df.rename(columns={"CalYear": "year"})
-    assert headline(amb, "SELECT ... FROM expenditures", _OCT) is None
+def test_calendar_spending_series_gets_no_headline():
+    """Calendar years over fiscal-year data are partial at both ends (July
+    start: calendar 2007 is half a year) and the trailing one only completes
+    when the year ends; neither is modelled, so no headline (roborev 4792)."""
+    df = pd.DataFrame({"CalYear": [2007, 2025, 2026], "total_spend": [1e8, 6e8, 4.5e8]})
+    assert headline(df, "SELECT ... FROM expenditures", _OCT) is None
+    assert headline(df.rename(columns={"CalYear": "year"}), "SELECT ... FROM expenditures", _OCT) is None
 
 
-def test_calendar_year_reaching_its_last_week_is_complete():
-    yc = dict(_YC_OCT, expenditures=dict(_YC_OCT["expenditures"], covered_through="2026-12-28"))
-    p = period_context(yc, "SELECT 1 FROM expenditures")
-    assert p["by_axis"]["calendar"] == {"partial_year": None, "through": None}
+def test_salary_calendar_axis_still_marks_its_ytd_year():
+    sal = period_context(_YC, "SELECT CalYear, SUM(Annual_Rate) FROM salary_data GROUP BY 1")
+    assert chart_partial_markers(["2024", "2025", "2026"], "CalYear", sal) == {
+        "partial_labels": ["2026"], "data_through": None}
+    # ...and a fiscal axis over salary data is unknown.
+    assert chart_partial_markers(["2025", "2026"], "fiscal_year", sal) == {}
 
 
 def test_single_value_on_an_ambiguous_year_gets_no_headline():

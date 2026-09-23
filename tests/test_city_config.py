@@ -342,6 +342,29 @@ def test_vendored_fonts_are_served_as_woff2():
         assert r.headers["content-type"] == "font/woff2"
 
 
+def test_csv_export_neutralizes_formula_cells():
+    """Download CSV must not hand a spreadsheet a formula (roborev 4791): a
+    text cell opening with = + - @ tab or CR gets a leading apostrophe;
+    numbers (negative amounts included) and ordinary text are untouched.
+    Runs the page's own csvCell under node."""
+    import json
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    html = open(os.path.join(REPO, "static", "index.html")).read()
+    start = html.index("function csvCell(v) {")
+    fn = html[start:html.index("\n}\n", start) + 2]
+    cases = ["=1+1", "+SUM(A1)", "-2+3", "@cmd", "\tx", "=HYPERLINK(\"http://x\",\"y\")",
+             "Parks, Inc.", "LG&E", -1500.5, 2026, None]
+    script = fn + "\nconsole.log(JSON.stringify(" + json.dumps(cases) + ".map(csvCell)));"
+    out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, check=True).stdout)
+    assert out == ["'=1+1", "'+SUM(A1)", "'-2+3", "'@cmd", "'\tx",
+                   '"\'=HYPERLINK(""http://x"",""y"")"',
+                   '"Parks, Inc."', "LG&E", "-1500.5", "2026", ""]
+
+
 def test_stream_teardown_lives_in_finally_not_after_try():
     """A `return` from inside the try (non-SSE HTTP error, supersede) runs the
     finally but skips any post-try code, so the Ask-button/isStreaming reset

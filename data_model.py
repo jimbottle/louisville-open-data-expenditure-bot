@@ -1633,8 +1633,17 @@ def period_context(yc: dict, sql: str = None) -> dict | None:
     year and a partial calendar year are different numbers for half of every
     year: with a July fiscal start and payments loaded through 2026-10-01, the
     in-progress year is FY2027 but the partial calendar year is 2026. A kind
-    the data cannot speak to is absent (see axis_partial). `partial_year` /
-    `through` are the basis's own kind, kept for callers that know the axis."""
+    the data cannot speak to is absent (see axis_partial), and callers then
+    claim nothing. `partial_year` / `through` are the basis's own kind, kept
+    for callers that know the axis.
+
+    Expenditures answer only for FISCAL years. A calendar axis over them has a
+    partial year at BOTH ends when the fiscal year starts mid-year (FY2008
+    begins July 2007, so calendar 2007 holds half a year), and the trailing
+    one is only complete once the year has actually ended — neither is
+    modelled here, so a calendar-year series of spending gets no marker and
+    no headline rather than a half year used as a baseline or a running year
+    presented as complete (roborev 4792)."""
     if not yc:
         return None
     tables = [t.lower() for t in _TABLE_REF.findall(_blank_literals(sql or ""))]
@@ -1655,14 +1664,6 @@ def period_context(yc: dict, sql: str = None) -> dict | None:
     covered = exp.get("covered_through")
     by_axis = {"fiscal": {"partial_year": fiscal,
                           "through": covered if exp.get("is_partial") else None}}
-    if covered:
-        # The calendar year the payments stop in is partial unless they reach
-        # its last week (the same grace derive_year_facts gives a fiscal year
-        # whose final day falls on a weekend).
-        year = int(str(covered)[:4])
-        partial = covered < f"{year}-12-24"
-        by_axis["calendar"] = {"partial_year": year if partial else None,
-                               "through": covered if partial else None}
     return {"basis": "expenditures",
             "partial_year": fiscal,
             "through": covered if exp.get("is_partial") else None,
