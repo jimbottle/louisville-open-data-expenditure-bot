@@ -2179,3 +2179,206 @@ def test_shipped_contractor_profiles_keep_their_numeric_columns_numeric():
     wrong = {c: types.get(c) for c in numeric if types.get(c) == "VARCHAR" or c not in types}
     assert not wrong, f"columns that lost their numeric type: {wrong}"
     assert types.get("sos_file_date") == "DATE"
+
+
+# ── Structured result surfaces: table, partial-period markers, headline ──────
+# (the machine-readable halves of the results / chart / headline SSE events)
+
+import json as _json
+from datetime import date as _date
+from decimal import Decimal as _Decimal
+
+import numpy as _np
+
+from data_model import (
+    chart_partial_markers,
+    column_kind,
+    headline,
+    json_safe,
+    period_context,
+    result_table,
+    year_context,
+    year_of_label,
+)
+
+# The shape year_context() returns for Louisville as of the 2026-03-16 load.
+_YC = {
+    "values": {"first_year": 2008, "newest_year": 2026, "in_progress_year": 2026,
+               "last_complete_year": 2025},
+    "expenditures": {"is_partial": True, "covered_through": "2026-03-16",
+                     "last_complete_year": 2025, "in_progress_year": 2026},
+    "salary": {"is_partial": True, "last_complete_year": 2025},
+    "newest_cal_year": 2026,
+}
+_FY_PERIOD = period_context(_YC, "SELECT * FROM summary_annual_spend")
+
+
+def _annual_spend_frame():
+    """The annual-spend starter's shape: FY2008..FY2026, FY2026 partial (low)."""
+    years = list(range(2008, 2027))
+    spend = [240e6 + 17e6 * i for i in range(18)] + [420e6]
+    return pd.DataFrame({"fiscal_year": years, "total_spend": spend,
+                         "transaction_count": [1000 + i for i in range(19)]})
+
+
+def test_json_safe_turns_every_missing_and_numpy_value_into_valid_json():
+    cells = [None, float("nan"), pd.NaT, pd.NA, _np.int64(7), _np.float32(1.5),
+             _Decimal("2.25"), _np.bool_(True), pd.Timestamp("2026-03-16"),
+             pd.Timestamp("2026-03-16 13:45:00"), _date(2025, 7, 1), float("inf"), "x"]
+    out = [json_safe(v) for v in cells]
+    assert out == [None, None, None, None, 7, 1.5, 2.25, True, "2026-03-16",
+                   "2026-03-16T13:45:00", "2025-07-01", None, "x"]
+    _json.dumps(out, allow_nan=False)   # NaN would break JSON.parse in the UI
+
+
+@pytest.mark.parametrize("col,values,kind", [
+    ("fiscal_year", [2025, 2026], "date"),
+    ("CalYear", [2024, 2025], "date"),
+    ("years_active", [3, 12], "count"),          # time-named, but not year values
+    ("total_spend", [1.5, 2.5], "money"),
+    ("transaction_count", [3, 4], "count"),
+    ("total_vendors", [3, 4], "count"),          # integer, no money word
+    ("pct_of_total", [0.25, 0.75], "number"),
+    ("agency_canonical", ["A", "B"], "text"),
+    ("month", ["2025-01", "2025-02"], "date"),
+    ("payment_date", pd.to_datetime(["2025-01-01", "2025-02-01"]), "date"),
+])
+def test_column_kind(col, values, kind):
+    assert column_kind(col, pd.Series(values)) == kind
+
+
+def test_column_kind_treats_sql_window_ordinals_as_plain_numbers():
+    assert column_kind("rn", pd.Series([1, 2]), ordinals={"rn"}) == "number"
+
+
+def test_result_table_caps_rows_and_nulls_missing_values():
+    df = pd.DataFrame({"agency_canonical": ["A", None, "C"],
+                       "total_spend": [1.5, float("nan"), 3.0]})
+    t = result_table(df, 2)
+    assert t["columns"] == [
+        {"name": "agency_canonical", "label": "Agency (Normalized)", "kind": "text"},
+        {"name": "total_spend", "label": "Total Spend", "kind": "money"},
+    ]
+    assert t["rows"] == [["A", 1.5], [None, None]]
+    assert t["total_rows"] == 3 and t["truncated"] is True
+    _json.dumps(t, allow_nan=False)
+    assert result_table(df, 50)["truncated"] is False
+
+
+@pytest.mark.parametrize("label,year", [
+    (2026, 2026), ("2026", 2026), ("FY2026", 2026), ("FY 2026", 2026),
+    ("2026.0", 2026), (2026.0, 2026), ("fy2025", 2025),
+    ("2026-03", None), ("Parks", None), (12, None), (2025.5, None), (None, None),
+])
+def test_year_of_label(label, year):
+    assert year_of_label(label) == year
+
+
+def test_period_context_picks_the_salary_basis_only_for_salary_queries():
+    assert _FY_PERIOD == {"basis": "expenditures", "partial_year": 2026,
+                          "through": "2026-03-16", "last_complete_year": 2025, "prefix": "FY"}
+    sal = period_context(_YC, "SELECT CalYear, SUM(Annual_Rate) FROM salary_data GROUP BY 1")
+    assert sal["basis"] == "salary" and sal["partial_year"] == 2026 and sal["through"] is None
+    # A join that reads expenditures stays on the fiscal-year basis.
+    mixed = period_context(_YC, "SELECT 1 FROM expenditures e JOIN salary_data s ON 1=1")
+    assert mixed["basis"] == "expenditures"
+    # A complete newest year marks nothing.
+    done = dict(_YC, expenditures=dict(_YC["expenditures"], is_partial=False))
+    assert period_context(done, "SELECT 1 FROM expenditures")["partial_year"] is None
+    assert period_context({}, "SELECT 1") is None
+
+
+def test_chart_partial_markers_flag_the_in_progress_year_on_a_year_axis():
+    labels = [str(y) for y in range(2008, 2027)]
+    assert chart_partial_markers(labels, "fiscal_year", _FY_PERIOD) == {
+        "partial_labels": ["2026"], "data_through": "2026-03-16"}
+    # FY-prefixed labels count as a year axis whatever the column is called.
+    assert chart_partial_markers(["FY 2025", "FY 2026"], "label", _FY_PERIOD)[
+        "partial_labels"] == ["FY 2026"]
+
+
+@pytest.mark.parametrize("labels,col,period", [
+    ([str(y) for y in range(2008, 2026)], "fiscal_year", _FY_PERIOD),   # no partial year
+    (["2025", "2026"], "fiscal_year", None),                            # no year context
+    (["2025", "2026"], "payee_canonical", _FY_PERIOD),                  # not a time axis
+    (["Parks", "2026"], "fiscal_year", _FY_PERIOD),                     # not all years
+    (["2026-01", "2026-02"], "month", _FY_PERIOD),                      # months: not handled
+])
+def test_chart_partial_markers_stay_silent_otherwise(labels, col, period):
+    assert chart_partial_markers(labels, col, period) == {}
+
+
+def test_headline_single_value():
+    h = headline(pd.DataFrame({"total_spend": [12_345.5]}), "SELECT ...", _FY_PERIOD)
+    assert h == {"value": 12_345.5, "value_kind": "money", "label": "Total Spend",
+                 "context": None}
+
+
+def test_headline_single_value_names_its_year_and_flags_a_partial_one():
+    df = pd.DataFrame({"agency_canonical": ["Louisville Metro Police Department"],
+                       "fiscal_year": [2026], "total_spend": [1.5e8]})
+    h = headline(df, "SELECT ...", _FY_PERIOD)
+    assert h["label"] == "FY2026 Total Spend"
+    assert h["context"] == "Louisville Metro Police Department · partial year (through Mar 16)"
+
+
+def test_headline_year_series_uses_the_latest_complete_year_not_the_partial_one():
+    df = _annual_spend_frame()
+    h = headline(df, "SELECT * FROM summary_annual_spend ORDER BY fiscal_year", _FY_PERIOD)
+    last, first = df.total_spend[17], df.total_spend[0]
+    assert h["label"] == "FY2025 Total Spend"
+    assert h["value"] == last and h["value_kind"] == "money"
+    assert h["change"] == {"from": "FY2008", "abs": last - first, "pct": (last - first) / first}
+    assert h["partial_label"] == "FY2026"
+    assert h["context"] == "up 120% from FY2008 · FY2026 partial (through Mar 16)"
+
+
+def test_headline_year_series_is_order_independent_and_skips_null_years():
+    df = _annual_spend_frame().iloc[::-1]          # "top years by spend" order
+    df = pd.concat([df, pd.DataFrame({"fiscal_year": [None], "total_spend": [9e9],
+                                      "transaction_count": [1]})])
+    h = headline(df, "SELECT ... ORDER BY total_spend DESC", _FY_PERIOD)
+    assert h["label"] == "FY2025 Total Spend"
+
+
+def test_headline_ranked_list_reports_the_top_item_and_its_share_without_the_total_row():
+    df = pd.DataFrame({"agency_canonical": ["Public Works", "LMPD", "Parks", "TOTAL"],
+                       "total_spend": [60.0, 30.0, 10.0, 100.0]})
+    h = headline(df, "SELECT ... ORDER BY total_spend DESC", _FY_PERIOD)
+    assert h == {"value": 60.0, "value_kind": "money", "label": "Public Works",
+                 "context": "Top of 3 by Total Spend · 60% of the listed total", "share": 0.6}
+
+
+def test_headline_ranked_list_gives_no_share_for_a_non_additive_measure():
+    df = pd.DataFrame({"jobTitle": ["Chief", "Deputy"], "avg_salary": [200e3, 150e3]})
+    h = headline(df, "SELECT ...", None)
+    assert h["share"] is None and "listed total" not in h["context"]
+
+
+@pytest.mark.parametrize("df,sql", [
+    (pd.DataFrame(), "SELECT 1"),                                              # empty
+    (pd.DataFrame({"total_spend": [1.0], "transaction_count": [3]}), "x"),     # two measures
+    (pd.DataFrame({"total_spend": [None]}, dtype=float), "x"),                 # all-null value
+    (pd.DataFrame({"fiscal_year": [2024, 2024, 2025, 2025],                    # year x agency
+                   "agency_canonical": ["A", "B", "A", "B"],
+                   "total_spend": [1.0, 2.0, 3.0, 4.0]}), "x"),
+    (pd.DataFrame({"spend_view": ["Department", "Category"],                   # overlapping views
+                   "total_spend": [5.0, 7.0]}), "SELECT 'a' ... UNION ALL SELECT 'b' ..."),
+])
+def test_headline_emits_nothing_without_an_unambiguous_figure(df, sql):
+    assert headline(df, sql, _FY_PERIOD) is None
+
+
+def test_headline_on_the_real_annual_spend_table_is_fy2025(con):
+    """The starter "How has total annual spending changed from 2008 to 2026?"
+    against the real data and the real year context."""
+    yc = year_context(con, 7, today=_date(2026, 9, 23))
+    sql = "SELECT * FROM summary_annual_spend ORDER BY fiscal_year"
+    df = con.execute(sql).fetchdf()
+    period = period_context(yc, sql)
+    h = headline(df, sql, period)
+    assert h["label"].startswith("FY2025 ")
+    assert "FY2026 partial" in h["context"]
+    markers = chart_partial_markers(df["fiscal_year"].astype(str).tolist(), "fiscal_year", period)
+    assert markers["partial_labels"] == ["2026"]
+    assert markers["data_through"] == yc["expenditures"]["covered_through"]

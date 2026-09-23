@@ -1478,6 +1478,388 @@ def humanize_text(text: str, table: str = "expenditures", prose: bool = False) -
     return text
 
 
+# ── Structured result surfaces (table, chart markers, headline) ──────────────
+#
+# The /api/ask stream used to carry a result only as preformatted text, so a
+# UI that wanted a real table, a partial-year marker or a headline figure had
+# to re-parse strings. These helpers derive those shapes from the result
+# DataFrame and the year context. All pure (no DB, no LLM), so every rule is
+# unit-tested in tests/test_known_answers.py.
+
+# Measures whose values are not currency or counts even when they are floats:
+# measure_kind would call `pct_of_total` currency (its float default). Checked
+# AFTER measure_kind's count keywords, so `num_ranked` stays a count.
+_NUMBER_WORDS = ("pct", "percent", "share", "ratio", "rank")
+# Aggregates whose rows do not add up to a meaningful whole: a "share of the
+# listed total" of average salaries is arithmetic on nonsense.
+_NON_ADDITIVE_WORDS = ("avg", "average", "mean", "median", "max", "min", "pct",
+                       "percent", "rate", "ratio", "share", "rank")
+_YEAR_RANGE = (1900, 2100)
+# 2026, "2026", "FY2026", "FY 2026", "CY2026" — and "2026.0", which is what a
+# float fiscal_year column becomes after the chart's astype(str).
+_YEAR_LABEL = re.compile(r"(FY|CY)?\s*(\d{4})(?:\.0+)?", re.I)
+_TABLE_REF = re.compile(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)", re.I)
+
+
+def json_safe(v):
+    """One result cell as a JSON-serializable value.
+
+    json.dumps rejects numpy scalars, Decimals and Timestamps outright, and
+    emits NaN — invalid JSON that JSON.parse throws on, taking the whole SSE
+    frame (and so the answer) with it. Missing values of every flavour
+    (None/NaN/NaT/pd.NA) become null; a midnight timestamp is a DATE column
+    that DuckDB handed back as datetime64, so it serializes as the date."""
+    import math
+    from datetime import datetime, timedelta as _td
+    from decimal import Decimal
+
+    import numpy as np
+
+    if v is None:
+        return None
+    if isinstance(v, (list, tuple, np.ndarray)):
+        return [json_safe(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): json_safe(x) for k, x in v.items()}
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, (bool, np.bool_)):
+        return bool(v)
+    if isinstance(v, (int, np.integer)):
+        return int(v)
+    if isinstance(v, (float, np.floating, Decimal)):
+        f = float(v)
+        return f if math.isfinite(f) else None
+    if isinstance(v, datetime):
+        if v.tzinfo is None and (v.hour, v.minute, v.second, v.microsecond) == (0, 0, 0, 0):
+            return v.date().isoformat()
+        return v.isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    if isinstance(v, (_td, pd.Timedelta)):
+        return str(v)
+    if isinstance(v, bytes):
+        return v.decode("utf-8", "replace")
+    return v if isinstance(v, str) else str(v)
+
+
+def _is_year_values(s) -> bool:
+    """Every non-null value a whole number inside a plausible year range."""
+    s = s.dropna()
+    if s.empty or not pd.api.types.is_numeric_dtype(s) or pd.api.types.is_bool_dtype(s):
+        return False
+    try:
+        return bool(((s == s.round()) & (s >= _YEAR_RANGE[0]) & (s <= _YEAR_RANGE[1])).all())
+    except Exception:
+        return False
+
+
+def column_kind(col_name, series=None, ordinals=()) -> str:
+    """'money' | 'count' | 'number' | 'text' | 'date' — how a UI should format a column.
+
+    Numeric columns reuse measure_kind (the chart axis's money-vs-count rule,
+    whose keyword-order reasoning is documented there), with two refinements
+    it never needed for a y-axis: a year-valued time column (`fiscal_year`,
+    `CalYear`) is a 'date', so it is never rendered "2,025"; and ratios and
+    SQL window ordinals are plain 'number's, not dollars."""
+    name = str(col_name or "").lower()
+    if series is None:
+        return "money" if measure_kind(name) == "currency" else "count"
+    if pd.api.types.is_bool_dtype(series):
+        return "text"
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return "date"
+    numeric = pd.api.types.is_numeric_dtype(series)
+    if not numeric:
+        sample = series.dropna()
+        first = sample.iloc[0] if len(sample) else None
+        from datetime import datetime
+        from decimal import Decimal
+        if isinstance(first, (date, datetime)):
+            return "date"
+        if isinstance(first, Decimal):
+            numeric = True
+        else:
+            # An ISO string axis ('2021-01', from SUBSTR(date, 1, 7)) is a
+            # time column — the same test the chart uses to accept it as one.
+            if first is not None and is_time_named(name) and is_chronological(sample, require_sorted=False):
+                return "date"
+            return "text"
+    if any(k in name for k in CHART_COUNT_KEYWORDS):
+        return "count"
+    if str(col_name) in ordinals or any(k in name for k in _NUMBER_WORDS):
+        return "number"
+    if is_time_named(name) and _is_year_values(pd.to_numeric(series, errors="coerce")):
+        return "date"
+    return "money" if measure_kind(name, series) == "currency" else "count"
+
+
+def result_table(df, max_rows: int, sql: str = None, label=None) -> dict:
+    """The machine-readable half of the `results` SSE event.
+
+    Rows are the frame's own order (execute_sql_safe already ordered it and
+    moved any ROLLUP total to the end), capped at the FIRST `max_rows`. The
+    text table the model reads shows head and tail around a gap; a rendered
+    table with a hole in the middle reads as missing data, so the UI gets a
+    plain prefix plus `truncated` and `total_rows` to say there is more."""
+    label = label or humanize_text
+    ordinals = sql_ordinal_columns(sql) if sql else set()
+    columns = []
+    for i, c in enumerate(df.columns):
+        # iloc, not df[c]: a duplicated column name (two unaliased SUM()s)
+        # returns a DataFrame from df[c].
+        columns.append({"name": str(c), "label": label(str(c)),
+                        "kind": column_kind(c, df.iloc[:, i], ordinals)})
+    head = df.head(max_rows)
+    rows = [[json_safe(v) for v in row] for row in head.itertuples(index=False, name=None)]
+    return {"columns": columns, "rows": rows, "total_rows": int(len(df)),
+            "truncated": bool(len(df) > max_rows)}
+
+
+def period_context(yc: dict, sql: str = None) -> dict | None:
+    """Which period of the queried dataset is partial, from year_context().
+
+    Returns {basis, partial_year, through, last_complete_year, prefix} or None
+    when nothing is known. Salary figures are judged by CalYear (a YTD
+    snapshot with no coverage date); everything else — expenditures and the
+    summary tables built from it, the common case — by the fiscal year the
+    payments run through. A query is read as salary only when it touches a
+    salary table and not `expenditures` itself."""
+    if not yc:
+        return None
+    tables = [t.lower() for t in _TABLE_REF.findall(_blank_literals(sql or ""))]
+    if any("salar" in t for t in tables) and "expenditures" not in tables:
+        sal = yc.get("salary")
+        if not sal:
+            return None
+        return {"basis": "salary", "partial_year": yc.get("newest_cal_year"),
+                "through": None, "last_complete_year": sal.get("last_complete_year"),
+                "prefix": ""}
+    exp = yc.get("expenditures")
+    if not exp:
+        return None
+    values = yc.get("values") or {}
+    return {"basis": "expenditures",
+            "partial_year": values.get("in_progress_year") if exp.get("is_partial") else None,
+            "through": exp.get("covered_through") if exp.get("is_partial") else None,
+            "last_complete_year": exp.get("last_complete_year"),
+            "prefix": "FY"}
+
+
+def year_of_label(v) -> int | None:
+    """The year a chart label / cell names (2026, '2026', 'FY 2026'), else None."""
+    import math
+    import numpy as np
+    if v is None or isinstance(v, (bool, np.bool_)):
+        return None
+    if isinstance(v, (int, np.integer)):
+        y = int(v)
+    elif isinstance(v, (float, np.floating)):
+        if not math.isfinite(v) or v != int(v):
+            return None
+        y = int(v)
+    else:
+        m = _YEAR_LABEL.fullmatch(str(v).strip())
+        if not m:
+            return None
+        y = int(m.group(2))
+    return y if _YEAR_RANGE[0] <= y <= _YEAR_RANGE[1] else None
+
+
+def _is_year_axis(labels, label_col) -> bool:
+    """Every label a year, and the axis is plausibly time: a time-named column
+    or FY-prefixed labels. Without the second test a payee ranking whose labels
+    happen to be four digits would sprout a partial-year marker."""
+    labels = [l for l in labels if l is not None and not (isinstance(l, float) and l != l)]
+    if not labels or any(year_of_label(l) is None for l in labels):
+        return False
+    return is_time_named(str(label_col or "")) or any(
+        re.match(r"\s*(FY|CY)", str(l), re.I) for l in labels)
+
+
+def chart_partial_markers(labels, label_col, period) -> dict:
+    """{'partial_labels': [...], 'data_through': 'YYYY-MM-DD'|None} for a year
+    axis that includes the dataset's partial year, else {}.
+
+    FY2026 held only 8.5 months of payments when the annual-spend starter
+    plotted it as a genuine collapse in spending. The chart keeps the point
+    (it is real data) and the UI marks it instead."""
+    if not period or period.get("partial_year") is None or not labels:
+        return {}
+    if not _is_year_axis(labels, label_col):
+        return {}
+    partial = [str(l) for l in labels if year_of_label(l) == period["partial_year"]]
+    if not partial:
+        return {}
+    return {"partial_labels": partial, "data_through": period.get("through")}
+
+
+def _through_phrase(through) -> str:
+    """'2026-03-16' -> 'through Mar 16'; None -> 'year to date'."""
+    try:
+        d = date.fromisoformat(str(through)[:10])
+        return f"through {d:%b} {d.day}"
+    except (TypeError, ValueError):
+        return "year to date"
+
+
+def _fmt_measure(v: float, kind: str) -> str:
+    """Compact figure for headline context text ($1.2B, 3,400, 0.25)."""
+    if kind == "money":
+        a = abs(v)
+        for div, suf in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+            if a >= div:
+                return f"${v / div:,.1f}{suf}"
+        return f"${v:,.0f}"
+    if kind == "count":
+        return f"{v:,.0f}"
+    return f"{v:,.2f}"
+
+
+def _year_label(raw, year: int, label_col) -> str:
+    """How a period is named in headline text: an 'FY…' label stays as-is, a
+    fiscal-year column gains the prefix, a calendar year stays bare."""
+    s = str(raw).strip()
+    if re.match(r"(FY|CY)", s, re.I):
+        return s.upper().replace(" ", "")
+    # Only a column that SAYS fiscal gets the prefix: `year` could just as well
+    # be EXTRACT(year FROM payment_date), and calling that FY2025 would be wrong.
+    return f"FY{year}" if "fiscal" in str(label_col or "").lower() else str(year)
+
+
+def headline(df, sql: str = None, period: dict = None, label=None) -> dict | None:
+    """A deterministic headline figure for a result, or None.
+
+    No LLM: every number here is read straight off the result frame, so it can
+    never disagree with the table under it the way a model's prose can.
+
+    (a) one row, one measure        -> that value
+    (b) a year series               -> the latest COMPLETE period, with its
+        change since the first; a partial period is named in `context` and is
+        never the headline (FY2026 through March is not "spending fell 30%")
+    (c) a labelled list, >= 2 rows  -> the first item, with its share of the
+        listed total when the measure is additive
+    (d) anything else               -> None
+
+    Grand-total rows are dropped exactly as the chart drops them, so a ROLLUP
+    total can neither be the "top item" nor inflate the share's denominator.
+    """
+    label = label or humanize_text
+    if df is None or len(df) == 0:
+        return None
+    ordinals = sql_ordinal_columns(sql) if sql else set()
+    kinds = {c: column_kind(c, df[c], ordinals) for c in df.columns}
+    measures = [c for c in df.columns if kinds[c] in ("money", "count", "number")
+                and c not in ordinals]
+    partial_year = (period or {}).get("partial_year")
+
+    # (a) single value
+    if len(df) == 1:
+        if len(measures) != 1:
+            return None
+        col = measures[0]
+        value = json_safe(df[col].iloc[0])
+        if not isinstance(value, (int, float)):
+            return None
+        year_bits, other_bits, is_partial = [], [], False
+        for c in df.columns:
+            if c == col:
+                continue
+            v = json_safe(df[c].iloc[0])
+            if v is None:
+                continue
+            if kinds[c] == "date" and year_of_label(v) is not None:
+                y = year_of_label(v)
+                year_bits.append(_year_label(v, y, c))
+                is_partial = is_partial or y == partial_year
+            elif kinds[c] == "text":
+                other_bits.append(str(v)[:60])
+        head = (year_bits[0] + " " if year_bits else "") + label(str(col))
+        context = other_bits[:2]
+        if is_partial:
+            context.append(f"partial year ({_through_phrase(period.get('through'))})")
+        return {"value": float(value), "value_kind": kinds[col], "label": head,
+                "context": " · ".join(context) or None}
+
+    try:
+        _, label_col, value_col = infer_chart(df, sql)
+    except Exception:
+        return None
+    if not label_col or not value_col or value_col not in measures:
+        return None
+    frame = drop_total_rows(df, label_col, value_col)
+    frame = frame[frame[label_col].notna() & frame[value_col].notna()]
+    if len(frame) < 2:
+        return None
+    kind = kinds[value_col]
+    measure = label(str(value_col))
+    labels = frame[label_col].tolist()
+
+    # (b) a year series
+    if _is_year_axis(labels, label_col):
+        years = [year_of_label(l) for l in labels]
+        if len(set(years)) != len(years):
+            return None                    # year x something: not one series
+        series = sorted(zip(years, labels, frame[value_col].astype(float).tolist()))
+        complete = [s for s in series if s[0] != partial_year]
+        if not complete:
+            return None
+        last_y, last_raw, last_v = complete[-1]
+        first_y, first_raw, first_v = complete[0]
+        name = _year_label(last_raw, last_y, label_col)
+        context, change = [], None
+        if first_y != last_y:
+            first_name = _year_label(first_raw, first_y, label_col)
+            delta = last_v - first_v
+            pct = delta / first_v if first_v > 0 else None
+            change = {"from": first_name, "abs": delta, "pct": pct}
+            if delta == 0:
+                context.append(f"unchanged from {first_name}")
+            else:
+                word = "up" if delta > 0 else "down"
+                if pct is not None:
+                    p = abs(pct) * 100
+                    amount = f"{p:.0f}%" if p >= 1 else f"{p:.1f}%"
+                else:
+                    amount = _fmt_measure(abs(delta), kind)
+                context.append(f"{word} {amount} from {first_name}")
+        partial_name = None
+        partial_rows = [s for s in series if s[0] == partial_year]
+        if partial_rows:
+            partial_name = _year_label(partial_rows[0][1], partial_year, label_col)
+            context.append(f"{partial_name} partial ({_through_phrase(period.get('through'))})")
+        return {"value": last_v, "value_kind": kind, "label": f"{name} {measure}",
+                "context": " · ".join(context) or None,
+                "change": change, "partial_label": partial_name}
+
+    # (c) a labelled list. A UNION ALL of separately filtered views (the
+    # technology query's department view and category view) is not a list of
+    # parts of one whole: its rows overlap, so a "share" would double count.
+    if sql and re.search(r"\bunion\b", _blank_literals(sql), re.I):
+        return None
+    if kinds.get(label_col) not in ("text",):
+        return None
+    vals = frame[value_col].astype(float)
+    top_label, top_v = str(labels[0]), float(vals.iloc[0])
+    n = len(frame)
+    if vals.is_monotonic_decreasing:
+        rank = f"Top of {n} by {measure}"
+    elif vals.is_monotonic_increasing:
+        rank = f"Lowest of {n} by {measure}"
+    else:
+        rank = f"First of {n} listed · {measure}"
+    context, share = [rank], None
+    additive = not any(k in str(value_col).lower() for k in _NON_ADDITIVE_WORDS)
+    if additive and kind in ("money", "count") and (vals >= 0).all() and vals.sum() > 0:
+        share = top_v / float(vals.sum())
+        context.append(f"{share * 100:.0f}% of the listed total")
+    return {"value": top_v, "value_kind": kind, "label": top_label[:80],
+            "context": " · ".join(context), "share": share}
+
+
 def get_data_dictionary_text() -> str:
     """Return a human-readable data dictionary."""
     lines = [f"# {CONFIG.title} — Data Dictionary", ""]
