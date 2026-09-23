@@ -23,6 +23,7 @@ export AWS_PAGER="" JSII_SILENCE_WARNING_UNTESTED_NODE_VERSION=1
 cd "$(dirname "$0")"
 P="--profile lou"
 STEP=${1:-deploy}
+OUT=${LOU_OUTPUTS_FILE:-cdk.out/outputs.json}   # overridable so the test harness stays hermetic
 
 DATA=${LOU_DATA_DIR:-../../data}
 [ -f "$DATA/lou.duckdb" ] || { echo "data/lou.duckdb missing — run: python data_model.py --materialize data/lou.duckdb"; exit 1; }
@@ -133,9 +134,9 @@ case "$STEP" in
       echo "== broadening changes approved for this run (LOU_ALLOW_BROADENING=1)"
     fi
     # The image is built (arm64, needs Docker) and pushed here.
-    cdk deploy --require-approval never --outputs-file cdk.out/outputs.json
-    CF=$(python3 -c "import json; print(json.load(open('cdk.out/outputs.json'))['LouStack']['CloudFrontUrl'])")
-    FN=$(python3 -c "import json; print(json.load(open('cdk.out/outputs.json'))['LouStack']['FunctionName'])")
+    cdk deploy --require-approval never --outputs-file "$OUT"
+    CF=$(python3 -c "import json; print(json.load(open('$OUT'))['LouStack']['CloudFrontUrl'])")
+    FN=$(python3 -c "import json; print(json.load(open('$OUT'))['LouStack']['FunctionName'])")
     echo "== warm invoke (the one-time image-cache miss lands here, not on the first visitor)"
     aws lambda invoke $P --function-name "$FN" --cli-binary-format raw-in-base64-out \
       --payload '{"version":"2.0","routeKey":"$default","rawPath":"/api/health","rawQueryString":"","headers":{"host":"x"},"requestContext":{"http":{"method":"GET","path":"/api/health","protocol":"HTTP/1.1","sourceIp":"127.0.0.1","userAgent":"deploy"},"requestId":"x","stage":"$default"},"isBase64Encoded":false}' \
@@ -152,7 +153,7 @@ case "$STEP" in
     # this holds before AND after the DNS cutover (before it, public DNS still
     # points at the Air). A stripped alias or wrong certificate fails HERE.
     if [ -n "${LOU_DOMAIN:-}" ]; then
-      CFD=$(python3 -c "import json; print(json.load(open('cdk.out/outputs.json'))['LouStack']['CloudFrontDomain'])")
+      CFD=$(python3 -c "import json; print(json.load(open('$OUT'))['LouStack']['CloudFrontDomain'])")
       IP=$(dig +short "$CFD" A | head -1)
       [ -n "$IP" ] || { echo "!! cannot resolve $CFD"; exit 1; }
       hn=$(curl -sS --resolve "$LOU_DOMAIN:443:$IP" -o /dev/null --max-time 30 -w '%{http_code}' "https://$LOU_DOMAIN/api/health" || echo "curl-failed")
@@ -163,8 +164,11 @@ case "$STEP" in
     # the first visitors after a deploy do not pay the LLM latency. Spends
     # LLM calls (the only real cost of a deploy) — opt in.
     if [ "${LOU_WARM:-}" = "1" ]; then
+      # warm_cache.py reads /api/cache first, which is admin-gated: without the
+      # production ADMIN_TOKEN it cannot even see what is cached. Require it.
+      [ -n "${ADMIN_TOKEN:-}" ] || { echo "!! LOU_WARM=1 needs ADMIN_TOKEN in the environment (the /lou/prod value)"; exit 1; }
       echo "== re-warming the starter answers through CloudFront"
-      ( cd ../.. && python3 warm_cache.py --host "${CF%/}" --delay 5 )
+      ( cd ../.. && ADMIN_TOKEN="$ADMIN_TOKEN" python3 warm_cache.py --host "${CF%/}" --delay 5 )
     fi
     rm -f ../../.preview-ok
     ;;

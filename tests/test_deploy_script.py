@@ -1,4 +1,5 @@
-"""infra/cdk/deploy.sh against stubbed aws/npx/curl/dig binaries.
+"""infra/cdk/deploy.sh against stubbed aws/npx/curl/dig binaries (hermetic: no
+call leaves the machine; the deploy step's probes get canned answers).
 
 The one invariant that matters (roborev 4747): once the live stack binds the
 public hostname, an ordinary deploy that was not told about it must KEEP it —
@@ -34,14 +35,28 @@ esac
 '''
 NPX_STUB = r'''#!/bin/sh
 echo "npx $*" >>"$CALLS"
+case "$*" in *"deploy LouStack"*) printf '%s' '{"LouStack":{"CloudFrontUrl":"https://d.test/","CloudFrontDomain":"d.test","FunctionName":"lou-bot"}}' >"$LOU_OUTPUTS_FILE" ;; esac
 exit 0
+'''
+# curl/dig never leave the machine: the deploy step's post-deploy probes get
+# canned answers so the unit suite cannot hit production or hang on timeouts.
+CURL_STUB = r'''#!/bin/sh
+echo "curl $*" >>"$CALLS"
+case "$*" in
+  *"%{http_code} %{content_type}"*) printf '200 text/event-stream; charset=utf-8' ;;
+  *"%{http_code}"*) printf '200' ;;
+  *) printf '{"status":"ok","tables":{"expenditures":1}}' ;;
+esac
+'''
+DIG_STUB = r'''#!/bin/sh
+echo "dig $*" >>"$CALLS"; printf '203.0.113.5\n'
 '''
 
 
 @pytest.fixture
 def harness(tmp_path):
     bin_ = tmp_path / "bin"; bin_.mkdir()
-    for name, body in (("aws", AWS_STUB), ("npx", NPX_STUB)):
+    for name, body in (("aws", AWS_STUB), ("npx", NPX_STUB), ("curl", CURL_STUB), ("dig", DIG_STUB)):
         p = bin_ / name; p.write_text(body); p.chmod(0o755)
     data = tmp_path / "data"; data.mkdir()
     (data / "lou.duckdb").write_bytes(b"x"); (data / "rag_documents.duckdb").write_bytes(b"x")
@@ -50,7 +65,7 @@ def harness(tmp_path):
     def run(step="synth", env=None):
         calls.write_text("")
         e = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", CALLS=str(calls),
-                 LOU_DATA_DIR=str(data), **(env or {}))
+                 LOU_DATA_DIR=str(data), LOU_OUTPUTS_FILE=str(tmp_path / "outputs.json"), **(env or {}))
         e.pop("LOU_SKIP_PREVIEW", None) if not (env and "LOU_SKIP_PREVIEW" in env) else None
         e.pop("LOU_DOMAIN", None) if not (env and "LOU_DOMAIN" in env) else None
         proc = subprocess.run(["/bin/bash", str(SCRIPT), step], env=e, capture_output=True, text=True, timeout=60)
@@ -175,7 +190,11 @@ def test_deploy_proceeds_with_a_marker_for_head(harness, marker):
     marker.write_text(_head() + "\n")
     proc, calls = harness("deploy")
     assert "approved locally" in proc.stdout
-    assert any("deploy LouStack" in c or "diff" in c for c in _cdk_args(calls))
+    assert any("deploy LouStack" in c for c in _cdk_args(calls))
+    # The whole post-deploy verification ran against the stubs, not the network.
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "DEPLOY VERIFIED: https://d.test/" in proc.stdout
+    assert all(("d.test" in c or "127.0.0.1" in c) for c in calls.splitlines() if c.startswith("curl ")), calls
 
 
 def test_emergency_bypass_is_loud(harness, marker):

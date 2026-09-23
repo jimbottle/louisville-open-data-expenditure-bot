@@ -34,9 +34,14 @@ up() {
   [ -f .env ] || { echo "!! .env with the LLM keys is required (gitignored; see CLAUDE.md)"; exit 1; }
   [ -f data/lou.duckdb ] || { echo "!! data/lou.duckdb missing — run: python data_model.py --materialize data/lou.duckdb"; exit 1; }
   [ -f data/rag_documents.duckdb ] || { echo "!! data/rag_documents.duckdb missing — run: python rag.py ingest"; exit 1; }
-  echo "== building $IMG from Dockerfile.lambda (the production image)"
+  echo "== building $IMG from Dockerfile.lambda (the production image) for $(git rev-parse --short HEAD)"
+  # A stale image must never be what gets previewed: remove the tag first, and
+  # fail on the BUILD's status (the grep filter has its own, meaningless one).
+  docker rmi -f "$IMG" >/dev/null 2>&1 || true
   docker buildx build --platform linux/arm64 --provenance=false -f Dockerfile.lambda -t "$IMG" --load . \
     2>&1 | grep -E "self-check|ERROR|error:" || true
+  [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "!! image build failed"; exit 1; }
+  docker image inspect "$IMG" >/dev/null 2>&1 || { echo "!! image $IMG missing after build"; exit 1; }
   docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
   down_quiet
   echo "== DynamoDB Local (the state backend production uses)"

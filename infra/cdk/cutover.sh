@@ -17,7 +17,7 @@ export AWS_PAGER=""
 DOMAIN=${LOU_DOMAIN:-louisville.raylytics.io}
 P=(--profile lou --region us-east-1)
 cd "$(dirname "$0")"
-STATE=$PWD/.cutover-state.json      # gitignored (cdk.out sibling): certificate ARN
+STATE=${LOU_CUTOVER_STATE:-$PWD/.cutover-state.json}   # gitignored: certificate ARN (overridable for tests)
 getstate() { python3 -c "import json,sys; print(json.load(open('$STATE')).get('$1',''))" 2>/dev/null || true; }
 state() { python3 - "$STATE" "$1" "$2" <<'PY'
 import json, sys, os
@@ -29,19 +29,52 @@ PY
 }
 STEP=${1:-}
 
+# CAA the way ACM (RFC 8659) evaluates it: the first non-empty CAA RRset found
+# walking from the name up to the apex is authoritative; nothing else is
+# consulted. Only real CAA rows count (a DNS-only CNAME makes `dig +short`
+# print the target, which is not a CAA record). Amazon must be allowed by an
+# `issue` tag; `issue ";"` denies everyone. A failed lookup is reported, not
+# fatal — ACM will still refuse, and `cert` now recovers from a FAILED
+# certificate on the next run.
+caa_allows_amazon() {
+  local name=$1 rows=""
+  while [ "$(printf '%s' "$name" | tr -cd . | wc -c)" -ge 1 ]; do
+    rows=$(dig +noall +answer -t CAA "$name" 2>/dev/null | awk '$4=="CAA"{ $1=$2=$3=$4=""; sub(/^ +/,""); print }' || true)
+    [ -n "$rows" ] && break
+    name=${name#*.}
+  done
+  if [ -z "$rows" ]; then
+    echo "== CAA: no records from $1 up to the apex (or lookup failed) — any CA may issue"
+    return 0
+  fi
+  echo "== CAA (authoritative set at $name):"; printf '%s\n' "$rows" | sed 's/^/   /'
+  if printf '%s\n' "$rows" | grep -qE '^[0-9]+ issue "(amazon\.com|amazontrust\.com|awstrust\.com|amazonaws\.com)'; then
+    return 0
+  fi
+  echo "!! Amazon is not an allowed issuer for $1. Add in Cloudflare:  CAA  name @  flags 0  tag issue  value amazon.com  (DNS-only)"
+  return 1
+}
+
 case "$STEP" in
+  caa-check)
+    caa_allows_amazon "$DOMAIN"
+    ;;
   cert)
-    # CAA: if the zone restricts issuers, Amazon must be listed or ACM fails
-    # with CAA_ERROR (first attempt, 2026-09-23: Cloudflare's zone carried
-    # CAA for five other CAs). A FAILED certificate cannot be retried.
-    caa=$(dig +short CAA "$DOMAIN" ; dig +short CAA "${DOMAIN#*.}")
-    if [ -n "$caa" ] && ! printf '%s' "$caa" | grep -qiE 'amazon(trust|aws)?\.com|awstrust\.com'; then
-      echo "!! CAA records on the zone do not allow Amazon to issue:"; printf '%s\n' "$caa" | sed 's/^/   /'
-      echo "!! add in Cloudflare:  CAA  name @  flags 0  tag issue  value amazon.com   (DNS-only), then re-run"
-      exit 1
-    fi
     ARN=$(getstate certificate_arn)
+    if [ -n "$ARN" ]; then
+      # A stored certificate may be FAILED (unretryable: CAA_ERROR, 72 h
+      # validation timeout) or deleted; either way it is dead state — say why
+      # and fall through to a fresh request rather than printing its CNAME.
+      st=$(aws acm describe-certificate "${P[@]}" --certificate-arn "$ARN" \
+        --query 'Certificate.[Status,FailureReason]' --output text 2>/dev/null || echo "MISSING None")
+      case "$st" in
+        ISSUED*|PENDING_VALIDATION*) ;;
+        *) echo "== stored certificate $ARN is ${st%%	*} (${st#*	}); discarding it and requesting anew"
+           ARN=""; state certificate_arn "" ;;
+      esac
+    fi
     if [ -z "$ARN" ]; then
+      caa_allows_amazon "$DOMAIN" || exit 1
       ARN=$(aws acm request-certificate "${P[@]}" --domain-name "$DOMAIN" --validation-method DNS \
         --tags Key=Project,Value=lou --query CertificateArn --output text)
       state certificate_arn "$ARN"
@@ -111,5 +144,5 @@ ROLLBACK (DNS is the switch; nothing in AWS needs to change):
 The louisville-data / louisville-state / louisville-logs volumes are untouched until decommission.
 MSG
     ;;
-  *) echo "usage: $0 cert|wait|deploy|pretest|verify|rollback"; exit 2 ;;
+  *) echo "usage: $0 cert|caa-check|wait|deploy|pretest|verify|rollback"; exit 2 ;;
 esac

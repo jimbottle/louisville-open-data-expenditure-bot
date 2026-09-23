@@ -100,8 +100,11 @@ def main():
         entries = fetch_entries(args.host)
         print(f"Currently cached: {len(entries)} questions")
     except Exception as e:
+        # Non-zero: a deploy that warms as its last step must not report
+        # success over a cache it could not even read (wrong ADMIN_TOKEN,
+        # edge block) — that is the cold-but-looks-warm state again.
         print(f"Could not reach bot at {args.host}: {e}")
-        return
+        sys.exit(1)
 
     if args.check_only:
         for q in STARTER_QUESTIONS:
