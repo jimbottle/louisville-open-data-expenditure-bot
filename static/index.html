@@ -485,7 +485,9 @@
     font-size: 12px;
     color: var(--text-muted);
     line-height: 1.4;
-    flex-shrink: 0;
+    max-width: 900px;
+    margin: 8px auto 0;
+    text-align: center;
   }
 
   .starters .chips {
@@ -886,8 +888,10 @@
   <form onsubmit="handleSubmit(event)">
     <input type="text" id="question" placeholder="Enter your question about Louisville Metro Government expenditure here..." aria-label="Ask a question about Louisville Metro data" maxlength="500" autocomplete="off" />
     <button type="submit" id="submit-btn">Ask Lou</button>
-    <span class="disclaimer">Proof of concept; expect hiccups. AI-generated, so verify results before you rely on them.</span>
   </form>
+  <!-- Outside the form: as a flex item beside the input it took ~half the row
+       and squeezed the question box to ~200px on desktop. -->
+  <p class="disclaimer">Proof of concept; expect hiccups. AI-generated, so verify results before you rely on them.</p>
 </div>
 
 <script>
