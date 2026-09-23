@@ -2191,6 +2191,7 @@ from decimal import Decimal as _Decimal
 import numpy as _np
 
 from data_model import (
+    axis_basis,
     chart_partial_markers,
     column_kind,
     headline,
@@ -2276,7 +2277,9 @@ def test_year_of_label(label, year):
 
 def test_period_context_picks_the_salary_basis_only_for_salary_queries():
     assert _FY_PERIOD == {"basis": "expenditures", "partial_year": 2026,
-                          "through": "2026-03-16", "last_complete_year": 2025, "prefix": "FY"}
+                          "through": "2026-03-16", "last_complete_year": 2025, "prefix": "FY",
+                          "by_axis": {"fiscal": {"partial_year": 2026, "through": "2026-03-16"},
+                                      "calendar": {"partial_year": 2026, "through": "2026-03-16"}}}
     sal = period_context(_YC, "SELECT CalYear, SUM(Annual_Rate) FROM salary_data GROUP BY 1")
     assert sal["basis"] == "salary" and sal["partial_year"] == 2026 and sal["through"] is None
     # A join that reads expenditures stays on the fiscal-year basis.
@@ -2382,3 +2385,64 @@ def test_headline_on_the_real_annual_spend_table_is_fy2025(con):
     markers = chart_partial_markers(df["fiscal_year"].astype(str).tolist(), "fiscal_year", period)
     assert markers["partial_labels"] == ["2026"]
     assert markers["data_through"] == yc["expenditures"]["covered_through"]
+
+
+# ── fiscal vs calendar partial years (roborev 4786) ───────────────────────────
+# With a July fiscal start, a load through 2026-10-01 makes FY2027 the
+# in-progress fiscal year while calendar 2026 is the partial calendar year.
+# Today's load (2026-03-16) hides the difference: both are "2026".
+_YC_OCT = {
+    "values": {"first_year": 2008, "newest_year": 2027, "in_progress_year": 2027,
+               "last_complete_year": 2026},
+    "expenditures": {"is_partial": True, "covered_through": "2026-10-01",
+                     "last_complete_year": 2026, "in_progress_year": 2027},
+    "salary": {"is_partial": True, "last_complete_year": 2025},
+    "newest_cal_year": 2026,
+}
+_OCT = period_context(_YC_OCT, "SELECT * FROM expenditures")
+
+
+@pytest.mark.parametrize("labels,col,basis", [
+    (["2025", "2026"], "fiscal_year", "fiscal"),
+    (["FY 2025", "FY 2026"], "label", "fiscal"),
+    (["2025", "2026"], "CalYear", "calendar"),
+    (["2025", "2026"], "calendar_year", "calendar"),
+    (["CY2025", "CY2026"], "label", "calendar"),
+    (["2025", "2026"], "year", None),      # EXTRACT(year ...) or an alias: unknown
+])
+def test_axis_basis(labels, col, basis):
+    assert axis_basis(labels, col) == basis
+
+
+def test_partial_markers_follow_the_axis_kind_not_the_fiscal_year():
+    assert _OCT["by_axis"] == {"fiscal": {"partial_year": 2027, "through": "2026-10-01"},
+                               "calendar": {"partial_year": 2026, "through": "2026-10-01"}}
+    # A calendar axis marks 2026 (partial), not 2027 (a year it doesn't have).
+    assert chart_partial_markers(["2024", "2025", "2026"], "CalYear", _OCT) == {
+        "partial_labels": ["2026"], "data_through": "2026-10-01"}
+    # A fiscal axis marks FY2027; FY2026 is complete.
+    assert chart_partial_markers(["2025", "2026", "2027"], "fiscal_year", _OCT) == {
+        "partial_labels": ["2027"], "data_through": "2026-10-01"}
+    # A bare `year` could be either: no marker at all.
+    assert chart_partial_markers(["2025", "2026"], "year", _OCT) == {}
+
+
+def test_calendar_series_never_headlines_its_partial_year_as_complete():
+    df = pd.DataFrame({"CalYear": [2024, 2025, 2026], "total_spend": [5e8, 6e8, 4.5e8]})
+    h = headline(df, "SELECT ... FROM expenditures", _OCT)
+    assert h["label"] == "2025 Total Spend"
+    assert h["partial_label"] == "2026"
+    # The same frame on an ambiguous axis gets no headline.
+    amb = df.rename(columns={"CalYear": "year"})
+    assert headline(amb, "SELECT ... FROM expenditures", _OCT) is None
+
+
+def test_calendar_year_reaching_its_last_week_is_complete():
+    yc = dict(_YC_OCT, expenditures=dict(_YC_OCT["expenditures"], covered_through="2026-12-28"))
+    p = period_context(yc, "SELECT 1 FROM expenditures")
+    assert p["by_axis"]["calendar"] == {"partial_year": None, "through": None}
+
+
+def test_single_value_on_an_ambiguous_year_gets_no_headline():
+    df = pd.DataFrame({"year": [2026], "total_spend": [4.5e8]})
+    assert headline(df, "SELECT ...", _OCT) is None

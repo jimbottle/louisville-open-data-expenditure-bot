@@ -1622,12 +1622,19 @@ def result_table(df, max_rows: int, sql: str = None, label=None) -> dict:
 def period_context(yc: dict, sql: str = None) -> dict | None:
     """Which period of the queried dataset is partial, from year_context().
 
-    Returns {basis, partial_year, through, last_complete_year, prefix} or None
-    when nothing is known. Salary figures are judged by CalYear (a YTD
+    Returns {basis, partial_year, through, last_complete_year, prefix, by_axis}
+    or None when nothing is known. Salary figures are judged by CalYear (a YTD
     snapshot with no coverage date); everything else — expenditures and the
-    summary tables built from it, the common case — by the fiscal year the
-    payments run through. A query is read as salary only when it touches a
-    salary table and not `expenditures` itself."""
+    summary tables built from it, the common case — by the date the payments
+    run through. A query is read as salary only when it touches a salary table
+    and not `expenditures` itself.
+
+    `by_axis` answers the question per KIND of year, because a partial fiscal
+    year and a partial calendar year are different numbers for half of every
+    year: with a July fiscal start and payments loaded through 2026-10-01, the
+    in-progress year is FY2027 but the partial calendar year is 2026. A kind
+    the data cannot speak to is absent (see axis_partial). `partial_year` /
+    `through` are the basis's own kind, kept for callers that know the axis."""
     if not yc:
         return None
     tables = [t.lower() for t in _TABLE_REF.findall(_blank_literals(sql or ""))]
@@ -1635,18 +1642,67 @@ def period_context(yc: dict, sql: str = None) -> dict | None:
         sal = yc.get("salary")
         if not sal:
             return None
-        return {"basis": "salary", "partial_year": yc.get("newest_cal_year"),
+        cal = yc.get("newest_cal_year") if sal.get("is_partial", True) else None
+        return {"basis": "salary", "partial_year": cal,
                 "through": None, "last_complete_year": sal.get("last_complete_year"),
-                "prefix": ""}
+                "prefix": "",
+                "by_axis": {"calendar": {"partial_year": cal, "through": None}}}
     exp = yc.get("expenditures")
     if not exp:
         return None
     values = yc.get("values") or {}
+    fiscal = values.get("in_progress_year") if exp.get("is_partial") else None
+    covered = exp.get("covered_through")
+    by_axis = {"fiscal": {"partial_year": fiscal,
+                          "through": covered if exp.get("is_partial") else None}}
+    if covered:
+        # The calendar year the payments stop in is partial unless they reach
+        # its last week (the same grace derive_year_facts gives a fiscal year
+        # whose final day falls on a weekend).
+        year = int(str(covered)[:4])
+        partial = covered < f"{year}-12-24"
+        by_axis["calendar"] = {"partial_year": year if partial else None,
+                               "through": covered if partial else None}
     return {"basis": "expenditures",
-            "partial_year": values.get("in_progress_year") if exp.get("is_partial") else None,
-            "through": exp.get("covered_through") if exp.get("is_partial") else None,
+            "partial_year": fiscal,
+            "through": covered if exp.get("is_partial") else None,
             "last_complete_year": exp.get("last_complete_year"),
-            "prefix": "FY"}
+            "prefix": "FY",
+            "by_axis": by_axis}
+
+
+def axis_basis(labels, label_col) -> str | None:
+    """'fiscal' | 'calendar' | None: which kind of year a year axis counts.
+
+    Only an axis that SAYS which it is gets an answer — FY/CY-prefixed labels,
+    or a column named for it (fiscal_year, CalYear, calendar_year). A bare
+    `year` could be EXTRACT(year FROM payment_date) or an alias of
+    fiscal_year, so it stays unknown and nothing partial-sensitive is claimed
+    about it."""
+    strs = [str(l).strip().upper() for l in labels if l is not None]
+    if any(x.startswith("FY") for x in strs):
+        return "fiscal"
+    if any(x.startswith("CY") for x in strs):
+        return "calendar"
+    name = str(label_col or "").lower()
+    if "fiscal" in name or re.search(r"(^|_)fy($|_)", name):
+        return "fiscal"
+    if re.search(r"cal(endar)?_?year", name):
+        return "calendar"
+    return None
+
+
+def axis_partial(period, basis) -> tuple:
+    """(known, partial_year, through) for an axis of `basis` under `period`.
+    known=False when the axis kind is undetermined or the data has no answer
+    for that kind — callers then say nothing about partial periods rather than
+    risk presenting one as complete."""
+    if not period or basis is None:
+        return (False, None, None)
+    p = (period.get("by_axis") or {}).get(basis)
+    if p is None:
+        return (False, None, None)
+    return (True, p.get("partial_year"), p.get("through"))
 
 
 def year_of_label(v) -> int | None:
@@ -1687,14 +1743,15 @@ def chart_partial_markers(labels, label_col, period) -> dict:
     FY2026 held only 8.5 months of payments when the annual-spend starter
     plotted it as a genuine collapse in spending. The chart keeps the point
     (it is real data) and the UI marks it instead."""
-    if not period or period.get("partial_year") is None or not labels:
+    if not period or not labels or not _is_year_axis(labels, label_col):
         return {}
-    if not _is_year_axis(labels, label_col):
+    known, partial_year, through = axis_partial(period, axis_basis(labels, label_col))
+    if not known or partial_year is None:
         return {}
-    partial = [str(l) for l in labels if year_of_label(l) == period["partial_year"]]
+    partial = [str(l) for l in labels if year_of_label(l) == partial_year]
     if not partial:
         return {}
-    return {"partial_labels": partial, "data_through": period.get("through")}
+    return {"partial_labels": partial, "data_through": through}
 
 
 def _through_phrase(through) -> str:
@@ -1754,8 +1811,6 @@ def headline(df, sql: str = None, period: dict = None, label=None) -> dict | Non
     kinds = {c: column_kind(c, df[c], ordinals) for c in df.columns}
     measures = [c for c in df.columns if kinds[c] in ("money", "count", "number")
                 and c not in ordinals]
-    partial_year = (period or {}).get("partial_year")
-
     # (a) single value
     if len(df) == 1:
         if len(measures) != 1:
@@ -1773,6 +1828,9 @@ def headline(df, sql: str = None, period: dict = None, label=None) -> dict | Non
                 continue
             if kinds[c] == "date" and year_of_label(v) is not None:
                 y = year_of_label(v)
+                known, partial_year, through = axis_partial(period, axis_basis([v], c))
+                if period and not known:
+                    return None        # can't tell whether this year is complete
                 year_bits.append(_year_label(v, y, c))
                 is_partial = is_partial or y == partial_year
             elif kinds[c] == "text":
@@ -1780,7 +1838,7 @@ def headline(df, sql: str = None, period: dict = None, label=None) -> dict | Non
         head = (year_bits[0] + " " if year_bits else "") + label(str(col))
         context = other_bits[:2]
         if is_partial:
-            context.append(f"partial year ({_through_phrase(period.get('through'))})")
+            context.append(f"partial year ({_through_phrase(through)})")
         return {"value": float(value), "value_kind": kinds[col], "label": head,
                 "context": " · ".join(context) or None}
 
@@ -1800,6 +1858,12 @@ def headline(df, sql: str = None, period: dict = None, label=None) -> dict | Non
 
     # (b) a year series
     if _is_year_axis(labels, label_col):
+        # Fiscal and calendar partial years differ half the year; an axis
+        # whose kind is unknown gets no headline rather than a partial year
+        # headlined as complete. No year context at all: nothing is partial.
+        known, partial_year, through = axis_partial(period, axis_basis(labels, label_col))
+        if period and not known:
+            return None
         years = [year_of_label(l) for l in labels]
         if len(set(years)) != len(years):
             return None                    # year x something: not one series
@@ -1830,7 +1894,7 @@ def headline(df, sql: str = None, period: dict = None, label=None) -> dict | Non
         partial_rows = [s for s in series if s[0] == partial_year]
         if partial_rows:
             partial_name = _year_label(partial_rows[0][1], partial_year, label_col)
-            context.append(f"{partial_name} partial ({_through_phrase(period.get('through'))})")
+            context.append(f"{partial_name} partial ({_through_phrase(through)})")
         return {"value": last_v, "value_kind": kind, "label": f"{name} {measure}",
                 "context": " · ".join(context) or None,
                 "change": change, "partial_label": partial_name}
