@@ -116,3 +116,59 @@ def test_answer_attributes_each_call_and_labels_tiers(require_data, monkeypatch,
     assert "SQL free (OpenRouter) · draft free (OpenRouter) · refine paid (Cerebras)" in final
     draft_line = [e["content"] for e in ev if e["type"] == "debug" and "Draft interpretation" in e["content"]][0]
     assert draft_line.endswith("Tier: free (OpenRouter)")
+
+
+def test_tier_record_is_per_request_under_interleaving():
+    """Two requests interleaved on threadpool threads, each step running in a
+    COPY of its request's context (how Starlette iterates a sync SSE generator).
+    Each must read back its own served tier, not the other's — the review 4771
+    hazard with the old process-wide global."""
+    import contextvars
+    import threading
+
+    def request_context():
+        ctx = contextvars.copy_context()
+        ctx.run(aa.begin_request_tier_tracking)
+        return ctx
+
+    a, b = request_context(), request_context()
+    seen = {}
+    # A's call is served by OpenRouter; then B's by Cerebras (overwriting the
+    # global); then A reads its tier in a fresh copy on another thread.
+    t = threading.Thread(target=lambda: a.copy().run(aa._set_tier, "openrouter")); t.start(); t.join()
+    t = threading.Thread(target=lambda: b.copy().run(aa._set_tier, "paid")); t.start(); t.join()
+    t = threading.Thread(target=lambda: seen.update(a=a.copy().run(aa.get_last_tier_used))); t.start(); t.join()
+    t = threading.Thread(target=lambda: seen.update(b=b.copy().run(aa.get_last_tier_used))); t.start(); t.join()
+    assert seen == {"a": "openrouter", "b": "paid"}
+    assert aa._last_tier_used == "paid", "the global still reflects the latest call (display only)"
+
+
+def test_recorder_survives_the_real_streaming_path(require_data, monkeypatch, tmp_path):
+    """No patch on get_last_tier_used: the fakes write the tier the way the
+    real call path does (_set_tier), and the endpoint's recorder must carry it
+    across Starlette's per-step context copies into the usage event."""
+    import json as _json
+    from fastapi.testclient import TestClient
+    import app
+    from test_ask_endpoint import (REAL_SQL, _events, _fake_generate_sql,
+                                   _fake_interpret_stream, _fake_refine_stream)
+    monkeypatch.setattr(app, "CACHE_FILE", str(tmp_path / "c.json"))
+    monkeypatch.setattr(app, "STATS_FILE", str(tmp_path / "s.json"))
+    monkeypatch.setattr(app, "STATE", None)
+    monkeypatch.setattr(app, "persistent_stats", _json.loads(_json.dumps(app._default_stats)))
+    monkeypatch.setattr(app, "get_openrouter_limits", lambda: None)
+    app.ip_requests.clear(); app.response_cache.clear()
+
+    def marking(fake, tier):
+        def f(*a, **k):
+            aa._set_tier(tier); return fake(*a, **k)
+        return f
+    monkeypatch.setattr(app, "generate_sql", marking(_fake_generate_sql(REAL_SQL), "openrouter"))
+    monkeypatch.setattr(app, "interpret_results_stream", marking(_fake_interpret_stream("Draft."), "openrouter"))
+    monkeypatch.setattr(app, "refine_interpretation_stream", marking(_fake_refine_stream("Refined."), "paid"))
+    aa._set_tier("free")  # a stale global from "another request"
+    with TestClient(app.app) as c:
+        ev = _events(c.post("/api/ask", json={"question": "recorder path", "dev_mode": True}))
+    p = next(e for e in ev if e["type"] == "usage")["providers"]
+    assert p["openrouter"]["requests_today"] == 2 and p["cerebras"]["requests_today"] == 1
+    assert p["openrouter"]["rpd"] is None  # key endpoint unavailable -> unknown, not a wrong number

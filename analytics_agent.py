@@ -11,6 +11,7 @@ Can be used as:
 """
 
 import argparse
+import contextvars
 import json
 import logging
 import os
@@ -34,15 +35,37 @@ MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "3") or 3)
 RETRY_BASE_DELAY = float(os.environ.get("LLM_RETRY_BASE_DELAY", "16") or 16)  # seconds
 
 
-# Which tier served the last call. DISPLAY ONLY (dev mode / the debug event):
-# it is written by every concurrent request, so nothing may branch on it.
-# Anything that needs to know who served THIS call passes a provenance dict to
-# _call_with_retry.
+# Which tier served the last call. The module global is written by every
+# concurrent request, so it is DISPLAY ONLY outside a request. Inside one,
+# begin_request_tier_tracking() (called by the /api/ask endpoint) installs a
+# per-request recorder in a ContextVar: Starlette runs each step of the SSE
+# generator in a COPY of the request's context, and every copy shares the same
+# mutable dict, so writes from this request's calls are visible to this
+# request only — which is what per-provider usage accounting needs.
+# (_call_with_model_fallback's deprecation logic uses its own provenance dict.)
 _last_tier_used = "free"
+_request_tier: contextvars.ContextVar = contextvars.ContextVar("lou_request_tier", default=None)
+
+
+def begin_request_tier_tracking() -> None:
+    """Give the current request its own tier record (call from the async endpoint)."""
+    _request_tier.set({"last": None})
+
+
+def _set_tier(tier: str) -> None:
+    global _last_tier_used
+    _last_tier_used = tier
+    rec = _request_tier.get()
+    if rec is not None:
+        rec["last"] = tier
 
 
 def get_last_tier_used() -> str:
-    """Return which tier was used on the most recent LLM call."""
+    """Which tier served the most recent LLM call — of THIS request when a
+    request recorder is installed, else process-wide (display only)."""
+    rec = _request_tier.get()
+    if rec is not None:
+        return rec["last"] or get_primary_tier()
     return _last_tier_used
 
 
@@ -254,11 +277,10 @@ def _call_with_retry(fn, on_retry=None, fallback_fn=None, provenance=None,
     global _last_tier_used
 
     def _served(via_fallback):
-        global _last_tier_used
         if tiers is not None:
-            _last_tier_used = tiers[1] if via_fallback else tiers[0]
+            _set_tier(tiers[1] if via_fallback else tiers[0])
         else:
-            _last_tier_used = "paid" if via_fallback else get_primary_tier()
+            _set_tier("paid" if via_fallback else get_primary_tier())
         if provenance is not None:
             provenance["used_fallback"] = via_fallback
 
@@ -635,7 +657,7 @@ def _call_with_model_fallback(make_call, client, model, on_retry=None, fallback_
                     # retries and the same on_retry progress events as anywhere
                     # else. A single transient 429 used to kill the question.
                     result = _call_with_retry(fallback_fn, on_retry=on_retry)
-                    _last_tier_used = "paid"
+                    _set_tier("paid")
                     return result
                 except Exception as fallback_err:
                     log.warning("Fallback provider failed after model_not_found: %s", fallback_err)

@@ -114,6 +114,7 @@ from analytics_agent import (
     get_last_tier_used,
     get_fallback_model,
     get_primary_model,
+    begin_request_tier_tracking,
     get_openrouter_limits,
     get_primary_tier,
     provider_of,
@@ -1377,6 +1378,9 @@ def _sse_message(event_type: str, content: str) -> StreamingResponse:
 
 @app.post("/api/ask")
 async def ask(request: Request):
+    # Per-request tier record: usage is attributed to the provider that served
+    # THIS request's calls, never to whatever a concurrent request last used.
+    begin_request_tier_tracking()
     try:
         body = await request.json()
     except Exception:
