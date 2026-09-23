@@ -12,6 +12,8 @@
      server sends (see the security_headers middleware in app.py). -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'">
 <title>Lou · Louisville Metro open data</title>
+<meta name="description" content="Ask plain-English questions about a city's public spending data. Lou writes the SQL, runs it, and shows its work: the query, the table, and every step of the pipeline.">
+<meta name="theme-color" content="#141413">
 <!-- Theme before first paint: an explicit choice (saved by the header toggle)
      wins over the OS preference, and applying it here avoids a light flash on
      a dark-mode reload. Storage can throw (private mode, blocked site data). -->
@@ -2357,7 +2359,8 @@ async function streamAnswer(question, opts = {}) {
       // so it captures the final state).
       const reportBtn = el('button', 'link-btn msg-action', 'Report an issue');
       reportBtn.type = 'button';
-      reportBtn.setAttribute('aria-label', 'Email dev@raylytics.io about a problem with this answer');
+      // Starts with the visible text so voice control ("click Report an issue") matches it.
+      reportBtn.setAttribute('aria-label', 'Report an issue: email dev@raylytics.io about this answer');
       reportBtn.title = 'Something off? Email us this answer’s details';
       reportBtn.addEventListener('click', async () => {
         const r = buildReport(report, interpText);
