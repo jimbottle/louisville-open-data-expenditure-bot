@@ -186,7 +186,10 @@ def test_deploy_proceeds_with_a_marker_for_head(harness, marker):
     """With the marker matching HEAD (and a clean tree) the gate opens; the
     stubbed CDK CLI is reached. The later steps need real outputs and are
     not this test's concern."""
-    if subprocess.run(["git", "-C", str(REPO), "diff", "--quiet"]).returncode != 0:
+    # The same two checks the gate makes: staged changes refuse a deploy too
+    # (bd auto-stages .beads/issues.jsonl, which is how this was found).
+    if (subprocess.run(["git", "-C", str(REPO), "diff", "--quiet"]).returncode != 0
+            or subprocess.run(["git", "-C", str(REPO), "diff", "--cached", "--quiet"]).returncode != 0):
         pytest.skip("working tree is dirty; the gate would (correctly) refuse")
     marker.write_text(_head() + "\n")
     proc, calls = harness("deploy")
