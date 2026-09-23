@@ -80,7 +80,44 @@ https://louisville.raylytics.io
 
 So the `louisville-bot` container on the server **is** the production origin. Rebuilding/recreating that container is what ships a change to https://louisville.raylytics.io/.
 
-## Deployment
+## Publishing to production (AWS) — the process
+
+Production is LouStack (`infra/cdk`), deployed as the `lou-deploy` role. A
+deploy is cheap on AWS (an image push inside the ECR free tier, CloudFormation
+calls, ~$0) but it is the moment a mistake reaches users, so the process has a
+mandatory rehearsal that costs nothing and needs no AWS access:
+
+```bash
+# 1. Preview: THE production image (Dockerfile.lambda, arm64, baked artifact +
+#    corpus) running locally as Lambda runs it (uid 1000, read-only fs, /tmp only),
+#    against DynamoDB Local with the same state backend, using the LLM keys in .env.
+./infra/preview.sh            # build + up on http://127.0.0.1:8010 + verify (health, SSE probe, static, ONE real question) + opens the browser
+#    ... look at it. Ask it something. Check the thing you changed.
+./infra/preview.sh ok         # records "this exact commit was previewed" (.preview-ok, gitignored)
+./infra/preview.sh down
+
+# 2. Deploy: refuses unless .preview-ok names HEAD and the tree is clean.
+aws sts get-caller-identity --profile lou      # MFA
+./infra/cdk/deploy.sh                          # diff -> deploy -> warm invoke -> health/SSE through CloudFront
+                                               # -> hostname on CloudFront (once bound). LOU_WARM=1 re-warms
+                                               # the starter cache afterwards (spends LLM calls; do it after a
+                                               # prompt change, which orphans the cache).
+```
+
+Emergency bypass of the preview gate: `LOU_SKIP_PREVIEW=1` — loud in the
+output, for a hotfix only. Security-widening diffs additionally need
+`LOU_ALLOW_BROADENING=1` after reading `./infra/cdk/deploy.sh diff`.
+
+What the preview cannot show: Lambda Web Adapter's response-stream path
+(proven separately, `spike/sse-lwa`), CloudFront/OAC (`CLIENT_IP_SOURCE=peer`
+locally), SSM secrets (from `.env` instead). Everything else — the image, the
+data, the state backend, the code path — is what production runs.
+
+The scheduled data refresh (`lou-refresh`, monthly) deploys on its own without
+this gate: it changes data, not code, and clones `main` — which has already
+been through it.
+
+## Deployment (self-hosted Docker on the Air — pre-cutover / rollback path)
 
 This is a **self-hosted FastAPI app**, NOT a static site. Pushing to GitHub does **not** deploy it (no CI/CD); the running code is baked into the Docker image, so a change is live only after the image is rebuilt and the container recreated.
 

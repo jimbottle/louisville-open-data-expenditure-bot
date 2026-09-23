@@ -51,6 +51,7 @@ def harness(tmp_path):
         calls.write_text("")
         e = dict(os.environ, PATH=f"{bin_}:{os.environ['PATH']}", CALLS=str(calls),
                  LOU_DATA_DIR=str(data), **(env or {}))
+        e.pop("LOU_SKIP_PREVIEW", None) if not (env and "LOU_SKIP_PREVIEW" in env) else None
         e.pop("LOU_DOMAIN", None) if not (env and "LOU_DOMAIN" in env) else None
         proc = subprocess.run(["/bin/bash", str(SCRIPT), step], env=e, capture_output=True, text=True, timeout=60)
         return proc, calls.read_text()
@@ -128,3 +129,57 @@ def test_cli_warnings_on_stderr_do_not_pollute_the_hostname(harness):
     npx = _cdk_args(calls)[0]
     assert "-c lou:domain=louisville.raylytics.io -c" in npx, npx
     assert "NotOpenSSLWarning" not in npx
+
+
+# ── the publish process: no production deploy without a local preview ──────
+
+REPO = SCRIPT.parent.parent.parent
+
+
+def _head():
+    return subprocess.check_output(["git", "-C", str(REPO), "rev-parse", "HEAD"], text=True).strip()
+
+
+@pytest.fixture
+def marker():
+    path = REPO / ".preview-ok"
+    before = path.read_text() if path.exists() else None
+    yield path
+    if before is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(before)
+
+
+def test_deploy_refuses_without_a_preview_of_this_commit(harness, marker):
+    marker.unlink(missing_ok=True)
+    proc, calls = harness("deploy")
+    assert proc.returncode == 1
+    assert "has not been previewed" in proc.stdout and "infra/preview.sh" in proc.stdout
+    assert not _cdk_args(calls), "must not reach the CDK CLI"
+
+
+def test_deploy_refuses_a_marker_for_another_commit(harness, marker):
+    marker.write_text("0000000000000000000000000000000000000000\n")
+    proc, calls = harness("deploy")
+    assert proc.returncode == 1 and "has not been previewed" in proc.stdout
+    assert not _cdk_args(calls)
+
+
+def test_deploy_proceeds_with_a_marker_for_head(harness, marker):
+    """With the marker matching HEAD (and a clean tree) the gate opens; the
+    stubbed CDK CLI is reached. The later steps need real outputs and are
+    not this test's concern."""
+    if subprocess.run(["git", "-C", str(REPO), "diff", "--quiet"]).returncode != 0:
+        pytest.skip("working tree is dirty; the gate would (correctly) refuse")
+    marker.write_text(_head() + "\n")
+    proc, calls = harness("deploy")
+    assert "approved locally" in proc.stdout
+    assert any("deploy LouStack" in c or "diff" in c for c in _cdk_args(calls))
+
+
+def test_emergency_bypass_is_loud(harness, marker):
+    marker.unlink(missing_ok=True)
+    proc, calls = harness("deploy", env={"LOU_SKIP_PREVIEW": "1"})
+    assert "deploying WITHOUT a local preview" in proc.stdout
+    assert _cdk_args(calls)

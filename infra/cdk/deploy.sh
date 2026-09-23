@@ -98,6 +98,26 @@ case "$STEP" in
   synth) cdk synth --quiet && echo "template: cdk.out/LouStack.template.json" ;;
   diff)  cdk diff ;;
   deploy)
+    # The publish process (CLAUDE.md): production is deployed only after THIS
+    # commit was previewed locally in the production image and approved —
+    # `./infra/preview.sh` then `./infra/preview.sh ok` writes the marker.
+    # A different commit, a dirty tree, or no marker refuses. Bypass, for an
+    # emergency only, with LOU_SKIP_PREVIEW=1 (it is logged in the output).
+    if [ "${LOU_SKIP_PREVIEW:-}" = "1" ]; then
+      echo "!! LOU_SKIP_PREVIEW=1: deploying WITHOUT a local preview of $(git -C ../.. rev-parse --short HEAD)"
+    else
+      head=$(git -C ../.. rev-parse HEAD)
+      mark=$(cat ../../.preview-ok 2>/dev/null || true)
+      if [ "$mark" != "$head" ]; then
+        echo "!! commit $(git -C ../.. rev-parse --short HEAD) has not been previewed (marker: ${mark:0:7}${mark:+…}${mark:-none})."
+        echo "!! run: ./infra/preview.sh   (build + run the production image locally, verify, look at it)"
+        echo "!!      ./infra/preview.sh ok   then re-run this deploy.  Emergency bypass: LOU_SKIP_PREVIEW=1"
+        exit 1
+      fi
+      git -C ../.. diff --quiet && git -C ../.. diff --cached --quiet \
+        || { echo "!! working tree differs from the previewed commit; commit (and preview) first"; exit 1; }
+      echo "== previewed commit ${head:0:7} approved locally"
+    fi
     cdk diff
     # Security-relevant changes (IAM statements, resource policies, security
     # groups) fail closed: the CLI's interactive prompt cannot be answered from
@@ -139,6 +159,14 @@ case "$STEP" in
       [ "$hn" = "200" ] && echo "== HOSTNAME VERIFIED on CloudFront: https://$LOU_DOMAIN/" \
         || { echo "!! https://$LOU_DOMAIN/ on CloudFront answered $hn — alias or certificate problem"; exit 1; }
     fi
+    # A prompt change orphans every cached answer (CACHE_VERSION); re-warm so
+    # the first visitors after a deploy do not pay the LLM latency. Spends
+    # LLM calls (the only real cost of a deploy) — opt in.
+    if [ "${LOU_WARM:-}" = "1" ]; then
+      echo "== re-warming the starter answers through CloudFront"
+      ( cd ../.. && python3 warm_cache.py --host "${CF%/}" --delay 5 )
+    fi
+    rm -f ../../.preview-ok
     ;;
   *) echo "usage: $0 [synth|diff|deploy]"; exit 2 ;;
 esac

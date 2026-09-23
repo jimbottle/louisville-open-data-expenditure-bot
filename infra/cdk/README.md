@@ -54,6 +54,10 @@ human-created `/lou/lou-build` role (see `infra/iam/README.md` step 6b).
 
 ## Deploy
 
+Production deploys go through the publish process in CLAUDE.md: preview the
+exact image locally (`../preview.sh`), approve it (`../preview.sh ok`), then
+deploy. `deploy.sh` refuses a commit that has not been previewed.
+
 ```bash
 pip install -r infra/cdk/requirements.txt
 aws sts get-caller-identity --profile lou           # MFA prompt; must be assumed-role/lou-deploy
