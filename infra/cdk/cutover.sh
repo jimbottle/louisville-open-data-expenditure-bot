@@ -39,12 +39,14 @@ case "$STEP" in
     fi
     echo "certificate: $ARN"
     echo "== add this CNAME in Cloudflare (DNS-only / grey cloud), then run: $0 wait"
-    for i in 1 2 3 4 5 6; do
+    # ACM generates the validation record a little after the request (seen:
+    # ~30-60 s); "None" until then.
+    for i in $(seq 1 18); do
       rec=$(aws acm describe-certificate "${P[@]}" --certificate-arn "$ARN" \
         --query 'Certificate.DomainValidationOptions[0].ResourceRecord.[Name,Value]' --output text 2>/dev/null || true)
-      [ -n "$rec" ] && [ "$rec" != "None	None" ] && break
-      python3 -c "import time; time.sleep(5)"
+      case "$rec" in *None*|"") python3 -c "import time; time.sleep(10)";; *) break;; esac
     done
+    case "$rec" in *None*|"") echo "!! validation record not available yet; re-run: $0 cert"; exit 1;; esac
     printf '   name : %s\n   value: %s\n' $rec
     ;;
   wait)
