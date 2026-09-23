@@ -1595,7 +1595,9 @@ async function streamAnswer(question, opts = {}) {
           }
           u.innerHTML = `<b>This query:</b> ~${fmt(event.request_tokens)} tokens`
             + ` | <b>Free (OpenRouter):</b> ${free} · ${fmt(o.tokens_today)} tokens`
-            + ` | <b>Paid (Cerebras):</b> ${fmt(c.requests_today)} requests · ${fmt(c.tokens_today)} tokens today`;
+            // Cerebras: requests only. Its streamed refine reports no usage, and
+            // a chunk count (the whole answer in 1-2 chunks) is not a token figure.
+            + ` | <b>Paid (Cerebras):</b> ${fmt(c.requests_today)} requests today`;
           agentDiv.appendChild(u);
         }
 
