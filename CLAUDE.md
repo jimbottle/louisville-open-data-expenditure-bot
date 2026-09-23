@@ -63,22 +63,27 @@ bd close <id>         # Complete work
 > When asked to "test the bot on the site" or to "publish/deploy," the target is
 > **https://louisville.raylytics.io/**. Verify changes there, not at a LAN IP.
 >
-> **AWS parallel deployment (migration, not yet cut over):** LouStack serves the
-> same app at `https://daiothak3jrp6.cloudfront.net/` (CloudFront → OAC →
-> Lambda `lou-bot`, deployed 2026-09-22 via `infra/cdk/deploy.sh`). It is a
-> second, independent deployment with its own state table and secrets; it is
-> NOT production until the DNS cutover (bd `louisville-open-data-lla`).
+> **Since 2026-09-23 production IS the AWS deployment** (LouStack: CloudFront →
+> OAC → Lambda `lou-bot`, also reachable at `https://daiothak3jrp6.cloudfront.net/`).
+> The Air's `louisville-bot` container behind the cloudflared tunnel is the
+> rollback path only.
 
-### Production path (how the URL maps to the app)
+### Production path (how the URL maps to the app) — since the 2026-09-23 cutover
 
 ```
 https://louisville.raylytics.io
-   → Cloudflare (DNS proxy + TLS)
-   → cloudflared tunnel on the server "Air-Server.local" (~/.cloudflared/config.yml: hostname louisville.raylytics.io → http://localhost:8000)
-   → Docker container `louisville-bot` (published on :8000)
+   → Cloudflare DNS only (CNAME daiothak3jrp6.cloudfront.net, not proxied)
+   → CloudFront distribution E2SH87T8TUXJ7I (TLS via ACM, OAC-signed origin requests)
+   → Lambda Function URL (RESPONSE_STREAM) → Lambda `lou-bot` (container: app + DuckDB artifact)
+   → DynamoDB `lou-state` (cache, rate limit, counters); secrets from SSM /lou/prod/*
 ```
 
-So the `louisville-bot` container on the server **is** the production origin. Rebuilding/recreating that container is what ships a change to https://louisville.raylytics.io/.
+So **LouStack (`infra/cdk`) is production**; shipping a change is the publish
+process below (preview → `./infra/cdk/deploy.sh`). The Air container
+`louisville-bot` behind the cloudflared tunnel is the **rollback path**
+(`./infra/cdk/cutover.sh rollback`), kept stopped-but-present until
+decommission; the "Deployment (self-hosted Docker on the Air)" section
+describes it.
 
 ## Publishing to production (AWS) — the process
 

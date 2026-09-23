@@ -131,7 +131,8 @@ case "$STEP" in
     ct=$(curl -sS -o /dev/null --max-time 30 -w '%{http_code} %{content_type}' -X POST "https://$DOMAIN/api/ask" \
       -H 'Content-Type: application/json' -H "x-amz-content-sha256: $(printf '%s' "$body" | shasum -a 256 | cut -d' ' -f1)" --data "$body")
     echo "SSE probe: $ct"
-    curl -sSI --max-time 30 "https://$DOMAIN/" | grep -i '^via:\|^x-cache:\|^server:' || true
+    # GET, not HEAD: the app has no HEAD route for / (405), which CloudFront reports as an error.
+    curl -sS -o /dev/null -D - --max-time 30 "https://$DOMAIN/" | grep -i '^via:\|^x-cache:\|^server:' || true
     case "$ct" in "200 text/event-stream"*) echo "== CUTOVER VERIFIED through $DOMAIN";; *) echo "!! verification failed — roll back (see: $0 rollback)"; exit 1;; esac
     ;;
   rollback)

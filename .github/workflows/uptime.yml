@@ -30,22 +30,10 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Production (the Air, via the cloudflared tunnel) until the DNS
-          # cutover (louisville-open-data-lla); after it, the same hostname
-          # points at CloudFront and this row is the only one needed.
-          - name: production
-            base: https://louisville.raylytics.io
-          # The AWS deployment (LouStack, louisville-open-data-i0q), probed in
-          # parallel so the cutover starts from a known-green monitor.
-          - name: aws-lambda
-            base: https://daiothak3jrp6.cloudfront.net
-    name: probe (${{ matrix.name }})
+    # Production is LouStack behind CloudFront since the 2026-09-23 cutover
+    # (louisville-open-data-lla); the hostname is the only thing worth probing.
     env:
-      BASE: ${{ matrix.base }}
+      BASE: https://louisville.raylytics.io
     steps:
       - name: Keep-alive (reset the 60-day scheduled-workflow auto-disable)
         env:
