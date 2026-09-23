@@ -25,7 +25,12 @@ eval "printf '%s\n' \"\${CAA_$key:-}\""
 AWS_STUB = r'''#!/bin/sh
 echo "aws $*" >>"$CALLS"
 case "$*" in
-  *"describe-certificate"*"Certificate.[Status,FailureReason]"*) printf '%s\t%s' "${CERT_STATUS:-ISSUED}" "${CERT_REASON:-None}" ;;
+  *"describe-certificate"*"Certificate.[Status,FailureReason]"*)
+    case "${DESCRIBE_MODE:-ok}" in
+      notfound) echo "An error occurred (ResourceNotFoundException) when calling the DescribeCertificate operation: Could not find certificate" >&2; exit 254 ;;
+      expired)  echo "An error occurred (ExpiredToken) when calling the DescribeCertificate operation: The security token included in the request is expired" >&2; exit 254 ;;
+    esac
+    printf '%s\t%s' "${CERT_STATUS:-ISSUED}" "${CERT_REASON:-None}" ;;
   *"request-certificate"*) printf 'arn:aws:acm:us-east-1:012146975534:certificate/new-one' ;;
   *"ResourceRecord.[Name,Value]"*) printf '_abc.louisville.raylytics.io.\t_xyz.acm-validations.aws.' ;;
   *) echo "" ;;
@@ -98,7 +103,7 @@ def test_cert_discards_a_failed_stored_certificate_and_requests_anew(harness):
     proc, calls = harness("cert", env={"CERT_STATUS": "FAILED", "CERT_REASON": "CAA_ERROR",
                                        "CAA_raylytics_io": APEX_ALLOWS})
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert "is FAILED (CAA_ERROR); discarding it and requesting anew" in proc.stdout
+    assert "is FAILED (CAA_ERROR); requesting anew" in proc.stdout
     assert "request-certificate" in calls
     assert "certificate/new-one" in harness.state.read_text()
     assert "_abc.louisville.raylytics.io" in proc.stdout
@@ -116,3 +121,22 @@ def test_cert_refuses_to_request_against_a_denying_caa(harness):
     proc, calls = harness("cert", env={"CAA_raylytics_io": APEX_DENIES})
     assert proc.returncode == 1
     assert "request-certificate" not in calls
+
+
+def test_cert_lookup_error_keeps_the_stored_certificate(harness):
+    """An expired session / throttle must NOT discard a good certificate: the
+    run stops, the state file is untouched, nothing is requested."""
+    harness.state.write_text('{"certificate_arn": "arn:aws:acm:us-east-1:012146975534:certificate/good"}')
+    proc, calls = harness("cert", env={"DESCRIBE_MODE": "expired", "CAA_raylytics_io": APEX_ALLOWS})
+    assert proc.returncode == 1
+    assert "cannot read certificate" in proc.stderr
+    assert "request-certificate" not in calls
+    assert "certificate/good" in harness.state.read_text()
+
+
+def test_cert_not_found_is_treated_as_gone(harness):
+    harness.state.write_text('{"certificate_arn": "arn:aws:acm:us-east-1:012146975534:certificate/deleted"}')
+    proc, calls = harness("cert", env={"DESCRIBE_MODE": "notfound", "CAA_raylytics_io": APEX_ALLOWS})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "is MISSING (not found); requesting anew" in proc.stdout
+    assert "request-certificate" in calls and "certificate/new-one" in harness.state.read_text()

@@ -35,7 +35,8 @@ esac
 '''
 NPX_STUB = r'''#!/bin/sh
 echo "npx $*" >>"$CALLS"
-case "$*" in *"deploy LouStack"*) printf '%s' '{"LouStack":{"CloudFrontUrl":"https://d.test/","CloudFrontDomain":"d.test","FunctionName":"lou-bot"}}' >"$LOU_OUTPUTS_FILE" ;; esac
+# deploy.sh runs `... deploy --require-approval never --outputs-file <OUT>` (no stack name).
+case "$*" in *" deploy --require-approval"*) printf '%s' '{"LouStack":{"CloudFrontUrl":"https://d.test/","CloudFrontDomain":"d.test","FunctionName":"lou-bot"}}' >"$LOU_OUTPUTS_FILE" ;; esac
 exit 0
 '''
 # curl/dig never leave the machine: the deploy step's post-deploy probes get
@@ -190,7 +191,7 @@ def test_deploy_proceeds_with_a_marker_for_head(harness, marker):
     marker.write_text(_head() + "\n")
     proc, calls = harness("deploy")
     assert "approved locally" in proc.stdout
-    assert any("deploy LouStack" in c for c in _cdk_args(calls))
+    assert any("aws-cdk@2 deploy --require-approval never --outputs-file" in c for c in _cdk_args(calls)), calls
     # The whole post-deploy verification ran against the stubs, not the network.
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "DEPLOY VERIFIED: https://d.test/" in proc.stdout
@@ -201,4 +202,5 @@ def test_emergency_bypass_is_loud(harness, marker):
     marker.unlink(missing_ok=True)
     proc, calls = harness("deploy", env={"LOU_SKIP_PREVIEW": "1"})
     assert "deploying WITHOUT a local preview" in proc.stdout
-    assert _cdk_args(calls)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "DEPLOY VERIFIED" in proc.stdout

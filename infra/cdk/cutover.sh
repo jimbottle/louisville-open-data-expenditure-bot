@@ -65,19 +65,25 @@ case "$STEP" in
       # A stored certificate may be FAILED (unretryable: CAA_ERROR, 72 h
       # validation timeout) or deleted; either way it is dead state — say why
       # and fall through to a fresh request rather than printing its CNAME.
-      st=$(aws acm describe-certificate "${P[@]}" --certificate-arn "$ARN" \
-        --query 'Certificate.[Status,FailureReason]' --output text 2>/dev/null || echo "MISSING None")
+      # Only "not found" means gone; any other error (expired session,
+      # throttle, permission) stops here — a good certificate must never be
+      # discarded because a lookup failed.
+      err=$(mktemp)
+      if st=$(aws acm describe-certificate "${P[@]}" --certificate-arn "$ARN" \
+            --query 'Certificate.[Status,FailureReason]' --output text 2>"$err"); then :
+      elif grep -q 'ResourceNotFoundException' "$err"; then st=$(printf 'MISSING\tnot found')
+      else echo "!! cannot read certificate $ARN: $(cat "$err")" >&2; rm -f "$err"; exit 1; fi
+      rm -f "$err"
       case "$st" in
         ISSUED*|PENDING_VALIDATION*) ;;
-        *) echo "== stored certificate $ARN is ${st%%	*} (${st#*	}); discarding it and requesting anew"
-           ARN=""; state certificate_arn "" ;;
+        *) echo "== stored certificate $ARN is ${st%%	*} (${st#*	}); requesting anew"; ARN="" ;;
       esac
     fi
     if [ -z "$ARN" ]; then
       caa_allows_amazon "$DOMAIN" || exit 1
       ARN=$(aws acm request-certificate "${P[@]}" --domain-name "$DOMAIN" --validation-method DNS \
         --tags Key=Project,Value=lou --query CertificateArn --output text)
-      state certificate_arn "$ARN"
+      state certificate_arn "$ARN"     # the old ARN is replaced only now, after the new request succeeded
     fi
     echo "certificate: $ARN"
     echo "== add this CNAME in Cloudflare (DNS-only / grey cloud), then run: $0 wait"

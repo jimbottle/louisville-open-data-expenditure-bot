@@ -38,9 +38,12 @@ up() {
   # A stale image must never be what gets previewed: remove the tag first, and
   # fail on the BUILD's status (the grep filter has its own, meaningless one).
   docker rmi -f "$IMG" >/dev/null 2>&1 || true
+  # No `|| true` after the pipeline: it would run `true` and reset PIPESTATUS
+  # before it is read. set -e ignores a non-final pipeline element, so grep's
+  # no-match status is harmless and rc is the build's own.
   docker buildx build --platform linux/arm64 --provenance=false -f Dockerfile.lambda -t "$IMG" --load . \
-    2>&1 | grep -E "self-check|ERROR|error:" || true
-  [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "!! image build failed"; exit 1; }
+    2>&1 | grep -E "self-check|ERROR|error:"; rc=${PIPESTATUS[0]}
+  [ "$rc" -eq 0 ] || { echo "!! image build failed (exit $rc)"; exit 1; }
   docker image inspect "$IMG" >/dev/null 2>&1 || { echo "!! image $IMG missing after build"; exit 1; }
   docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
   down_quiet
