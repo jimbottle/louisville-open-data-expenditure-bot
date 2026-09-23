@@ -31,6 +31,15 @@ STEP=${1:-}
 
 case "$STEP" in
   cert)
+    # CAA: if the zone restricts issuers, Amazon must be listed or ACM fails
+    # with CAA_ERROR (first attempt, 2026-09-23: Cloudflare's zone carried
+    # CAA for five other CAs). A FAILED certificate cannot be retried.
+    caa=$(dig +short CAA "$DOMAIN" ; dig +short CAA "${DOMAIN#*.}")
+    if [ -n "$caa" ] && ! printf '%s' "$caa" | grep -qiE 'amazon(trust|aws)?\.com|awstrust\.com'; then
+      echo "!! CAA records on the zone do not allow Amazon to issue:"; printf '%s\n' "$caa" | sed 's/^/   /'
+      echo "!! add in Cloudflare:  CAA  name @  flags 0  tag issue  value amazon.com   (DNS-only), then re-run"
+      exit 1
+    fi
     ARN=$(getstate certificate_arn)
     if [ -z "$ARN" ]; then
       ARN=$(aws acm request-certificate "${P[@]}" --domain-name "$DOMAIN" --validation-method DNS \
