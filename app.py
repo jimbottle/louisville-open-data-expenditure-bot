@@ -114,7 +114,10 @@ from analytics_agent import (
     get_last_tier_used,
     get_fallback_model,
     get_primary_model,
+    get_openrouter_limits,
     get_primary_tier,
+    provider_of,
+    tier_label,
     get_model_fallback_event,
     interpret_results_stream,
     make_client,
@@ -468,10 +471,15 @@ def get_error_summary() -> dict:
 # Tracks usage from API response headers (Cerebras provides x-ratelimit-* headers)
 # Falls back to local counting if headers aren't available.
 
-def track_usage(prompt_tokens: int = 0, completion_tokens: int = 0):
-    """Record an LLM call's token usage."""
+def track_usage(prompt_tokens: int = 0, completion_tokens: int = 0, tier: str | None = None):
+    """Record one LLM call's token usage, attributed to the provider that
+    served it (`tier` from get_last_tier_used(), captured right after the
+    call). The totals stay for the health/stats contract; the per-provider
+    split is what the usage line shows, because OpenRouter's free allowance
+    and Cerebras's paid account are different budgets."""
+    provider = provider_of(tier) if tier else None
     if STATE:
-        STATE.stats_usage(prompt_tokens, completion_tokens)
+        STATE.stats_usage(prompt_tokens, completion_tokens, provider=provider)
         return
     with stats_lock:
         usage = persistent_stats["usage"]
@@ -481,11 +489,16 @@ def track_usage(prompt_tokens: int = 0, completion_tokens: int = 0):
             usage["tokens_today"] = 0
             usage["prompt_tokens_today"] = 0
             usage["completion_tokens_today"] = 0
+            usage["by_provider"] = {}
             usage["date"] = date.today().isoformat()
         usage["requests_today"] += 1
         usage["prompt_tokens_today"] += prompt_tokens
         usage["completion_tokens_today"] += completion_tokens
         usage["tokens_today"] += prompt_tokens + completion_tokens
+        if provider:
+            bp = usage.setdefault("by_provider", {}).setdefault(provider, {"requests": 0, "tokens": 0})
+            bp["requests"] += 1
+            bp["tokens"] += prompt_tokens + completion_tokens
         _save_stats()
 
 
@@ -534,7 +547,30 @@ def get_usage_summary() -> dict:
     tpd_used = (tpd - tpd_remaining) if tpd_remaining is not None else usage.get("tokens_today", 0)
     rpd_pct = round(rpd_used / rpd * 100, 1) if rpd else 0
 
+    by = usage.get("by_provider") or {}
+    orl = get_openrouter_limits()
+    providers = {
+        "openrouter": {
+            "requests_today": by.get("openrouter", {}).get("requests", 0),
+            "tokens_today": by.get("openrouter", {}).get("tokens", 0),
+            # From OpenRouter's key endpoint: 50/day until $10 of credits have
+            # been bought, then 1,000/day; 20/min on :free models. None = unknown.
+            "rpd": orl["rpd"] if orl else None,
+            "rpm": orl["rpm"] if orl else None,
+            "is_free_tier": orl["is_free_tier"] if orl else None,
+        },
+        "cerebras": {
+            "requests_today": by.get("cerebras", {}).get("requests", 0),
+            "tokens_today": by.get("cerebras", {}).get("tokens", 0),
+            # Cerebras reports its own limits in response headers (the legacy
+            # fields below); these are the PAID account's.
+            "rpd": limits.get("rpd"),
+            "tpd": limits.get("tpd"),
+        },
+    }
+
     return {
+        "providers": providers,
         "requests_today": rpd_used,
         "requests_per_minute": rpm_used,
         "tokens_today": tpd_used,
@@ -1414,9 +1450,11 @@ async def ask(request: Request):
         yield send("log", {"content": "Generating SQL query..."})
         yield send("status", {"content": "Writing the query…"})
         t_start = time.time()
+        sql_tier = get_primary_tier()
         try:
             sql, sql_usage, raw_resp = generate_sql(client, MODEL, sql_system, question, on_retry=on_retry, history=history, context=vocab, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
-            track_usage(sql_usage.get("prompt_tokens", 0), sql_usage.get("completion_tokens", 0))
+            sql_tier = get_last_tier_used()
+            track_usage(sql_usage.get("prompt_tokens", 0), sql_usage.get("completion_tokens", 0), tier=sql_tier)
             update_limits_from_headers(raw_resp)
             log.info("SQL generated in %.1fs (%d tokens)", time.time() - t_start, sql_usage.get("total_tokens", 0))
 
@@ -1462,7 +1500,7 @@ async def ask(request: Request):
         for evt in flush_retry_logs():
             yield evt
         yield send("sql", {"content": sql})
-        yield send("debug", {"content": f"SQL generated in {t_sql:.1f}s | {sql_usage.get('total_tokens', 0)} tokens | Model: {get_active_model(MODEL)} | Tier: {get_last_tier_used()}"})
+        yield send("debug", {"content": f"SQL generated in {t_sql:.1f}s | {sql_usage.get('total_tokens', 0)} tokens | Model: {get_active_model(MODEL)} | Tier: {tier_label(sql_tier)}"})
 
         # Execute SQL
         yield send("log", {"content": "Executing query against database..."})
@@ -1477,7 +1515,7 @@ async def ask(request: Request):
             try:
                 fix_prompt = f"The following SQL failed with error: {e}\n\nOriginal SQL:\n{sql}\n\nFix the SQL query. Return ONLY the corrected SQL."
                 sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry, history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
-                track_usage(retry_usage.get("prompt_tokens", 0), retry_usage.get("completion_tokens", 0))
+                track_usage(retry_usage.get("prompt_tokens", 0), retry_usage.get("completion_tokens", 0), tier=get_last_tier_used())
                 update_limits_from_headers(raw_resp)
                 log.info("SQL retry generated")
                 yield send("log", {"content": "Retrying with corrected SQL..."})
@@ -1538,7 +1576,7 @@ async def ask(request: Request):
                 repair_prompt = (f"Question: {question}\n\nThis query ran but returned nothing:\n{sql}\n\n"
                                  f"{repair_hint}")
                 new_sql, repair_usage, raw_resp = generate_sql(client, MODEL, sql_system, repair_prompt, on_retry=on_retry, history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
-                track_usage(repair_usage.get("prompt_tokens", 0), repair_usage.get("completion_tokens", 0))
+                track_usage(repair_usage.get("prompt_tokens", 0), repair_usage.get("completion_tokens", 0), tier=get_last_tier_used())
                 update_limits_from_headers(raw_resp)
                 sql_usage = {k: sql_usage.get(k, 0) + repair_usage.get(k, 0)
                              for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
@@ -1747,13 +1785,15 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
                 yield send("debug", {"content": f"Interpretation error detail: {e}"})
                 yield send("interpretation", {"content": "\n\n(I ran the query but had trouble summarizing the results. The data above is still accurate.)"})
         t_draft = time.time() - t_start
+        # Captured now: the refine below overwrites the process-wide tier.
+        draft_tier, draft_chunks, refine_tier = get_last_tier_used(), interp_tokens, None
 
         if draft_error is not None:
             # The user already saw the error (or apology). Never refine a
             # partial draft into a complete-looking answer on top of it — and
             # never re-hit an already-exhausted API 2s later. Tokens streamed
             # before the failure were still consumed — account for them.
-            track_usage(0, interp_tokens)
+            track_usage(0, interp_tokens, tier=draft_tier)
             yield send("done", {})
             return
 
@@ -1769,7 +1809,7 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
             # consistency, and accuracy against the results table. A failure
             # here must NEVER lose the answer — the draft is the fallback.
             yield send("log", {"content": "Refining the answer..."})
-            yield send("debug", {"content": f"Draft interpretation in {t_draft:.1f}s | ~{interp_tokens} chunks"})
+            yield send("debug", {"content": f"Draft interpretation in {t_draft:.1f}s | ~{interp_tokens} chunks | Tier: {tier_label(draft_tier)}"})
             _pace()
             refine_counter = {"n": 0}
             # Provider order is flipped for this one call when a paid client
@@ -1793,6 +1833,7 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
                 sink=served_text,
             )
             interp_tokens += refine_counter["n"]
+            refine_tier = get_last_tier_used()
 
         # Citations go out after the answer, as a footer under a finished
         # response — and only for documents the answer actually cited.
@@ -1802,19 +1843,27 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
             # Visible to every reader, after the answer: the self-correction is
             # part of the answer's provenance, not a dev-only log line.
             yield send("info", {"content": repair_note})
-        track_usage(0, interp_tokens)
+        # Two calls, two providers (the refine runs Cerebras-first by design,
+        # REFINE_PREFER_PAID): count each against the provider that served it.
+        track_usage(0, draft_chunks, tier=draft_tier)
+        if refine_tier is not None:
+            track_usage(0, interp_tokens - draft_chunks, tier=refine_tier)
         log.info("Request complete — %d chunks streamed", interp_tokens)
 
         for evt in flush_retry_logs():
             yield evt
         t_interp = time.time() - t_start
         u = get_usage_summary()
-        yield send("debug", {"content": f"Interpretation streamed in {t_interp:.1f}s | ~{interp_tokens} chunks | Tier: {get_last_tier_used()}"})
+        tiers = f"SQL {tier_label(sql_tier)} · draft {tier_label(draft_tier)}"
+        if refine_tier is not None:
+            tiers += f" · refine {tier_label(refine_tier)}"
+        yield send("debug", {"content": f"Interpretation streamed in {t_interp:.1f}s | ~{interp_tokens} chunks | Tiers: {tiers}"})
         # Per-request token count (SQL gen tokens + estimated interpretation tokens)
         request_tokens = sql_usage.get("total_tokens", 0) + interp_tokens
         tpd = u["limits"]["tpd"] or 1000000
         tpd_remaining = tpd - u["tokens_today"]
         yield send("usage", {
+            "providers": u["providers"],
             "requests_today": u["requests_today"],
             "rpd_remaining": u["rpd_remaining"],
             "rpd_pct": u["rpd_pct"],

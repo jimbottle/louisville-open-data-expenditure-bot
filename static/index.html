@@ -1575,7 +1575,32 @@ async function streamAnswer(question, opts = {}) {
           agentDiv.appendChild(dbg);
         }
 
+        else if (event.type === 'usage' && event.providers) {
+          // One line per budget: OpenRouter's free allowance and Cerebras's
+          // paid account are different limits and must not be summed.
+          const u = document.createElement('div');
+          u.className = 'debug-block';
+          u.style.borderColor = '#93c5fd';
+          u.style.background = '#eff6ff';
+          u.style.color = '#1e40af';
+          const o = event.providers.openrouter || {}, c = event.providers.cerebras || {};
+          const fmt = (n) => (n || 0).toLocaleString();
+          let free;
+          if (o.rpd) {
+            const pct = Math.min(100, Math.round((o.requests_today || 0) / o.rpd * 100));
+            const filled = Math.min(20, Math.round(pct / 5));
+            free = `${fmt(o.requests_today)}/${fmt(o.rpd)} requests today (${pct}%) [${'█'.repeat(filled)}${'░'.repeat(20 - filled)}] · limit ${o.rpm}/min`;
+          } else {
+            free = `${fmt(o.requests_today)} requests today (daily limit unknown)`;
+          }
+          u.innerHTML = `<b>This query:</b> ~${fmt(event.request_tokens)} tokens`
+            + ` | <b>Free (OpenRouter):</b> ${free} · ${fmt(o.tokens_today)} tokens`
+            + ` | <b>Paid (Cerebras):</b> ${fmt(c.requests_today)} requests · ${fmt(c.tokens_today)} tokens today`;
+          agentDiv.appendChild(u);
+        }
+
         else if (event.type === 'usage') {
+          // Legacy shape: cached answers from before the per-provider split.
           const u = document.createElement('div');
           u.className = 'debug-block';
           u.style.borderColor = '#93c5fd';

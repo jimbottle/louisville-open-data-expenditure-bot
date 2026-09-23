@@ -224,7 +224,7 @@ def test_usage_counters_are_atomic_per_day_and_survive_recycle(dynamo):
     b.stats_usage(1, 1, today="2026-09-23")
     u = _state(dynamo).stats_usage_get(today="2026-09-22")
     assert u == {"requests_today": 2, "tokens_today": 175, "prompt_tokens_today": 150,
-                 "completion_tokens_today": 25, "date": "2026-09-22"}
+                 "completion_tokens_today": 25, "date": "2026-09-22", "by_provider": {}}
     assert _state(dynamo).stats_usage_get(today="2026-09-24")["requests_today"] == 0
 
 

@@ -1196,6 +1196,52 @@ def _primary_api_key() -> str:
     return _openrouter_key() or _cerebras_key()
 
 
+def provider_of(tier: str) -> str:
+    """The provider behind a tier label: 'openrouter' or 'cerebras'."""
+    return "openrouter" if tier == "openrouter" else "cerebras"
+
+
+def tier_label(tier: str) -> str:
+    """Human label for the debug lines: which provider AND whether it costs money."""
+    return {"openrouter": "free (OpenRouter)", "paid": "paid (Cerebras)",
+            "free": "free (Cerebras)"}.get(tier, tier)
+
+
+# OpenRouter caps `:free` models at 20 requests/minute and at 50 requests/day,
+# or 1,000/day once the account has purchased >= $10 of credits. The key
+# endpoint says which applies (`is_free_tier` is true until credits are bought).
+# Cached: it is a per-account fact that changes only when someone pays.
+OPENROUTER_FREE_RPM = 20
+_openrouter_limits_cache: dict = {"at": 0.0, "value": None}
+
+
+def get_openrouter_limits(ttl: float = 6 * 3600, fail_ttl: float = 600) -> dict | None:
+    """{'rpd', 'rpm', 'is_free_tier', 'credits_used'} for the configured
+    OpenRouter key, or None without a key or when the endpoint is unreachable.
+    Never logs the key."""
+    key = _openrouter_key()
+    if not key:
+        return None
+    now = time.time()
+    cached = _openrouter_limits_cache
+    if cached["at"] and now - cached["at"] < (ttl if cached["value"] else fail_ttl):
+        return cached["value"]
+    value = None
+    try:
+        import httpx
+        base = os.environ.get("OPENROUTER_BASE_URL", DEFAULT_OPENROUTER_BASE_URL).rstrip("/")
+        r = httpx.get(f"{base}/key", headers={"Authorization": f"Bearer {key}"}, timeout=3.0)
+        r.raise_for_status()
+        data = r.json().get("data", {})
+        free = bool(data.get("is_free_tier", True))
+        value = {"rpd": 50 if free else 1000, "rpm": OPENROUTER_FREE_RPM,
+                 "is_free_tier": free, "credits_used": data.get("usage")}
+    except Exception as e:  # noqa: BLE001 — a display nicety, never an error
+        log.info("OpenRouter key endpoint unavailable (%s); daily limit shown as unknown", type(e).__name__)
+    cached["at"], cached["value"] = now, value
+    return value
+
+
 def get_primary_tier() -> str:
     """Which key the main client uses: 'openrouter' (free), 'free' or 'paid' (Cerebras).
 

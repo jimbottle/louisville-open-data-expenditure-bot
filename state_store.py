@@ -354,20 +354,26 @@ class DynamoState:
 
     @_best_effort(None)
     def stats_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0,
-                    today: str | None = None) -> None:
+                    today: str | None = None, provider: str | None = None) -> None:
         today = today or date.today().isoformat()
+        # Per-provider counters beside the totals: the display must not mix
+        # OpenRouter's free allowance with Cerebras's paid account.
+        extra, names = "", {"#date": "date", "#ttl": "ttl"}
+        if provider:
+            extra = ", #rq :one, #tk :t"
+            names.update({"#rq": f"req_{provider}", "#tk": f"tok_{provider}"})
         self._c.update_item(
             TableName=self.table, Key={"pk": _s(f"stats#usage#{today}")},
             UpdateExpression=("ADD requests_today :one, prompt_tokens_today :p, "
-                              "completion_tokens_today :c, tokens_today :t "
+                              "completion_tokens_today :c, tokens_today :t" + extra + " "
                               "SET #date = :d, #ttl = :ttl"),
-            ExpressionAttributeNames={"#date": "date", "#ttl": "ttl"},
+            ExpressionAttributeNames=names,
             ExpressionAttributeValues={":one": _n(1), ":p": _n(prompt_tokens), ":c": _n(completion_tokens),
                                        ":t": _n(prompt_tokens + completion_tokens), ":d": _s(today),
                                        ":ttl": _n(time.time() + 3 * 86400)},
         )
 
-    @_best_effort(lambda: {"requests_today": 0, "tokens_today": 0, "prompt_tokens_today": 0, "completion_tokens_today": 0, "date": date.today().isoformat()})
+    @_best_effort(lambda: {"requests_today": 0, "tokens_today": 0, "prompt_tokens_today": 0, "completion_tokens_today": 0, "date": date.today().isoformat(), "by_provider": {}})
     def stats_usage_get(self, today: str | None = None) -> dict:
         today = today or date.today().isoformat()
         item = self._c.get_item(TableName=self.table, Key={"pk": _s(f"stats#usage#{today}")}).get("Item", {})
@@ -377,6 +383,10 @@ class DynamoState:
             "prompt_tokens_today": _num(item, "prompt_tokens_today"),
             "completion_tokens_today": _num(item, "completion_tokens_today"),
             "date": today,
+            "by_provider": {
+                k[len("req_"):]: {"requests": _num(item, k), "tokens": _num(item, "tok_" + k[len("req_"):])}
+                for k in item if k.startswith("req_")
+            },
         }
 
     @_best_effort(None)
