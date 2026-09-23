@@ -31,3 +31,13 @@ def code(p):
 print("identical:", code(sys.argv[1]) == code(sys.argv[2]))
 PY
 ```
+
+## fonts/ — VT323 and JetBrains Mono (SIL Open Font License 1.1)
+
+The same two faces raylytics.io serves, copied byte-for-byte from that site's
+`fonts/` directory so Lou matches it and the CSP stays `'self'`-only:
+
+- `vt323.woff2` — VT323 (Peter Hull), weight 400. sha256 `043a60145af2ddbcd0a6452625cb0bfc4e18b222c76dcd1d4a0106715472faba`
+- `jetbrains-mono.woff2` — JetBrains Mono (JetBrains), variable `wght` 100–800, Latin subset. sha256 `18be452724bfdc236c074ca94a249a7f41a86752c7d04ab258ce9ed5651f6a7e`
+
+Neither face has arrows or triangles (→ ▲ ▼); the page draws those as inline SVG.

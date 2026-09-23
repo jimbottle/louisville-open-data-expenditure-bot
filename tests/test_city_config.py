@@ -134,8 +134,12 @@ def test_frontend_city_literals_live_only_in_the_fallback_defaults():
     # actually appear on a line carrying a city literal — "<h1>Lou<" did not
     # (the h1 is just "Lou"), so it read as covering the header while covering
     # nothing.
-    overridden = ("<title>Lou", 'class="subtitle"', "<h2>Ask me about",
-                  "<p>Natural language", 'id="question"')
+    overridden = ("<title>Lou", 'class="subtitle"', 'id="hero-title"',
+                  'id="hero-blurb"', 'id="question"',
+                  # The project's own repository (footer GitHub / How it's
+                  # built links): the repo's name, not a claim about the city
+                  # being served, and identical on every deployment.
+                  "github.com/jimbottle/louisville-open-data-expenditure-bot")
     unexpected = [ln for ln in stray if not any(tok in ln for tok in overridden)]
     assert not unexpected, f"city literals outside branding control: {unexpected}"
 

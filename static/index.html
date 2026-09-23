@@ -3,32 +3,104 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<!-- Content Security Policy: no external origins. Chart.js is self-hosted (see
-     below), the API is same-origin, and inline script/style are the app's own,
-     so a compromised third-party CDN can no longer inject or exfiltrate. -->
+<!-- Content Security Policy: no external origins. Chart.js and the fonts are
+     self-hosted (static/vendor), the API is same-origin, and inline
+     script/style are the app's own, so a compromised third-party CDN can no
+     longer inject or exfiltrate. -->
 <!-- frame-ancestors is intentionally NOT here: it (like sandbox / report-uri)
      is ignored in a <meta> CSP and only works as an HTTP header, which the
      server sends (see the security_headers middleware in app.py). -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'self'; form-action 'self'">
 <title>Lou · Louisville Metro open data</title>
+<!-- Theme before first paint: an explicit choice (saved by the header toggle)
+     wins over the OS preference, and applying it here avoids a light flash on
+     a dark-mode reload. Storage can throw (private mode, blocked site data). -->
+<script>
+  try {
+    const t = localStorage.getItem('lou-theme');
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  } catch (e) {}
+</script>
+<link rel="preload" href="/static/vendor/fonts/jetbrains-mono.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/vendor/fonts/vt323.woff2" as="font" type="font/woff2" crossorigin>
 <!-- defer: charts aren't needed for first paint and new Chart() only runs on a
      chart event. Self-hosted (not a CDN) so an ad/privacy blocker or a jsdelivr
      compromise can't break or tamper with charts. -->
 <script defer src="/static/vendor/chart.umd.min.js"></script>
 <style>
+  /* Same faces as raylytics.io. JetBrains Mono (variable, 100-800) carries
+     everything, display sizes included, at heavy weights; the pixel face
+     VT323 is kept to the small brand marks (wordmark, raylytics.io link),
+     where its pixels read as a signature rather than as blur.
+     Both OFL, see static/vendor/README.md. */
+  @font-face {
+    font-family: 'VT323';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/static/vendor/fonts/vt323.woff2') format('woff2');
+  }
+  @font-face {
+    font-family: 'JetBrains Mono';
+    font-style: normal;
+    font-weight: 100 800;
+    font-display: swap;
+    src: url('/static/vendor/fonts/jetbrains-mono.woff2') format('woff2');
+  }
+
+  /* Tokens. Paper and ink rather than pure white/black; one accent (the
+     raylytics.io blue) and one warning color for partial periods. Dark values
+     are repeated for the OS preference and for the explicit toggle. */
   :root {
-    /* Neutrals are tinted very slightly toward the civic-blue hue rather than pure gray. */
-    --bg: #f3f4f8;
-    --surface: #fdfdfe;
-    --primary: #1a56db;
-    --primary-light: #e8edfb;
-    --text: #1f2937;
-    --text-muted: #6b7280;
-    --border: #e5e7eb;
-    --code-bg: #f2f3f7;
-    --user-bg: #1a56db;
-    --user-text: #ffffff;
-    --radius: 12px;
+    --paper: #F5F3EE;
+    --paper-2: #EAE7DF;
+    --ink: #141413;
+    --ink-2: #4D4A44;
+    --rule: rgba(20, 20, 19, 0.14);
+    --accent: #005EB8;
+    --on-accent: #FFFFFF;
+    --warn: #AE3F0A;
+    --warn-mark: #FF4500;
+    --wave-l: #F5F3EE;
+    --wave-r: #141413;
+    --mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --pixel: 'VT323', 'JetBrains Mono', ui-monospace, monospace;
+    --display: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --gutter: 96px;
+    --measure: 760px;
+    --gap: 40px;
+    --pad: 60px;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0F0F0E;
+      --paper-2: #1B1B19;
+      --ink: #EFECE4;
+      --ink-2: #ABA79D;
+      --rule: rgba(239, 236, 228, 0.16);
+      --accent: #72B2FF;
+      --on-accent: #0F0F0E;
+      --warn: #FF9057;
+      --warn-mark: #FF6A2B;
+      --wave-l: #EFECE4;
+      --wave-r: #0F0F0E;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0F0F0E;
+    --paper-2: #1B1B19;
+    --ink: #EFECE4;
+    --ink-2: #ABA79D;
+    --rule: rgba(239, 236, 228, 0.16);
+    --accent: #72B2FF;
+    --on-accent: #0F0F0E;
+    --warn: #FF9057;
+    --warn-mark: #FF6A2B;
+    --wave-l: #EFECE4;
+    --wave-r: #0F0F0E;
+    color-scheme: dark;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -37,8 +109,9 @@
   a:focus-visible,
   button:focus-visible,
   input:focus-visible,
+  summary:focus-visible,
   [role="button"]:focus-visible {
-    outline: 2px solid var(--primary);
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
   }
 
@@ -52,306 +125,486 @@
   }
 
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--text);
+    font-family: var(--mono);
+    font-size: 15px;
+    background: var(--paper);
+    color: var(--ink);
     height: 100vh;
+    height: 100dvh;
     display: flex;
     flex-direction: column;
   }
 
+  a { color: var(--ink); text-underline-offset: 3px; }
+
+  button { font-family: var(--mono); color: var(--ink); }
+
+  .visually-hidden {
+    position: absolute !important;
+    width: 1px; height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  /* Square, hairline-bordered controls, 44px tall (raylytics.io's corners). */
+  .btn {
+    min-height: 44px;
+    padding: 0 16px;
+    border: 1px solid var(--rule);
+    background: transparent;
+    color: var(--ink);
+    font-size: 14px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: border-color 0.15s;
+  }
+  .btn:hover { border-color: var(--ink); }
+  .btn[hidden] { display: none; }
+  .btn.strong { border-color: var(--ink); }
+  .btn svg { flex: none; }
+
+  .link-btn {
+    min-height: 44px;
+    padding: 0 10px;
+    border: 0;
+    background: transparent;
+    color: var(--ink-2);
+    font-size: 14px;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    cursor: pointer;
+  }
+  .link-btn:hover { color: var(--ink); }
+
+  .mono-label {
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+  }
+
+  /* ── Header ─────────────────────────────────────────────── */
   header {
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    padding: 16px 24px;
+    flex-shrink: 0;
+    height: 64px;
+    padding: 0 var(--pad);
     display: flex;
     align-items: center;
     justify-content: space-between;
-    flex-shrink: 0;
+    gap: 16px;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    min-width: 0;
   }
 
   header h1 {
-    font-size: 18px;
-    font-weight: 600;
+    font-family: var(--pixel);
+    font-weight: 400;
+    font-size: 34px;
+    line-height: 1;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .brand-rule {
+    width: 1px;
+    height: 22px;
+    background: var(--rule);
+    flex: none;
   }
 
   header .subtitle {
     font-size: 13px;
-    color: var(--text-muted);
+    color: var(--ink-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .header-right {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
+    flex: none;
   }
 
-  .header-btn {
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 5px 12px;
-    font-size: 12px;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: border-color 0.15s, color 0.15s;
-  }
+  .theme-btn { width: 44px; padding: 0; justify-content: center; }
 
-  .header-btn:hover {
-    border-color: var(--primary);
-    color: var(--primary);
-  }
-
-  .header-btn[hidden] {
-    display: none;
-  }
-
-  .dev-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--text-muted);
-    cursor: pointer;
-    user-select: none;
-  }
-
-  /* Visually hidden but kept in the tab order (display:none would make the
-     toggle unreachable by keyboard); the styled .switch is the visual control. */
-  .dev-toggle input {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    margin: 0;
-  }
-
-  .dev-toggle input:focus-visible + .switch {
-    outline: 2px solid var(--primary);
-    outline-offset: 2px;
-  }
-
-  .dev-toggle .switch {
-    width: 32px;
-    height: 18px;
-    background: var(--border);
-    border-radius: 9px;
-    position: relative;
-    transition: background 0.2s;
-  }
-
-  .dev-toggle .switch::after {
-    content: '';
-    width: 14px;
-    height: 14px;
-    background: white;
-    border-radius: 50%;
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    transition: transform 0.2s;
-  }
-
-  .dev-toggle input:checked + .switch {
-    background: var(--primary);
-  }
-
-  .dev-toggle input:checked + .switch::after {
-    transform: translateX(14px);
-  }
-
+  /* ── Conversation ───────────────────────────────────────── */
   #messages {
     flex: 1;
     overflow-y: auto;
-    padding: 24px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
   }
 
+  /* The notebook cell: a mono gutter label (Q1 / A1), a 760px reading column,
+     and a margin column for side notes. */
   .message {
-    max-width: 85%;
-    line-height: 1.5;
+    width: 100%;
+    max-width: calc(var(--gutter) + var(--measure) + 2 * var(--gap) + 240px + 2 * var(--pad));
+    margin: 0 auto;
+    padding: 0 var(--pad);
+    display: grid;
+    grid-template-columns: var(--gutter) minmax(0, var(--measure)) minmax(0, 1fr);
+    column-gap: var(--gap);
     overflow-wrap: break-word;  /* long unbroken strings (URLs, IDs) wrap, not overflow */
+  }
+  .message > * { grid-column: 2; }
+  .message > .cell-label { grid-column: 1; grid-row: 1; }
+
+  .cell-label {
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    color: var(--ink-2);
+    padding-top: 12px;
   }
 
   .message.user {
-    align-self: flex-end;
-    background: var(--user-bg);
-    color: var(--user-text);
-    padding: 10px 16px;
-    border-radius: var(--radius) var(--radius) 4px var(--radius);
-    font-size: 14px;
+    padding-top: 44px;
+  }
+  .message.user::after {
+    /* The heavy rule between question and answer. */
+    content: '';
+    grid-column: 1 / -1;
+    height: 1.5px;
+    background: var(--ink);
+    margin-top: 28px;
+  }
+  .question-text {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 30px;
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
   }
 
   .message.agent {
-    align-self: flex-start;
-    width: 100%;
-    max-width: 90%;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
+    padding-top: 26px;
+    padding-bottom: 40px;
+    row-gap: 0;
   }
+  .message.agent > .cell-label { padding-top: 4px; }
 
-  /* Dev-view visibility is class-driven (body.dev-visible, synced to the
-     toggle) so flipping Dev retroactively shows/hides blocks on answers that
-     are already rendered. .report-fallback borrows .debug-block styling but
-     is not a dev element — it stays visible either way. */
-  body:not(.dev-visible) .reasoning-block,
-  body:not(.dev-visible) .sql-block,
-  body:not(.dev-visible) .results-block,
-  body:not(.dev-visible) .log-block,
-  body:not(.dev-visible) .debug-block:not(.report-fallback) {
+  /* Beats `.message > .figure` (same specificity, declared earlier). */
+  .message [data-slot]:empty { display: none; }
+
+  .headline { display: flex; flex-direction: column; gap: 6px; }
+  .headline-figure {
+    font-family: var(--display);
+    font-weight: 800;
+    font-size: 88px;
+    line-height: 1;
+    letter-spacing: -0.05em;
+    font-variant-numeric: tabular-nums;
+  }
+  .headline-context { font-size: 15px; line-height: 1.55; }
+  .headline-context .partial { color: var(--warn); }
+
+  /* The chart row spans the reading column AND the margin column, so its
+     partial-period note sits beside it on wide screens. */
+  .message > .figure {
+    grid-column: 2 / span 2;
+    display: grid;
+    grid-template-columns: minmax(0, var(--measure)) minmax(0, 1fr);
+    column-gap: var(--gap);
+    margin-top: 28px;
+  }
+  .chart-box {
+    position: relative;
+    width: 100%;
+    height: 300px;
+  }
+  /* Holds its place in the turn's order without occupying the screen. The
+     chart is built, measured and drawn in one synchronous step when this class
+     comes off, so the half-laid-out canvas is never painted — no opacity gate
+     needed, and nothing depends on a transition or a frame callback that a
+     hidden tab would never run. */
+  .chart-box.pending {
     display: none;
   }
-
-  .agent .sql-block {
-    background: var(--code-bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 12px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: var(--text);
-    position: relative;
-  }
-
-  .agent .sql-block .label {
-    font-family: -apple-system, sans-serif;
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-    display: block;
-    margin-bottom: 6px;
-  }
-
-  .agent .sources-block {
-    margin-top: 10px;
-    padding: 10px 12px;
-    border-left: 3px solid var(--border);
+  .side-note {
+    align-self: end;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     font-size: 13px;
     line-height: 1.5;
-    color: var(--text-muted, #555);
-    /* Match the ANSWER's rendered width, not its ch count: ch resolves
-       against each block's own font-size, so 70ch here (13px) lands ~35px
-       narrower than 70ch on the 14px answer above, and the right edges still
-       would not line up. 75ch compensates for the smaller font. */
-    max-width: 75ch;
+    color: var(--ink-2);
+    padding-bottom: 40px;
+  }
+  .side-note::before {
+    content: '';
+    width: 32px;
+    height: 2px;
+    background: var(--warn-mark);
+  }
+  .side-note .mono-label { font-size: 11px; color: var(--warn); }
+
+  .prose {
+    margin-top: 28px;
+    font-size: 15px;
+    line-height: 1.7;
+    max-width: 76ch;
   }
 
-  .agent .sources-block .label {
-    display: block;
+  .notices { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
+
+  .source-line {
+    margin-top: 20px;
+    padding-top: 12px;
+    border-top: 1px solid var(--rule);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink-2);
+  }
+
+  .footnotes {
+    margin-top: 12px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+  .footnotes .mono-label { display: block; font-size: 11px; margin-bottom: 4px; }
+  .footnotes .source-row { margin-bottom: 3px; }
+  .footnotes a { color: var(--ink); font-weight: 600; }
+
+  .actions {
+    margin-top: 20px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+  }
+  .actions .spacer { flex-grow: 1; }
+  .actions > div { display: flex; flex-wrap: wrap; gap: 10px; }
+  .actions > div:empty { display: none; }
+
+  .data-view { margin-top: 12px; }
+  .data-view[hidden] { display: none; }
+
+  /* ── Results table ───────────────────────────────────────── */
+  .table-wrap {
+    max-height: 420px;
+    overflow: auto;
+    border: 1px solid var(--rule);
+    background: var(--paper);
+  }
+  table.results {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+  table.results th {
+    position: sticky;
+    top: 0;
+    background: var(--paper);
+    border-bottom: 1.5px solid var(--ink);
+    padding: 0;
     font-weight: 600;
+    text-align: left;
+  }
+  table.results th.num { text-align: right; }
+  table.results th button {
+    width: 100%;
+    min-height: 40px;
+    padding: 0 12px;
+    border: 0;
+    background: transparent;
+    font-size: 12px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    text-align: inherit;
+  }
+  table.results th.num button { justify-content: flex-end; }
+  table.results td {
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: top;
+  }
+  table.results td.num { text-align: right; white-space: nowrap; }
+  .tag-partial {
+    margin-left: 10px;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--warn);
+  }
+  .table-note { margin-top: 6px; font-size: 12px; color: var(--ink-2); }
+  pre.results-text {
+    padding: 12px;
+    border: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 12px;
+    white-space: pre;
+    overflow: auto;
+    max-height: 360px;
+  }
+
+  /* ── "How I got this answer" ─────────────────────────────── */
+  details.work {
+    margin-top: 22px;
+    background: var(--paper-2);
+  }
+  details.work[hidden] { display: none; }
+  details.work > summary {
+    list-style: none;
+    min-height: 56px;
+    padding: 8px 18px 8px 14px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+  }
+  details.work > summary::-webkit-details-marker { display: none; }
+  .chev { transition: transform 0.15s; flex: none; }
+  details[open] > summary .chev { transform: rotate(90deg); }
+  .work-title {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 18px;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+  }
+  .work-meta {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--ink-2);
+    text-align: right;
+  }
+  .work-body {
+    padding: 6px 28px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+
+  ol.steps { list-style: none; }
+  ol.steps:empty { display: none; }
+  ol.steps li {
+    display: grid;
+    grid-template-columns: 34px 14px minmax(0, 1fr) auto;
+    column-gap: 12px;
+    padding: 12px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .step-n { font-size: 12px; color: var(--ink-2); padding-top: 3px; }
+  .step-mark {
+    width: 10px;
+    height: 10px;
+    margin-top: 5px;
+    background: var(--ink);
+  }
+  .step-mark.idle { background: transparent; border: 1.5px solid var(--ink-2); }
+  .step-mark.fallback { background: var(--accent); }
+  .step-mark.failed { background: transparent; border: 2px solid var(--warn); }
+  .step-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .step-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .step-name { font-size: 14px; font-weight: 600; }
+  li.idle .step-name { color: var(--ink-2); }
+  .step-status { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); }
+  li.fallback .step-status { color: var(--accent); }
+  li.failed .step-status { color: var(--warn); }
+  .step-meta { font-size: 12px; color: var(--ink-2); }
+  .step-note { font-size: 13px; line-height: 1.5; color: var(--ink-2); }
+  .step-time { font-size: 13px; text-align: right; padding-top: 2px; font-variant-numeric: tabular-nums; }
+
+  .work-section { display: flex; flex-direction: column; gap: 8px; }
+  .work-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  pre.sql-code {
+    padding: 16px 18px;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .tk-kw { color: var(--accent); font-weight: 600; }
+  .tk-fn { color: var(--accent); }
+  .tk-str { color: var(--warn); }
+  .tk-num { color: var(--warn); }
+  .tk-comment { color: var(--ink-2); }
+
+  details.raw > summary {
+    list-style: none;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+  details.raw > summary::-webkit-details-marker { display: none; }
+  .raw-body { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+
+  /* Raw event blocks (the previous Dev view), now one level down. */
+  .log-block { font-size: 11px; color: var(--ink-2); }
+  .debug-block, .reasoning-block, .raw-sql {
+    border: 1px solid var(--rule);
+    background: var(--paper);
+    padding: 6px 10px;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .reasoning-block .label, .raw-sql .label {
+    display: block;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-2);
     margin-bottom: 4px;
   }
 
-  .agent .source-row {
-    margin-bottom: 3px;
-  }
-
-  .agent .source-row a {
-    font-weight: 600;
-  }
-
-  .agent .results-block {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 12px;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 12px;
-    white-space: pre-wrap;
-    overflow-x: auto;
-    max-height: 300px;
-    overflow-y: auto;
-  }
-
-  .agent .results-block .label {
-    font-family: -apple-system, sans-serif;
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-muted);
-    display: block;
-    margin-bottom: 6px;
-  }
-
-  .agent .interpretation {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 14px 16px;
-    font-size: 14px;
-    max-width: 70ch;  /* keep body copy in the comfortable reading measure */
-  }
-
-  .agent .interpretation p { margin-bottom: 8px; }
-  .agent .interpretation p:last-child { margin-bottom: 0; }
-  .agent .interpretation strong { font-weight: 600; }
-
-  .agent .error {
-    background: #fef2f2;
-    border: 1px solid #fecaca;
-    border-radius: 8px;
+  /* ── Notices ─────────────────────────────────────────────── */
+  .message .error,
+  .message .info {
     padding: 10px 14px;
-    color: #991b1b;
     font-size: 13px;
+    line-height: 1.5;
+    border: 1px solid var(--rule);
+    border-top: 2px solid var(--warn);
+    background: var(--paper);
   }
-
   /* Non-error notices (e.g. "info" events). Distinct from .error so screen
      readers and users don't read every notice as a failure. */
-  .agent .info {
-    background: #eef4ff;
-    border: 1px solid #c7dafe;
-    border-radius: 8px;
-    padding: 10px 14px;
-    color: #1e3a8a;
-    font-size: 13px;
-  }
+  .message .info { border-top-color: var(--accent); }
 
-  .agent .retry-btn {
+  .retry-btn {
     margin-top: 8px;
+    min-height: 40px;
+    padding: 0 14px;
     background: transparent;
-    border: 1px solid #fca5a5;
-    color: #991b1b;
-    border-radius: 16px;
-    padding: 4px 14px;
-    font-size: 12px;
-    font-weight: 500;
+    border: 1px solid var(--ink);
+    font-size: 13px;
     cursor: pointer;
-    transition: background 0.15s, border-color 0.15s;
   }
-
-  .agent .retry-btn:hover {
-    background: #fee2e2;
-    border-color: #f87171;
-  }
-
-  .agent .retry-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
+  .retry-btn:disabled { opacity: 0.5; cursor: default; }
   /* Neutral variant for non-error recovery (e.g. "Ask again" after a user stop). */
-  .agent .retry-btn.neutral {
-    border-color: var(--border);
-    color: var(--text-muted);
-  }
-
-  .agent .retry-btn.neutral:hover {
-    background: var(--primary-light);
-    border-color: var(--primary);
-    color: var(--primary);
-  }
+  .retry-btn.neutral { border-color: var(--rule); color: var(--ink-2); }
 
   /* Single rotating progress line shown above the typing dots while waiting. */
-  .agent .status-line {
-    font-size: 12.5px;
-    color: var(--text-muted);
-    padding: 2px 2px 4px;
+  .status-line {
+    font-size: 13px;
+    color: var(--ink-2);
+    padding: 2px 0 4px;
     min-height: 16px;
     transition: opacity 0.2s;
   }
@@ -360,538 +613,358 @@
      first content arriving, because the slowest phases (interpreting, then
      refining) run AFTER the results table has already rendered — that is
      precisely the stretch where the page otherwise looks finished but is not. */
-  .agent .processing-line {
+  .processing-line {
+    margin-top: 12px;
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 12.5px;
-    color: var(--text-muted);
-    padding: 2px 2px 6px;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--ink-2);
     transition: opacity 0.2s;
   }
-  .agent .processing-line::before {
+  .processing-line::before {
     content: "";
     width: 9px;
     height: 9px;
-    border: 1.5px solid currentColor;
-    border-right-color: transparent;
-    border-radius: 50%;
-    animation: lou-spin 0.7s linear infinite;
+    background: var(--accent);
+    animation: lou-blink 1s steps(2, jump-none) infinite;
     flex: none;
   }
-  @keyframes lou-spin { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) {
-    .agent .processing-line::before { animation-duration: 2.4s; }
-  }
-
-  /* Quiet per-message action (Copy answer). */
-  .agent .msg-action {
-    align-self: flex-start;
-    margin-top: 2px;
-    background: transparent;
-    border: 1px solid var(--border);
-    color: var(--text-muted);
-    border-radius: 14px;
-    padding: 3px 12px;
-    font-size: 11px;
-    cursor: pointer;
-    transition: border-color 0.15s, color 0.15s;
-  }
-
-  .agent .msg-action:hover {
-    border-color: var(--primary);
-    color: var(--primary);
-  }
-
-  .agent .chart-block {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    width: 100%;
-    max-width: 800px;
-    height: 360px;
-  }
-
-  /* Holds its place in the turn's order without occupying the screen. The
-     chart is built, measured and drawn in one synchronous step when this class
-     comes off, so the half-laid-out canvas is never painted — no opacity gate
-     needed, and nothing depends on a transition or a frame callback that a
-     hidden tab would never run. */
-  .agent .chart-block.pending {
-    display: none;
-  }
-
-  .agent .reasoning-block {
-    background: #fefce8;
-    border: 1px solid #fde68a;
-    border-radius: 8px;
-    padding: 10px 12px;
-    font-size: 12px;
-    line-height: 1.5;
-    color: #854d0e;
-  }
-
-  .agent .reasoning-block .label {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: #a16207;
-    display: block;
-    margin-bottom: 6px;
-  }
-
-  .agent .log-block {
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 11px;
-    color: var(--text-muted);
-    padding: 2px 0;
-    opacity: 0.8;
-  }
-
-  .agent .debug-block {
-    background: #f0fdf4;
-    border: 1px solid #bbf7d0;
-    border-radius: 6px;
-    padding: 6px 10px;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    font-size: 11px;
-    color: #166534;
-  }
-
-  .starters {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    gap: 12px;
-    padding: 40px 24px;
-  }
-
-  .starters h2 {
-    font-size: 20px;
-    font-weight: 600;
-    margin-bottom: 4px;
-  }
-
-  .starters p {
-    color: var(--text-muted);
-    font-size: 14px;
-    margin-bottom: 12px;
-  }
-
-  .disclaimer {
-    font-size: 12px;
-    color: var(--text-muted);
-    line-height: 1.4;
-    max-width: 900px;
-    margin: 8px auto 0;
-    text-align: center;
-  }
-
-  .starters .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    justify-content: center;
-    max-width: 600px;
-  }
-
-  .chip-groups {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    max-width: 640px;
-    width: 100%;
-  }
-
-  .chip-group {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .chip-group-label {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: var(--text-muted);
-    font-weight: 600;
-  }
-
-  .chip-group .chips {
-    justify-content: flex-start;
-    max-width: none;
-  }
-
-  .starters button,
-  #examples-tray button {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 8px 16px;
-    font-size: 13px;
-    color: var(--text);
-    cursor: pointer;
-    transition: border-color 0.15s, background 0.15s;
-  }
-
-  .starters button:hover,
-  #examples-tray button:hover {
-    border-color: var(--primary);
-    background: var(--primary-light);
-  }
-
-  /* Dismissible suggestions tray, recovers the starter prompts after the
-     opening chips are gone. Sits above the input bar; doesn't disturb scroll. */
-  #examples-tray {
-    flex-shrink: 0;
-    background: var(--surface);
-    border-top: 1px solid var(--border);
-    padding: 12px 24px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-  }
-
-  #examples-tray[hidden] {
-    display: none;
-  }
-
-  #examples-tray .tray-label {
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.6px;
-    color: var(--text-muted);
-    font-weight: 600;
-  }
-
-  #examples-tray .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-
-  .about-wrapper {
-    position: relative;
-    display: inline-block;
-    margin-top: 8px;
-  }
-
-  .about-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    position: relative;
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    border: 1px solid var(--border);
-    font-size: 12px;
-    font-weight: 600;
-    font-style: italic;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: border-color 0.15s, color 0.15s;
-  }
-
-  .about-icon:hover, .about-icon:focus {
-    border-color: var(--primary);
-    color: var(--primary);
-  }
-
-  .about-tooltip {
-    display: none;
-    position: absolute;
-    bottom: 32px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 340px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 14px 16px;
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--text);
-    box-shadow: 0 4px 16px rgba(0,0,0,0.1);
-    z-index: 10;
-  }
-
-  .about-tooltip a {
-    color: var(--primary);
-    text-decoration: none;
-  }
-
-  .about-tooltip a:hover {
-    text-decoration: underline;
-  }
-
-  .about-icon:hover + .about-tooltip,
-  .about-icon:focus + .about-tooltip,
-  .about-tooltip:hover,
-  .about-wrapper.open .about-tooltip {
-    display: block;
-  }
-
-  #input-bar {
-    background: var(--surface);
-    border-top: 1px solid var(--border);
-    padding: 16px 24px;
-    flex-shrink: 0;
-  }
-
-  #input-bar form {
-    display: flex;
-    gap: 10px;
-    max-width: 900px;
-    margin: 0 auto;
-  }
-
-  #input-bar input {
-    flex: 1;
-    padding: 10px 16px;
-    border: 1px solid var(--border);
-    border-radius: 24px;
-    font-size: 14px;
-    outline: none;
-    transition: border-color 0.15s;
-  }
-
-  #input-bar input:focus { border-color: var(--primary); }
-
-  #input-bar button {
-    background: var(--primary);
-    color: white;
-    border: none;
-    border-radius: 24px;
-    padding: 10px 20px;
-    font-size: 14px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: opacity 0.15s;
-  }
-
-  #input-bar button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  /* While a response is streaming the Ask button becomes a Stop control. */
-  #input-bar button.stop {
-    background: #b91c1c;
-  }
-
-  #input-bar button.stop:hover {
-    opacity: 0.9;
-  }
+  @keyframes lou-blink { 50% { opacity: 0; } }
 
   .typing {
     display: inline-flex;
     gap: 4px;
     padding: 8px 0;
   }
-
   .typing span {
     width: 6px;
     height: 6px;
-    background: var(--text-muted);
-    border-radius: 50%;
+    background: var(--ink-2);
     animation: blink 1.4s infinite both;
   }
-
   .typing span:nth-child(2) { animation-delay: 0.2s; }
   .typing span:nth-child(3) { animation-delay: 0.4s; }
-
   @keyframes blink {
     0%, 80%, 100% { opacity: 0.3; }
     40% { opacity: 1; }
   }
 
-  /* ── Mobile ────────────────────────────────────────────── */
-  @media (max-width: 640px) {
-    header {
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 8px;
-      padding: 12px 16px;
-    }
-
-    header h1 {
-      font-size: 15px;
-    }
-
-    .header-right {
-      width: 100%;
-      justify-content: flex-end;
-    }
-
-    #messages {
-      padding: 12px;
-      gap: 12px;
-    }
-
-    .message {
-      max-width: 95%;
-    }
-
-    .message.agent {
-      max-width: 100%;
-    }
-
-    .starters {
-      padding: 20px 12px;
-      gap: 10px;
-    }
-
-    .starters h2 {
-      font-size: 16px;
-      text-align: center;
-    }
-
-    .starters p {
-      font-size: 13px;
-      text-align: center;
-    }
-
-    .starters .chips {
-      max-width: 100%;
-    }
-
-    .starters button {
-      font-size: 12px;
-      padding: 6px 12px;
-    }
-
-    .about-tooltip {
-      width: calc(100vw - 32px);
-      left: auto;
-      right: -16px;
-      transform: none;
-    }
-
-    #input-bar {
-      padding: 10px 12px;
-    }
-
-    #input-bar form {
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    #input-bar input {
-      font-size: 16px; /* prevents iOS zoom on focus */
-      padding: 10px 14px;
-    }
-
-    #input-bar button {
-      padding: 10px 16px;
-      font-size: 13px;
-    }
-
-    .disclaimer {
-      width: 100%;
-      text-align: center;
-      font-size: 11px;
-    }
-
-    .agent .chart-block {
-      max-width: 100%;
-      height: 260px;
-    }
-
-    .agent .sql-block,
-    .agent .results-block,
-    .agent .reasoning-block,
-    .agent .debug-block {
-      font-size: 10px;
-    }
-
-    .agent .interpretation {
-      padding: 10px 12px;
-      font-size: 13px;
-    }
+  /* ── Landing ────────────────────────────────────────────── */
+  .starters {
+    flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
   }
 
-  /* Touch input: meet the 44px minimum target size (WCAG 2.5.5). Scoped to
-     coarse pointers so the mouse/desktop UI keeps its tighter proportions.
-     Placed after the width breakpoint so it wins where both apply. */
-  @media (pointer: coarse) {
-    .starters button,
-    #examples-tray button,
-    #input-bar button,
-    #input-bar input,
-    .header-btn {
-      min-height: 44px;
-    }
+  /* raylytics.io's split: a solid field with a second color clipped to a wavy
+     edge (see initWave), and a white headline in difference blend so it
+     inverts across the edge. */
+  .hero {
+    position: relative;
+    height: clamp(220px, 34vh, 320px);
+    isolation: isolate;
+    overflow: hidden;
+    border-bottom: 1px solid var(--rule);
+  }
+  .wave-l, .wave-r { position: absolute; inset: 0; }
+  .wave-l { background: var(--wave-l); }
+  .wave-r { background: var(--wave-r); }
+  .hero-title {
+    position: absolute;
+    /* Aligned with the landing column below it (1160px, centered). */
+    left: max(var(--pad), calc((100% - 1160px) / 2));
+    right: var(--pad);
+    top: 50%;
+    transform: translateY(-50%);
+    font-family: var(--display);
+    font-weight: 800;
+    font-size: clamp(40px, 7vw, 96px);
+    line-height: 1;
+    letter-spacing: -0.04em;
+    color: #FFFFFF;
+    mix-blend-mode: difference;
+    text-wrap: balance;
+    pointer-events: none;
+  }
 
-    .starters .chips,
-    #examples-tray .chips {
-      gap: 10px;
-    }
+  .landing {
+    width: 100%;
+    max-width: calc(1160px + 2 * var(--pad));
+    margin: 0 auto;
+    padding: 36px var(--pad) 0;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    flex: 1;
+  }
+  .landing-intro {
+    max-width: 700px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .hero-blurb {
+    font-size: 16px;
+    line-height: 1.65;
+    text-wrap: pretty;
+  }
 
-    /* Expand the small "i" icon's tap area to 44px without enlarging the circle. */
-    .about-icon::before {
-      content: '';
-      position: absolute;
-      inset: -11px;
-    }
+  .chip-groups {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 24px;
+    row-gap: 20px;
+    border-top: 1.5px solid var(--ink);
+    padding-top: 14px;
+  }
+  .chip-group { display: flex; flex-direction: column; }
+  .chip-group-label { padding-bottom: 6px; }
+
+  /* Starter questions render as an index of links, not pills. */
+  .q-link {
+    min-height: 44px;
+    padding: 8px 0;
+    border: 0;
+    border-bottom: 1px solid var(--rule);
+    background: transparent;
+    font-size: 14px;
+    line-height: 1.4;
+    text-align: left;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    cursor: pointer;
+  }
+  .q-link:hover { color: var(--accent); }
+  .q-link svg { flex: none; color: var(--accent); }
+
+  footer.site {
+    margin-top: auto;
+    padding: 18px 0 24px;
+    border-top: 1px solid var(--rule);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px 24px;
+    font-size: 13px;
+    color: var(--ink-2);
+  }
+  footer.site .foot-links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; }
+  .raylytics-link {
+    font-family: var(--pixel);
+    font-size: 20px;
+    letter-spacing: 0.04em;
+    text-decoration: none;
+    text-transform: uppercase;
+  }
+  details.about > summary {
+    list-style: none;
+    cursor: pointer;
+    text-decoration: underline;
+    color: var(--ink);
+    min-height: 24px;
+  }
+  details.about > summary::-webkit-details-marker { display: none; }
+  .about-tooltip {
+    margin-top: 10px;
+    max-width: 520px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink);
+  }
+  .about-tooltip a { color: var(--accent); }
+
+  /* Dismissible suggestions tray, recovers the starter prompts after the
+     landing is gone. Sits above the input bar; doesn't disturb scroll. */
+  #examples-tray {
+    flex-shrink: 0;
+    border-top: 1px solid var(--rule);
+    padding: 10px var(--pad);
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  #examples-tray[hidden] { display: none; }
+  #examples-tray .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 18px;
+  }
+  #examples-tray .q-link { border-bottom: 0; min-height: 36px; }
+
+  /* ── Question box ────────────────────────────────────────── */
+  /* One node, two homes: inline on the landing, docked at the bottom once a
+     conversation starts (see placeInputBar). */
+  #input-bar {
+    flex-shrink: 0;
+    border-top: 1px solid var(--rule);
+    padding: 16px var(--pad);
+  }
+  #input-bar .ib-inner {
+    max-width: calc(var(--gutter) + var(--measure) + var(--gap));
+    padding-left: calc(var(--gutter) + var(--gap));
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  #input-bar.inline { border-top: 0; padding: 0; }
+  #input-bar.inline .ib-inner { max-width: none; padding-left: 0; margin: 0; }
+  #input-bar .ib-label { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); }
+  #input-bar:not(.inline) .ib-label {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);
+  }
+
+  #input-bar form { display: flex; }
+
+  #input-bar input {
+    flex: 1;
+    min-width: 0;
+    height: 52px;
+    padding: 0 16px;
+    border: 1.5px solid var(--ink);
+    border-right: 0;
+    border-radius: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: 15px;
+    outline: none;
+  }
+  #input-bar.inline input { height: 56px; }
+  #input-bar input:focus { box-shadow: inset 0 -2px 0 var(--accent); }
+  #input-bar input::placeholder { color: var(--ink-2); opacity: 1; }
+
+  #input-bar button {
+    height: 52px;
+    padding: 0 24px;
+    border: 1.5px solid var(--ink);
+    border-radius: 0;
+    background: var(--accent);
+    color: var(--on-accent);
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #input-bar.inline button { height: 56px; }
+  #input-bar button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  /* While a response is streaming the Ask button becomes a Stop control. */
+  #input-bar button.stop {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  .disclaimer {
+    font-size: 12px;
+    color: var(--ink-2);
+    line-height: 1.4;
+  }
+
+  /* ── Narrow screens ──────────────────────────────────────── */
+  @media (max-width: 1100px) {
+    .message > .figure { grid-template-columns: minmax(0, 1fr); }
+    .side-note { padding: 12px 0 0; }
+  }
+
+  @media (max-width: 800px) {
+    :root { --pad: 16px; }
+    header { height: 56px; }
+    header h1 { font-size: 30px; }
+    header .subtitle, .brand-rule { display: none; }
+
+    .message { grid-template-columns: minmax(0, 1fr); }
+    .message > *, .message > .figure { grid-column: 1; }
+    .message > .cell-label { grid-row: auto; padding-top: 0; }
+    .message.user { padding-top: 24px; }
+    .message.user::after { margin-top: 20px; }
+    .question-text { font-size: 24px; }
+    .headline-figure { font-size: 60px; }
+    .chart-box { height: 240px; }
+    .work-body { padding: 4px 14px 20px; }
+    ol.steps li { grid-template-columns: 26px 12px minmax(0, 1fr); }
+    .step-time { grid-column: 3; text-align: left; padding-top: 4px; }
+
+    .chip-groups { grid-template-columns: minmax(0, 1fr); }
+    #input-bar .ib-inner { padding-left: 0; }
+    #input-bar button { padding: 0 16px; }
+    #input-bar input { font-size: 16px; /* prevents iOS zoom on focus */ }
   }
 </style>
 </head>
 <body>
 
 <header>
-  <div>
+  <div class="brand">
     <h1>Lou</h1>
-    <div class="subtitle">The publicly shared data from Louisville Metro</div>
+    <span class="brand-rule" aria-hidden="true"></span>
+    <div class="subtitle">Louisville Metro spending, in plain English</div>
   </div>
   <div class="header-right">
-    <button type="button" class="header-btn" id="examples-btn" hidden onclick="toggleExamples()" aria-expanded="false" aria-controls="examples-tray">Examples</button>
-    <button type="button" class="header-btn" id="newchat-btn" hidden onclick="newChat()">New chat</button>
-    <label class="dev-toggle" title="Show SQL queries and debug info">
-      <input type="checkbox" id="dev-mode" />
-      <span class="switch"></span>
-      Dev
-    </label>
+    <button type="button" class="btn" id="examples-btn" hidden onclick="toggleExamples()" aria-expanded="false" aria-controls="examples-tray">Examples</button>
+    <button type="button" class="btn" id="newchat-btn" hidden onclick="newChat()">New question</button>
+    <button type="button" class="btn theme-btn" id="theme-btn" aria-label="Switch theme" title="Switch between light and dark">
+      <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="7.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M9 1.5 A7.5 7.5 0 0 1 9 16.5 Z" fill="currentColor"/></svg>
+    </button>
   </div>
 </header>
 
 <main id="messages">
   <div class="starters" id="starters">
-    <h2>Ask me about Louisville Metro Government expenditure. I might have some answers.</h2>
-    <p>Natural language queries run against Louisville Metro expenditure, salary, capital projects, contractor, and staffing data, covering fiscal years 2008 to 2026.</p>
-    <div class="chip-groups" id="starter-groups"></div>
-    <div class="about-wrapper">
-      <span class="about-icon" tabindex="0" role="button" aria-label="About this data" onclick="toggleAbout(this)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAbout(this);}">i</span>
-      <!-- Filled from the city pack's branding.about_html on load; this
-           placeholder is city-neutral so no deployment flashes another
-           city's attribution or legal terms. -->
-      <div class="about-tooltip">
-        <strong>About this data</strong><br>
-        Sourced from the city's public open data portal. Data is provided
-        as-is without warranty. This tool is an independent project and is not
-        affiliated with or endorsed by the city.
+    <section class="hero" id="hero">
+      <div class="wave-l" aria-hidden="true"></div>
+      <div class="wave-r" id="wave-r" aria-hidden="true"></div>
+      <h2 class="hero-title" id="hero-title">Where does Louisville’s money go?</h2>
+    </section>
+    <div class="landing">
+      <div class="landing-intro" id="landing-ask">
+        <p class="hero-blurb" id="hero-blurb">Ask in plain English. Lou writes the SQL, runs it against Louisville Metro spending, salary, capital project, contractor and staffing data from fiscal years 2008 to 2026, and shows its work.</p>
       </div>
+      <nav class="chip-groups" id="starter-groups" aria-label="Example questions"></nav>
+      <footer class="site">
+        <div class="foot-links">
+          <span>Built by Evan Ray</span>
+          <a class="raylytics-link" href="https://raylytics.io" target="_blank" rel="noopener">raylytics.io</a>
+          <a href="https://github.com/jimbottle/louisville-open-data-expenditure-bot" target="_blank" rel="noopener">GitHub</a>
+          <a href="https://github.com/jimbottle/louisville-open-data-expenditure-bot#readme" target="_blank" rel="noopener">How it’s built</a>
+        </div>
+        <details class="about">
+          <summary>About this data</summary>
+          <!-- Filled from the city pack's branding.about_html on load; this
+               placeholder is city-neutral so no deployment flashes another
+               city's attribution or legal terms. -->
+          <div class="about-tooltip">
+            <strong>About this data</strong><br>
+            Sourced from the city's public open data portal. Data is provided
+            as-is without warranty. This tool is an independent project and is not
+            affiliated with or endorsed by the city.
+          </div>
+        </details>
+      </footer>
     </div>
   </div>
 </main>
 
 <div id="examples-tray" hidden aria-label="Example questions">
-  <span class="tray-label">Try asking</span>
+  <span class="mono-label">Try asking</span>
   <div class="chips" id="tray-chips"></div>
 </div>
 
 <div id="input-bar">
-  <form onsubmit="handleSubmit(event)">
-    <input type="text" id="question" placeholder="Enter your question about Louisville Metro Government expenditure here..." aria-label="Ask a question about Louisville Metro data" maxlength="500" autocomplete="off" />
-    <button type="submit" id="submit-btn">Ask Lou</button>
-  </form>
-  <!-- Outside the form: as a flex item beside the input it took ~half the row
-       and squeezed the question box to ~200px on desktop. -->
-  <p class="disclaimer">Proof of concept; expect hiccups. AI-generated, so verify results before you rely on them.</p>
+  <div class="ib-inner">
+    <label class="ib-label" for="question">Your question</label>
+    <form onsubmit="handleSubmit(event)">
+      <input type="text" id="question" placeholder="Ask about Louisville Metro spending, salaries, contracts or capital projects" aria-label="Ask a question about Louisville Metro data" maxlength="500" autocomplete="off" />
+      <button type="submit" id="submit-btn">Ask Lou</button>
+    </form>
+    <!-- Outside the form: as a flex item beside the input it took ~half the row
+         and squeezed the question box to ~200px on desktop. -->
+    <p class="disclaimer">Proof of concept; expect hiccups. AI-generated, so check the SQL before you rely on a number.</p>
+  </div>
 </div>
 
 <script>
@@ -899,20 +972,12 @@ const messagesEl = document.getElementById('messages');
 const startersEl = document.getElementById('starters');
 const questionEl = document.getElementById('question');
 const submitBtn = document.getElementById('submit-btn');
+const inputBar = document.getElementById('input-bar');
 let BOT_NAME = 'Lou';  // overridden by the city pack's branding
-const devModeEl = document.getElementById('dev-mode');
-// Keep a body-level class in sync with the toggle: dev blocks are always
-// rendered when their data arrives and shown/hidden purely via CSS, so the
-// toggle works retroactively on past answers. (Answers asked with Dev OFF
-// only carry a results block — the backend doesn't send SQL/reasoning/debug
-// unless they were requested.)
-const syncDevVisibility = () =>
-  document.body.classList.toggle('dev-visible', devModeEl.checked);
-devModeEl.addEventListener('change', syncDevVisibility);
-// pageshow re-sync: Firefox form restoration / bfcache can re-check the box
-// AFTER scripts run without firing 'change', desyncing toggle and body class.
-window.addEventListener('pageshow', syncDevVisibility);
-syncDevVisibility();
+// The global Dev switch is gone: every answer carries its own "How I got this
+// answer" panel. ?dev=1 still asks the backend for the raw (un-humanized)
+// results and the reasoning trace, and opens the raw log by default.
+const DEV = new URLSearchParams(location.search).get('dev') === '1';
 
 const newChatBtn = document.getElementById('newchat-btn');
 const examplesBtn = document.getElementById('examples-btn');
@@ -922,9 +987,10 @@ let isStreaming = false;
 let conversationHistory = [];  // [{role: "user"|"assistant", content: "..."}]
 let activeController = null;    // abort handle for the in-flight request
 let lastQuestion = '';          // backs the Retry affordance
+let turnCount = 0;              // Q1/A1 numbering
 
 // Single source of truth for example prompts: [label, question]. Rendered into
-// both the starter screen (grouped) and the Examples tray (flat), so they can't drift.
+// both the landing (grouped) and the Examples tray (flat), so they can't drift.
 // Defaults render immediately and whenever /api/config is unreachable (edge
 // 403, offline, slow start); the pack's branding overrides them on load.
 const DEFAULT_STARTER_GROUPS = [
@@ -945,10 +1011,147 @@ const DEFAULT_STARTER_GROUPS = [
 ];
 let STARTER_GROUPS = DEFAULT_STARTER_GROUPS;
 
+// ── Small DOM helpers ────────────────────────────────────────
+function el(tag, className, text) {
+  const n = document.createElement(tag);
+  if (className) n.className = className;
+  if (text !== undefined && text !== null) n.textContent = text;
+  return n;
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function icon(d, size = 12) {
+  const s = document.createElementNS(SVG_NS, 'svg');
+  s.setAttribute('width', size);
+  s.setAttribute('height', size);
+  s.setAttribute('viewBox', '0 0 12 12');
+  s.setAttribute('aria-hidden', 'true');
+  const p = document.createElementNS(SVG_NS, 'path');
+  p.setAttribute('d', d);
+  p.setAttribute('fill', 'none');
+  p.setAttribute('stroke', 'currentColor');
+  p.setAttribute('stroke-width', '1.5');
+  s.appendChild(p);
+  return s;
+}
+const CHEVRON = 'M4 2l4 4-4 4';
+const ARROW = 'M1.5 6h8M6.5 3 9.5 6l-3 3';
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// ── Theme ────────────────────────────────────────────────────
+const themeBtn = document.getElementById('theme-btn');
+const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+function effectiveTheme() {
+  const t = document.documentElement.dataset.theme;
+  if (t === 'light' || t === 'dark') return t;
+  return darkQuery && darkQuery.matches ? 'dark' : 'light';
+}
+function syncThemeButton() {
+  const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+  themeBtn.setAttribute('aria-label', `Switch to ${next} theme`);
+}
+themeBtn.addEventListener('click', () => {
+  const next = effectiveTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('lou-theme', next); } catch (e) {}
+  syncThemeButton();
+  redrawCharts();
+});
+if (darkQuery && darkQuery.addEventListener) {
+  darkQuery.addEventListener('change', () => { syncThemeButton(); redrawCharts(); });
+}
+syncThemeButton();
+
+// Charts read their colors from the tokens when built, so a theme change
+// rebuilds each one from its stored constructor.
+const liveCharts = [];
+function redrawCharts() {
+  for (const entry of liveCharts) {
+    try {
+      if (entry.chart) entry.chart.destroy();
+      entry.chart = entry.build();
+    } catch (e) {
+      console.warn('Chart redraw skipped:', e && e.message ? e.message : e);
+    }
+  }
+}
+
+// ── Landing wave (ported from raylytics.io's split.js) ───────
+// 80 points down a vertical edge at 15% of the width, moved by three summed
+// sines and pulled toward the pointer, then written as the clip-path of the
+// second color. Runs only while the landing is on screen; a reduced-motion
+// visitor gets the resting shape.
+(function initWave() {
+  const hero = document.getElementById('hero');
+  const right = document.getElementById('wave-r');
+  if (!hero || !right) return;
+  const N = 80, BASE = 0.15;
+  const shape = (y, t) => (BASE + Math.sin(y * 4.0 + t * 0.8) * 0.03
+    + Math.sin(y * 7.0 - t * 1.2) * 0.015
+    + Math.sin(y * 13.0 + t * 0.5) * 0.008) * 100;
+  // Start from a moment of the wave rather than a straight edge: it is the
+  // first paint, the reduced-motion view, and what a background tab (which
+  // runs no animation frames) keeps showing.
+  const T_REST = 2.2;
+  const pts = Array.from({ length: N }, (_, i) => ({ x: shape(i / (N - 1), T_REST), vx: 0 }));
+  let mouseX = 0.5, mouseY = 0.5, present = false, visible = true, raf = 0;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const t0 = performance.now() - T_REST * 1000;
+
+  const write = () => {
+    let path = '';
+    for (let i = 0; i < N; i++) path += `${pts[i].x.toFixed(2)}% ${(i / (N - 1) * 100).toFixed(2)}%, `;
+    right.style.clipPath = `polygon(${path}100% 100%, 100% 0%)`;
+  };
+  const step = (now) => {
+    raf = 0;
+    const t = (now - t0) / 1000;
+    for (let i = 0; i < N; i++) {
+      const y = i / (N - 1);
+      let target = shape(y, t);
+      if (present) {
+        const reach = Math.exp(-Math.pow((y - mouseY) / 0.4, 2));
+        target += (mouseX - BASE) * reach * 0.85 * 100;
+      }
+      pts[i].vx = (pts[i].vx + (target - pts[i].x) * 0.06) * 0.88;
+      pts[i].x += pts[i].vx;
+    }
+    write();
+    schedule();
+  };
+  const schedule = () => {
+    if (!raf && visible && !reduce && !document.hidden && startersEl.style.display !== 'none') {
+      raf = requestAnimationFrame(step);
+    }
+  };
+  hero.addEventListener('pointermove', (e) => {
+    const r = hero.getBoundingClientRect();
+    mouseX = (e.clientX - r.left) / r.width;
+    mouseY = (e.clientY - r.top) / r.height;
+    present = true;
+  });
+  hero.addEventListener('pointerleave', () => { present = false; });
+  if ('IntersectionObserver' in window) {
+    new IntersectionObserver((entries) => {
+      visible = entries[0].isIntersecting;
+      schedule();
+    }).observe(hero);
+  }
+  document.addEventListener('visibilitychange', schedule);
+  window.__louWave = { resume: schedule };
+  write();
+  schedule();
+})();
+
+// ── Starters ─────────────────────────────────────────────────
 function chipButton(label, question) {
-  const b = document.createElement('button');
+  const b = el('button', 'q-link');
   b.type = 'button';
-  b.textContent = label;
+  b.appendChild(el('span', null, label));
+  b.appendChild(icon(ARROW, 14));
   b.addEventListener('click', () => askQuestion(question));
   return b;
 }
@@ -960,22 +1163,30 @@ function renderChips() {
   // again once the pack's branding arrives.
   groupsEl.replaceChildren();
   trayEl.replaceChildren();
-  for (const group of STARTER_GROUPS) {
-    const groupEl = document.createElement('div');
-    groupEl.className = 'chip-group';
-    const label = document.createElement('span');
-    label.className = 'chip-group-label';
-    label.textContent = group.label;
-    const chips = document.createElement('div');
-    chips.className = 'chips';
+  STARTER_GROUPS.forEach((group, gi) => {
+    const groupEl = el('div', 'chip-group');
+    groupEl.appendChild(el('span', 'chip-group-label mono-label',
+      `${String(gi + 1).padStart(2, '0')}  ${group.label}`));
     for (const [lbl, q] of group.chips) {
-      chips.appendChild(chipButton(lbl, q));
+      groupEl.appendChild(chipButton(lbl, q));
       trayEl.appendChild(chipButton(lbl, q));  // tray shows the full set, flat
     }
-    groupEl.append(label, chips);
     groupsEl.appendChild(groupEl);
+  });
+}
+
+// The question box lives inline on the landing and docks at the bottom once
+// a conversation starts.
+function placeInputBar(onLanding) {
+  if (onLanding) {
+    document.getElementById('landing-ask').appendChild(inputBar);
+    inputBar.classList.add('inline');
+  } else {
+    document.body.appendChild(inputBar);
+    inputBar.classList.remove('inline');
   }
 }
+placeInputBar(true);
 
 function askQuestion(q) {
   if (isStreaming) return;
@@ -990,9 +1201,12 @@ function handleSubmit(e) {
   const q = questionEl.value.trim();
   if (!q) return;
 
-  startersEl.style.display = 'none';
+  if (startersEl.style.display !== 'none') {
+    startersEl.style.display = 'none';
+    placeInputBar(false);
+  }
   newChatBtn.hidden = false;
-  examplesBtn.hidden = false;  // guidance stays reachable after the opening chips are gone
+  examplesBtn.hidden = false;  // guidance stays reachable after the landing is gone
   hideExamples();
   addUserMessage(q);
   questionEl.value = '';
@@ -1018,23 +1232,26 @@ function stopStreaming() {
 }
 
 function newChat() {
-  // Clear the conversation and return to the starter screen (which doubles as
-  // the "what can I ask" help surface once the opening chips have been used).
+  // Clear the conversation and return to the landing (which doubles as the
+  // "what can I ask" help surface once the opening chips have been used).
   // Guard the wipe: it's destructive and there's no persistence to recover from.
   const hasConversation = messagesEl.querySelector('.message');
-  if (hasConversation && !confirm('Start a new chat? This clears the current conversation.')) return;
+  if (hasConversation && !confirm('Start a new question? This clears the current conversation.')) return;
   if (isStreaming) stopStreaming();
   conversationHistory = [];
-  messagesEl.querySelectorAll('.message').forEach(el => el.remove());
+  turnCount = 0;
+  messagesEl.querySelectorAll('.message').forEach(n => n.remove());
+  for (const entry of liveCharts.splice(0)) {
+    try { if (entry.chart) entry.chart.destroy(); } catch (e) {}
+  }
   startersEl.style.display = '';
+  placeInputBar(true);
+  messagesEl.scrollTop = 0;
   newChatBtn.hidden = true;
-  examplesBtn.hidden = true;  // the starter hero already shows the examples
+  examplesBtn.hidden = true;  // the landing already shows the examples
   hideExamples();
+  if (window.__louWave) window.__louWave.resume();
   questionEl.focus();
-}
-
-function toggleAbout(el) {
-  el.closest('.about-wrapper').classList.toggle('open');
 }
 
 function resetAskButton() {
@@ -1044,9 +1261,11 @@ function resetAskButton() {
 }
 
 function addUserMessage(text) {
-  const div = document.createElement('div');
-  div.className = 'message user';
-  div.textContent = text;
+  turnCount += 1;
+  const div = el('section', 'message user');
+  div.setAttribute('aria-label', `Question ${turnCount}`);
+  div.appendChild(el('span', 'cell-label', `Q${turnCount}`));
+  div.appendChild(el('h2', 'question-text', text));
   messagesEl.appendChild(div);
   scrollBottom();
 }
@@ -1055,9 +1274,336 @@ function scrollBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
+// ── Formatting ───────────────────────────────────────────────
+function fmtMoney(v, compact) {
+  const a = Math.abs(v), s = v < 0 ? '-' : '';
+  if (compact) {
+    if (a >= 1e9) return `${s}$${(a / 1e9).toFixed(1)}B`;
+    if (a >= 1e6) return `${s}$${(a / 1e6).toFixed(1)}M`;
+    if (a >= 1e4) return `${s}$${(a / 1e3).toFixed(0)}K`;
+  }
+  return `${s}$${a.toLocaleString(undefined, { maximumFractionDigits: a >= 1000 ? 0 : 2, minimumFractionDigits: a >= 1000 ? 0 : 2 })}`;
+}
+
+function fmtValue(v, kind, compact) {
+  if (v === null || v === undefined || v === '') return '';
+  if (typeof v !== 'number') return String(v);
+  if (kind === 'money') return fmtMoney(v, compact);
+  if (kind === 'date') return String(v);   // years must never read as "2,025"
+  if (kind === 'count') return Math.round(v).toLocaleString();
+  return v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function fmtMs(ms) {
+  if (ms === null || ms === undefined) return '—';
+  if (ms < 1) return '<1 ms';
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function fmtDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso + 'T00:00:00Z');
+  if (isNaN(d)) return iso;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+}
+
+// Tables a query reads, for the source line (CTE names excluded).
+function tablesIn(sql) {
+  if (!sql) return [];
+  const ctes = new Set();
+  for (const m of sql.matchAll(/(?:\bwith\s+(?:recursive\s+)?|,\s*)([a-z_][a-z0-9_]*)\s+as\s*\(/gi)) ctes.add(m[1].toLowerCase());
+  const out = [];
+  for (const m of sql.matchAll(/\b(?:from|join)\s+([a-z_][a-z0-9_.]*)/gi)) {
+    const t = m[1].toLowerCase();
+    if (!ctes.has(t) && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+// ── SQL highlighting ─────────────────────────────────────────
+// Tokens become text nodes inside spans: the SQL is model output, so it is
+// never parsed as markup.
+const SQL_KW = new Set(('select from where group by order having limit offset join left right inner '
+  + 'outer full cross on as and or not in is null like ilike between case when then else end with '
+  + 'union all distinct asc desc over partition cast exists true false interval filter nulls first last').split(' '));
+function highlightSql(sql) {
+  const pre = el('pre', 'sql-code');
+  const re = /(--[^\n]*)|('(?:[^']|'')*')|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_]*)|([\s\S])/g;
+  let m, plain = '';
+  const flush = () => { if (plain) { pre.appendChild(document.createTextNode(plain)); plain = ''; } };
+  while ((m = re.exec(sql))) {
+    let cls = null;
+    if (m[1]) cls = 'tk-comment';
+    else if (m[2]) cls = 'tk-str';
+    else if (m[3]) cls = 'tk-num';
+    else if (m[4]) {
+      if (SQL_KW.has(m[4].toLowerCase())) cls = 'tk-kw';
+      else if (sql[re.lastIndex] === '(') cls = 'tk-fn';
+    }
+    if (cls) { flush(); pre.appendChild(el('span', cls, m[0])); }
+    else plain += m[0];
+  }
+  flush();
+  return pre;
+}
+
+// ── Results table + CSV ──────────────────────────────────────
+const NUMERIC_KINDS = new Set(['money', 'count', 'number']);
+
+function buildTable(res, partialSet) {
+  const wrap = el('div', 'table-block');
+  const box = el('div', 'table-wrap');
+  const table = el('table', 'results');
+  const thead = el('thead');
+  const tbody = el('tbody');
+  const headRow = el('tr');
+  const cols = res.columns;
+  let sortCol = -1, sortDir = 'none';
+  const ths = [];
+
+  const renderBody = () => {
+    let rows = res.rows.slice();
+    if (sortCol >= 0) {
+      const numeric = NUMERIC_KINDS.has(cols[sortCol].kind);
+      rows.sort((a, b) => {
+        const x = a[sortCol], y = b[sortCol];
+        if (x === null || x === undefined) return 1;
+        if (y === null || y === undefined) return -1;
+        const c = numeric || (typeof x === 'number' && typeof y === 'number')
+          ? x - y : String(x).localeCompare(String(y), undefined, { numeric: true });
+        return sortDir === 'ascending' ? c : -c;
+      });
+    }
+    const frag = document.createDocumentFragment();
+    for (const r of rows) {
+      const tr = el('tr');
+      cols.forEach((c, i) => {
+        const td = el('td', NUMERIC_KINDS.has(c.kind) ? 'num' : null, fmtValue(r[i], c.kind, false));
+        if (c.kind === 'date' && partialSet.has(String(r[i]))) td.appendChild(el('span', 'tag-partial', 'partial'));
+        tr.appendChild(td);
+      });
+      frag.appendChild(tr);
+    }
+    tbody.replaceChildren(frag);
+    ths.forEach((th, i) => th.setAttribute('aria-sort', i === sortCol ? sortDir : 'none'));
+  };
+
+  cols.forEach((c, i) => {
+    const th = el('th', NUMERIC_KINDS.has(c.kind) ? 'num' : null);
+    th.setAttribute('scope', 'col');
+    const b = el('button', null, c.label || c.name);
+    b.type = 'button';
+    b.addEventListener('click', () => {
+      if (sortCol === i) sortDir = sortDir === 'ascending' ? 'descending' : 'ascending';
+      else { sortCol = i; sortDir = NUMERIC_KINDS.has(c.kind) ? 'descending' : 'ascending'; }
+      renderBody();
+    });
+    th.appendChild(b);
+    ths.push(th);
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.append(thead, tbody);
+  box.appendChild(table);
+  wrap.appendChild(box);
+  if (res.truncated) {
+    wrap.appendChild(el('p', 'table-note',
+      `Showing the first ${res.rows.length.toLocaleString()} of ${Number(res.total_rows).toLocaleString()} rows.`));
+  }
+  renderBody();
+  return wrap;
+}
+
+function csvCell(v) {
+  if (v === null || v === undefined) return '';
+  const s = String(v);
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadCsv(res, question) {
+  const lines = [res.columns.map(c => csvCell(c.label || c.name)).join(',')];
+  for (const r of res.rows) lines.push(r.map(csvCell).join(','));
+  // BOM so Excel opens UTF-8 (accents, the ’ in agency names) correctly.
+  const blob = new Blob(['﻿' + lines.join('\r\n') + '\r\n'], { type: 'text/csv;charset=utf-8' });
+  const slug = (question || 'lou-results').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'lou-results';
+  const a = el('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${slug}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+// ── Pipeline steps ───────────────────────────────────────────
+const STEP_NAMES = {
+  grounding: 'Match vocabulary',
+  generate_sql: 'Write SQL',
+  execute: 'Run query',
+  repair: 'Check and repair',
+  retrieve_docs: 'Find related legislation',
+  interpret: 'Draft the answer',
+  refine: 'Refine',
+};
+const TIER_LABELS = { openrouter: 'free · OpenRouter', paid: 'paid · Cerebras', free: 'free · Cerebras' };
+
+function stepView(ev) {
+  const d = ev.detail || {};
+  let status = ev.status === 'ok' ? 'done' : ev.status === 'fallback' ? 'switched provider' : ev.status;
+  let kind = ev.status === 'ok' ? 'ok' : ev.status;
+  let note = '';
+  const meta = [];
+  if (ev.model) meta.push(String(ev.model).replace(/^.*\//, '').replace(/:free$/, ''));
+  if (ev.tier) meta.push(TIER_LABELS[ev.tier] || ev.tier);
+  if (ev.tokens) meta.push(`${Number(ev.tokens).toLocaleString()} tokens`);
+
+  switch (ev.id) {
+    case 'grounding': {
+      const ms = d.matches || [];
+      if (ev.status === 'ok' && !ms.length) {
+        status = 'no matches'; kind = 'idle';
+        note = 'No category values matched the question’s words, so nothing was added to the prompt.';
+      } else if (ms.length) {
+        note = 'Matched ' + ms.slice(0, 4).map(m => `“${m.term}” → ${m.value}`).join('; ')
+          + (ms.length > 4 ? `; +${ms.length - 4} more` : '') + '.';
+      }
+      meta.push('value index');
+      break;
+    }
+    case 'generate_sql':
+      if (d.off_topic) note = 'The question is outside the data, so no query was run.';
+      else if (d.regenerated_after_error) note = `Rewritten after the first query failed (${d.error || 'error'}).`;
+      break;
+    case 'execute':
+      meta.unshift('DuckDB, read-only');
+      if (ev.rows !== null && ev.rows !== undefined) meta.push(`${Number(ev.rows).toLocaleString()} rows`);
+      break;
+    case 'repair': {
+      const outcome = { repaired: 'The repaired query found rows and replaced the original.',
+        still_empty: 'The repaired query also came back empty; the original was kept.',
+        unchanged: 'The model kept the original query.',
+        error: 'The repair attempt failed; the original result was kept.' }[d.outcome] || '';
+      note = [d.hint, outcome].filter(Boolean).join(' ');
+      if (d.kept) status = ev.status === 'fallback' ? 'repaired · switched provider' : 'repaired';
+      break;
+    }
+    case 'retrieve_docs': {
+      const f = d.file_numbers || [];
+      note = f.length ? `${f.length} document${f.length === 1 ? '' : 's'}: ${f.join(', ')}.`
+        : 'Nothing cleared the relevance threshold.';
+      meta.push('local BM25 over city documents');
+      break;
+    }
+    case 'interpret':
+      if (d.empty_result) note = 'Explained why the query returned nothing.';
+      else if (d.retried) note = 'The first stream failed mid-answer and was re-run on the backup provider.';
+      break;
+    case 'refine':
+      if (d.served === 'draft') note = 'The refine pass failed, so the draft was served.';
+      else if (d.served === 'partial') note = 'The refine pass stopped part-way; the partial text was served.';
+      break;
+  }
+  if (ev.status === 'failed' && d.error && !note) note = `Failed: ${d.error}.`;
+  return { name: STEP_NAMES[ev.id] || ev.id, status, kind, meta: meta.join(' · '), note, time: fmtMs(ev.ms) };
+}
+
+function stepItem(n, v) {
+  const li = el('li', v.kind);
+  li.appendChild(el('span', 'step-n', String(n).padStart(2, '0')));
+  const mark = el('span', `step-mark ${v.kind}`);
+  mark.setAttribute('aria-hidden', 'true');
+  li.appendChild(mark);
+  const main = el('div', 'step-main');
+  const head = el('div', 'step-head');
+  head.append(el('span', 'step-name', v.name), el('span', 'step-status', v.status));
+  main.appendChild(head);
+  if (v.meta) main.appendChild(el('div', 'step-meta', v.meta));
+  if (v.note) main.appendChild(el('div', 'step-note', v.note));
+  li.appendChild(main);
+  li.appendChild(el('span', 'step-time', v.time));
+  return li;
+}
+
+// ── The answer card ──────────────────────────────────────────
+// Slots are created up front, in reading order, so events can arrive in any
+// order and still land in the right place; empty slots are CSS-hidden.
+function buildCard(agentDiv) {
+  const slot = (tag, cls) => {
+    const n = el(tag, cls);
+    n.dataset.slot = '';
+    agentDiv.appendChild(n);
+    return n;
+  };
+  const card = {
+    headline: slot('div', 'headline'),
+    figure: slot('div', 'figure'),
+    prose: slot('div', 'prose'),
+    notices: slot('div', 'notices'),
+    source: slot('div', 'source-line'),
+    footnotes: slot('div', 'footnotes'),
+    actions: el('div', 'actions'),
+    dataView: el('div', 'data-view'),
+    work: el('details', 'work'),
+  };
+  card.dataGroup = el('div');
+  card.msgGroup = el('div');
+  card.actions.append(card.dataGroup, el('span', 'spacer'), card.msgGroup);
+  card.dataView.hidden = true;
+  agentDiv.append(card.actions, card.dataView, card.work);
+
+  // "How I got this answer": steps, SQL, the table, then the raw event log.
+  const work = card.work;
+  work.hidden = true;
+  const sum = el('summary');
+  sum.appendChild(icon(CHEVRON));
+  sum.lastChild.classList.add('chev');
+  sum.appendChild(el('span', 'work-title', 'How I got this answer'));
+  card.workMeta = el('span', 'work-meta');
+  sum.appendChild(card.workMeta);
+  work.appendChild(sum);
+  const body = el('div', 'work-body');
+  card.steps = el('ol', 'steps');
+  card.steps.setAttribute('aria-label', 'Pipeline steps');
+  card.sqlSection = el('div', 'work-section');
+  card.tableSection = el('div', 'work-section');
+  card.raw = el('details', 'raw');
+  const rawSum = el('summary');
+  rawSum.appendChild(icon(CHEVRON));
+  rawSum.lastChild.classList.add('chev');
+  card.rawCount = el('span', null, 'Raw event log');
+  rawSum.appendChild(card.rawCount);
+  card.raw.appendChild(rawSum);
+  card.rawBody = el('div', 'raw-body');
+  card.raw.appendChild(card.rawBody);
+  card.raw.open = DEV;
+  body.append(card.steps, card.sqlSection, card.tableSection, card.raw);
+  work.appendChild(body);
+  card.stepEvents = [];
+  card.rawEvents = 0;
+  return card;
+}
+
+function addRaw(card, node) {
+  card.rawBody.appendChild(node);
+  card.rawEvents += 1;
+  card.rawCount.textContent = `Raw event log (${card.rawEvents} events)`;
+  card.work.hidden = false;
+}
+
+function updateWorkMeta(card) {
+  const sum = (ids) => card.stepEvents.filter(s => ids.includes(s.id)).reduce((a, s) => a + (s.ms || 0), 0);
+  const parts = [];
+  if (card.stepEvents.length) parts.push(`${card.stepEvents.length} steps`);
+  if (card.stepEvents.some(s => s.id === 'generate_sql')) parts.push(`SQL ${fmtMs(sum(['generate_sql', 'repair']))}`);
+  if (card.stepEvents.some(s => s.id === 'execute')) parts.push(`query ${fmtMs(sum(['execute']))}`);
+  if (card.stepEvents.some(s => s.id === 'interpret')) parts.push(`answer ${fmtMs(sum(['interpret', 'refine']))}`);
+  card.workMeta.textContent = parts.join(' · ');
+}
+
 // Build the report-a-bad-answer email, prefilled with whatever conversation
 // detail this answer produced. `results` always arrives from the backend
-// (humanized when dev mode is off); `sql` and `debug` are dev-view-only.
+// (humanized unless ?dev=1); `sql` and `debug` too.
 const REPORT_EMAIL = 'dev@raylytics.io';
 
 function buildReportBody(report, interpText, scale, extras = true) {
@@ -1138,15 +1684,16 @@ async function streamAnswer(question, opts = {}) {
   submitBtn.textContent = 'Stop';
   submitBtn.classList.add('stop');
   submitBtn.disabled = false;
-  const devMode = devModeEl.checked;
+  const devMode = DEV;
 
-  const agentDiv = document.createElement('div');
-  agentDiv.className = 'message agent';
+  const agentDiv = el('section', 'message agent');
+  agentDiv.setAttribute('aria-label', `Answer ${turnCount}`);
+  agentDiv.appendChild(el('span', 'cell-label', `A${turnCount}`));
   messagesEl.appendChild(agentDiv);
+  const card = buildCard(agentDiv);
 
   // Typing indicator
-  const typing = document.createElement('div');
-  typing.className = 'typing';
+  const typing = el('div', 'typing');
   typing.innerHTML = '<span></span><span></span><span></span>';
   agentDiv.appendChild(typing);
   scrollBottom();
@@ -1154,10 +1701,11 @@ async function streamAnswer(question, opts = {}) {
   let interpBlock = null;
   let statusLine = null;  // rotating progress line shown while waiting
   let interpText = '';  // collect full interpretation for history
-  // Everything the report-answer email can include — the backend streams all
-  // detail events (sql/results/log/debug) regardless of the Dev toggle now,
-  // so every answer's report carries full detail.
+  // Everything the report-answer email can include.
   const report = { question, sql: '', results: '', rows: null, debug: [], sources: '' };
+  // Per-turn state the card pieces share: the partial periods (from the chart
+  // event) tag table rows; the structured results feed the table and the CSV.
+  const turn = { partial: new Set(), dataThrough: null, results: null, tablesDrawn: false };
 
   // Send prior history (not including current question) for context
   const historyToSend = conversationHistory.slice(-6);
@@ -1187,11 +1735,6 @@ async function streamAnswer(question, opts = {}) {
   // stream that supersedes us flips this false, so our unwind stays hands-off.
   let ownsLifecycle = true;
 
-  // "Lou is processing" — shown from submit until the stream ends, in BOTH
-  // modes. Deliberately independent of statusLine/typing, which are torn down
-  // as soon as the first content arrives: interpreting and refining happen
-  // after the results table renders, and that is the stretch where the answer
-  // looks complete but is still being written.
   // Chart constructors queued during the stream, run once the turn is over.
   // Drawing mid-stream put a half-laid-out chart on screen: the card is still
   // growing as blocks arrive, so the canvas sized itself against a layout that
@@ -1202,24 +1745,21 @@ async function streamAnswer(question, opts = {}) {
     while (pendingCharts.length) {
       const build = pendingCharts.shift();
       try {
-        const chart = build();
-        const box = chart.canvas.parentNode;
+        const box = build.box;
         // All in one task, deliberately: the browser paints only after this
-        // returns, so the pre-resize canvas is never on screen. The earlier
-        // version split this across requestAnimationFrame callbacks, which a
-        // hidden or occluded tab never runs — a turn finishing while the user
-        // was in another tab came back to 360px of space around an invisible
-        // chart, unscrolled. Reading offsetHeight forces the layout that the
-        // display change invalidated, so resize() measures the real box.
+        // returns, so the pre-resize canvas is never on screen. A split across
+        // requestAnimationFrame callbacks never runs in a hidden or occluded
+        // tab — a turn finishing while the user was in another tab came back
+        // to an empty box around an invisible chart. Reading offsetHeight
+        // forces the layout that the display change invalidated, so the chart
+        // measures the real box.
         box.classList.remove('pending');
         void box.offsetHeight;
-        try { chart.resize(); } catch (e) {}
-        // The box went from display:none to 360px ABOVE the interpretation, the
-        // error text, and any "Try again" button, so the turn has to be
-        // re-pinned. The stream's own scroll only runs on the interpretation
-        // path: after an error, or after Stop, nothing re-scrolled and the
-        // actionable control ended up below the fold (Chrome and Firefox paper
-        // over it with scroll anchoring; Safari has none).
+        const entry = { build, chart: build() };
+        liveCharts.push(entry);
+        // The box went from display:none to full height ABOVE the
+        // interpretation, the error text, and any "Try again" button, so the
+        // turn has to be re-pinned (Safari has no scroll anchoring).
         scrollBottom();
       } catch (e) {
         console.warn('Chart render skipped:', e && e.message ? e.message : e);
@@ -1227,8 +1767,12 @@ async function streamAnswer(question, opts = {}) {
     }
   };
 
-  let processingLine = document.createElement('div');
-  processingLine.className = 'processing-line';
+  // "Lou is processing" — shown from submit until the stream ends. Deliberately
+  // independent of statusLine/typing, which are torn down as soon as the first
+  // content arrives: interpreting and refining happen after the chart renders,
+  // and that is the stretch where the answer looks complete but is still
+  // being written.
+  let processingLine = el('div', 'processing-line');
   processingLine.setAttribute('role', 'status');
   processingLine.setAttribute('aria-live', 'polite');
   processingLine.textContent = 'Lou is processing…';
@@ -1237,8 +1781,8 @@ async function streamAnswer(question, opts = {}) {
   const setProcessing = (text) => {
     if (!processingLine) return;
     processingLine.textContent = `Lou is processing… ${text}`.trim();
-    // Re-append so it stays the last thing in the turn as results, the chart
-    // and the interpretation are appended above it.
+    // Re-append so it stays the last thing in the turn as the card fills in
+    // above it.
     agentDiv.appendChild(processingLine);
   };
 
@@ -1267,22 +1811,76 @@ async function streamAnswer(question, opts = {}) {
 
   const showError = (text, opts = {}) => {
     clearWaiting();
-    const errDiv = document.createElement('div');
-    errDiv.className = opts.info ? 'info' : 'error';
-    errDiv.textContent = text;
+    const errDiv = el('div', opts.info ? 'info' : 'error', text);
     if (opts.retry) {
-      const btn = document.createElement('button');
+      const btn = el('button', 'retry-btn', 'Try again');
       btn.type = 'button';
-      btn.className = 'retry-btn';
-      btn.textContent = 'Try again';
       // Drop the failed attempt so a successful retry reads as one clean answer,
       // not "error, then answer" stacked in the transcript.
       btn.onclick = () => { agentDiv.remove(); streamAnswer(question, { isRetry: true }); };
       errDiv.appendChild(document.createElement('br'));
       errDiv.appendChild(btn);
     }
-    agentDiv.appendChild(errDiv);
+    card.notices.appendChild(errDiv);
     scrollBottom();
+  };
+
+  // The table appears twice: behind "View data" in the card, and in the
+  // panel. Structured results get a real table and a CSV; an answer cached
+  // before the structured fields existed falls back to its text table.
+  const drawTables = () => {
+    const res = turn.results;
+    if (!res || turn.tablesDrawn) return;
+    turn.tablesDrawn = true;
+    const structured = Array.isArray(res.columns) && Array.isArray(res.rows) && res.columns.length;
+    const make = () => structured ? buildTable(res, turn.partial) : el('pre', 'results-text', res.content || '');
+    const count = Number(res.total_rows ?? res.row_count ?? 0);
+    if (count > 0) {
+      const toggle = el('button', 'btn strong');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.appendChild(icon(CHEVRON));
+      toggle.lastChild.classList.add('chev');
+      toggle.appendChild(document.createTextNode(`View data (${count.toLocaleString()} row${count === 1 ? '' : 's'})`));
+      const viewId = `data-${turnCount}-${Date.now()}`;
+      card.dataView.id = viewId;
+      toggle.setAttribute('aria-controls', viewId);
+      toggle.addEventListener('click', () => {
+        const open = card.dataView.hidden;
+        card.dataView.hidden = !open;
+        toggle.setAttribute('aria-expanded', String(open));
+        toggle.querySelector('.chev').style.transform = open ? 'rotate(90deg)' : '';
+      });
+      card.dataGroup.appendChild(toggle);
+      card.dataView.appendChild(make());
+      if (structured) {
+        const csv = el('button', 'btn', 'Download CSV');
+        csv.type = 'button';
+        csv.addEventListener('click', () => downloadCsv(res, question));
+        card.dataGroup.appendChild(csv);
+      }
+    }
+    const head = el('div', 'work-section-head');
+    head.appendChild(el('span', 'mono-label', `Results · ${count.toLocaleString()} row${count === 1 ? '' : 's'}`));
+    if (structured && count > 0) {
+      const csv2 = el('button', 'btn', 'Download CSV');
+      csv2.type = 'button';
+      csv2.addEventListener('click', () => downloadCsv(res, question));
+      head.appendChild(csv2);
+    }
+    card.tableSection.replaceChildren(head);
+    if (count > 0) card.tableSection.appendChild(make());
+    card.work.hidden = false;
+  };
+
+  const drawSourceLine = () => {
+    const tables = tablesIn(report.sql);
+    if (!tables.length && report.rows === null) return;
+    const parts = [];
+    if (tables.length) parts.push(tables.join(', '));
+    if (report.rows !== null) parts.push(`${Number(report.rows).toLocaleString()} rows`);
+    if (turn.dataThrough) parts.push(`data through ${fmtDate(turn.dataThrough)}`);
+    card.source.textContent = `SOURCE  ${parts.join(' · ')}`;
   };
 
   try {
@@ -1336,18 +1934,14 @@ async function streamAnswer(question, opts = {}) {
         try { event = JSON.parse(line.slice(6)); } catch { continue; }
 
         // `status` events drive the progress line during the initial wait and
-        // keep the typing dots alive. Once any content has arrived (results,
-        // interpretation, ...) the waiting state is torn down, so ignore later
-        // status events (e.g. the backend's "Summarizing…" sent after results) —
-        // re-inserting relative to the now-removed typing node would throw.
+        // keep the typing dots alive. Once any content has arrived the waiting
+        // state is torn down, so later status events (e.g. the backend's
+        // "Summarizing…" sent after results) only update the persistent line.
         if (event.type === 'status') {
-          // The persistent line tracks every phase, in both modes — including
-          // the post-results ones the block below deliberately ignores.
           setProcessing(event.content);
-          if (!devMode && !receivedAnyEvent) {
+          if (!receivedAnyEvent) {
             if (!statusLine) {
-              statusLine = document.createElement('div');
-              statusLine.className = 'status-line';
+              statusLine = el('div', 'status-line');
               if (typing.parentNode === agentDiv) agentDiv.insertBefore(statusLine, typing);
               else agentDiv.appendChild(statusLine);
             }
@@ -1357,155 +1951,205 @@ async function streamAnswer(question, opts = {}) {
           continue;
         }
 
-        // The backend now streams dev events (log/sql/debug/usage/reasoning)
-        // to everyone so the Dev toggle works retroactively. For a non-dev
-        // viewer those blocks are CSS-hidden, so they must NOT tear down the
-        // typing indicator / status line — only visibly-rendered content may.
-        // NOTE: 'results' is CSS-hidden for non-dev viewers too, so it is
-        // deliberately NOT in this list — the "Summarizing…" status line must
-        // survive through it until the (visible) interpretation streams.
-        const visibleContent = devMode
-          || ['chart', 'interpretation', 'error', 'info'].includes(event.type);
+        // Only content a reader sees on the card ends the waiting state; the
+        // panel's contents (steps, SQL, logs) arrive collapsed and must not
+        // tear down the typing indicator / status line.
+        const visibleContent = ['chart', 'headline', 'interpretation', 'error', 'info'].includes(event.type);
         if (visibleContent) {
           receivedAnyEvent = true;
           clearWaiting();
         }
 
         if (event.type === 'reasoning') {
-          const rb = document.createElement('div');
-          rb.className = 'reasoning-block';
-          rb.innerHTML = '<span class="label">Query Reasoning</span>';
-          const parts = event.content.split('\n');
-          parts.forEach((part, i) => {
-            rb.appendChild(document.createTextNode(part));
-            if (i < parts.length - 1) rb.appendChild(document.createElement('br'));
-          });
-          agentDiv.appendChild(rb);
+          const rb = el('div', 'reasoning-block');
+          rb.appendChild(el('span', 'label', 'Query reasoning'));
+          rb.appendChild(document.createTextNode(event.content));
+          addRaw(card, rb);
         }
 
         else if (event.type === 'sql') {
           report.sql = event.content;
-          const sqlBlock = document.createElement('div');
-          sqlBlock.className = 'sql-block';
-          sqlBlock.innerHTML = '<span class="label">SQL</span>';
-          sqlBlock.appendChild(document.createTextNode(event.content));
-          agentDiv.appendChild(sqlBlock);
+          // The panel shows the query the answer is built on (a repair or a
+          // regenerate sends a newer one); every version stays in the raw log.
+          const sec = card.sqlSection;
+          sec.replaceChildren(el('span', 'mono-label', 'SQL'), highlightSql(event.content));
+          const raw = el('div', 'raw-sql');
+          raw.appendChild(el('span', 'label', 'SQL'));
+          raw.appendChild(document.createTextNode(event.content));
+          addRaw(card, raw);
+        }
+
+        else if (event.type === 'step') {
+          card.stepEvents.push(event);
+          card.steps.appendChild(stepItem(card.stepEvents.length, stepView(event)));
+          updateWorkMeta(card);
+          card.work.hidden = false;
         }
 
         else if (event.type === 'results') {
           report.results = event.content;
-          report.rows = event.row_count;
-          const resultsBlock = document.createElement('div');
-          resultsBlock.className = 'results-block';
-          // Non-dev asks carry humanized (prose-labeled) results, not the raw
-          // table — label the difference for retroactive dev-view inspection.
-          // Absent flag (cache entries persisted before the flag existed) means
-          // humanized: only non-dev responses are ever cached.
-          const resultsLabel = event.humanized !== false
-            ? `Results (${event.row_count} rows, humanized labels)`
-            : `Results (${event.row_count} rows)`;
-          resultsBlock.innerHTML = `<span class="label">${resultsLabel}</span>`;
-          resultsBlock.appendChild(document.createTextNode(event.content));
-          agentDiv.appendChild(resultsBlock);
+          report.rows = event.total_rows ?? event.row_count;
+          turn.results = event;
+          drawSourceLine();
         }
 
         else if (event.type === 'chart') {
           // Isolate chart rendering. A failure here — Chart.js blocked by an
-          // ad/privacy blocker (so `Chart` is undefined), an offline CDN, or a
-          // render throw — must NOT bubble to the stream's outer catch, which
-          // would abort the read loop and drop the interpretation the backend
-          // streams AFTER the chart. A missing chart is fine; a lost answer is not.
+          // ad/privacy blocker (so `Chart` is undefined), or a render throw —
+          // must NOT bubble to the stream's outer catch, which would abort the
+          // read loop and drop the interpretation the backend streams AFTER
+          // the chart. A missing chart is fine; a lost answer is not.
           let chartDiv = null;
           try {
           if (typeof Chart === 'undefined') throw new Error('Chart.js unavailable');
-          chartDiv = document.createElement('div');
-          // `pending` = display:none, so the slot holds its place in the turn's
-          // order without showing an empty box while the answer is still being
-          // written. The chart itself is drawn once the turn ends.
-          chartDiv.className = 'chart-block pending';
-          const canvas = document.createElement('canvas');
+          const partial = new Set((event.partial_labels || []).map(String));
+          partial.forEach(p => turn.partial.add(p));
+          if (event.data_through) turn.dataThrough = event.data_through;
+          chartDiv = el('div', 'chart-box pending');
+          const canvas = el('canvas');
           // Text alternative for screen readers (the canvas itself is opaque to
           // them): include the values, not just the labels, so the data is conveyed.
           canvas.setAttribute('role', 'img');
           const pairs = event.labels.slice(0, 12).map((l, i) => {
             const v = event.values[i];
-            return `${l}: ${typeof v === 'number' ? v.toLocaleString() : v}`;
+            return `${l}${partial.has(String(l)) ? ' (partial)' : ''}: ${typeof v === 'number' ? v.toLocaleString() : v}`;
           });
           canvas.setAttribute('aria-label', `${event.title || 'Chart'}. ${pairs.join('; ')}`);
           chartDiv.appendChild(canvas);
-          agentDiv.appendChild(chartDiv);
-          // Deliberate civic categorical scale, anchored on the brand blue.
-          // Distinguishable hues without the neon-violet AI-palette tells.
-          const colors = [
-            '#1a56db', '#0e7490', '#b45309', '#15803d', '#475569',
-            '#1e3a8a', '#0f766e', '#9a3412', '#4d7c0f', '#9d174d',
-            '#2563eb', '#0891b2', '#c2410c', '#166534', '#7c2d12'
-          ];
-          const bgColors = event.chart_type === 'pie'
-            ? colors.slice(0, event.labels.length)
-            : 'rgba(26, 86, 219, 0.7)';
-          const borderColors = event.chart_type === 'pie'
-            ? colors.slice(0, event.labels.length)
-            : '#1a56db';
-          // The y-axis title was set to the chart title verbatim, so the two
-          // overlapped in the corner of the box. The title states the measure
-          // and the y ticks carry the units, so the axis title added nothing.
-          pendingCharts.push(() => new Chart(canvas, {
-            type: event.chart_type,
-            data: {
-              labels: event.labels,
-              datasets: [{
-                label: event.title || 'Value',
-                data: event.values,
-                backgroundColor: bgColors,
-                borderColor: borderColors,
-                borderWidth: 1,
-              }]
-            },
-            options: {
-              responsive: true,
-              // No grow-in animation: the chart is revealed only once it is
-              // drawn, so an animation would just put a half-height chart on
-              // screen — the thing this deferral exists to avoid.
-              animation: false,
-              // The box has a fixed height, so the canvas fills it. With an
-              // aspect ratio instead, the canvas height came from its width —
-              // and the width came from the (shrink-to-fit) card, which was
-              // sized by the canvas. That loop left the chart stuck at 300x150.
-              maintainAspectRatio: false,
-              plugins: {
-                legend: { display: event.chart_type === 'pie' },
-                title: { display: !!event.title, text: event.title || '' },
+          card.figure.appendChild(chartDiv);
+          if (partial.size) {
+            const fy = /fiscal/i.test(event.label_axis || '') ? 'FY' : '';
+            const names = [...partial].map(p => `${fy}${p}`).join(', ');
+            const note = el('div', 'side-note');
+            note.appendChild(el('span', 'mono-label', 'Partial period'));
+            note.appendChild(el('span', null, event.data_through
+              ? `${names} runs through ${fmtDate(event.data_through)}, so it is not comparable with full years yet.`
+              : `${names} is year to date, so it is not comparable with full years yet.`));
+            card.figure.appendChild(note);
+          }
+          drawSourceLine();
+          const isPartial = (i) => partial.has(String(event.labels[i]));
+          // Colors come from the tokens at build time, so a theme switch can
+          // rebuild the chart (redrawCharts) in the new palette.
+          const build = () => {
+            const c = {
+              ink: cssVar('--ink'), ink2: cssVar('--ink-2'), rule: cssVar('--rule'), paper: cssVar('--paper'),
+              accent: cssVar('--accent'), warnMark: cssVar('--warn-mark'),
+            };
+            Chart.defaults.font.family = cssVar('--mono');
+            Chart.defaults.color = c.ink2;
+            const hatch = (() => {
+              const p = document.createElement('canvas');
+              p.width = p.height = 8;
+              const x = p.getContext('2d');
+              x.strokeStyle = c.warnMark;
+              x.lineWidth = 1.5;
+              x.beginPath(); x.moveTo(0, 8); x.lineTo(8, 0); x.stroke();
+              return x.createPattern(p, 'repeat');
+            })();
+            // Pie slices keep a categorical scale anchored on the accent.
+            const pieColors = [c.accent, c.warnMark, c.ink2, '#0e7490', '#b45309', '#15803d',
+              '#1e3a8a', '#0f766e', '#9a3412', '#4d7c0f', '#9d174d', '#2563eb', '#c2410c', '#166534'];
+            const line = event.chart_type === 'line';
+            const bar = event.chart_type === 'bar';
+            // A hatched band behind the partial period on a line chart.
+            const partialBand = {
+              id: 'louPartialBand',
+              beforeDatasetsDraw(chart) {
+                if (!line || !partial.size) return;
+                const first = event.labels.findIndex((l, i) => isPartial(i));
+                if (first < 0) return;
+                const xs = chart.scales.x;
+                const left = first > 0 ? (xs.getPixelForValue(first - 1) + xs.getPixelForValue(first)) / 2 : chart.chartArea.left;
+                const { top, bottom, right } = chart.chartArea;
+                const ctx = chart.ctx;
+                ctx.save();
+                ctx.globalAlpha = 0.35;
+                ctx.fillStyle = hatch;
+                ctx.fillRect(left, top, right - left, bottom - top);
+                ctx.restore();
               },
-              scales: event.chart_type === 'pie' ? {} : {
-                x: {
-                  title: { display: !!event.label_axis, text: event.label_axis || '' },
-                  ticks: {
-                    autoSkip: true,
-                    maxTicksLimit: 12,
-                    maxRotation: 45,
-                    minRotation: 0,
-                    // Payee and project names run long enough to collide with
-                    // each other and with the axis title even when rotated.
-                    callback: function(v) {
-                      const l = String(this.getLabelForValue(v));
-                      return l.length > 18 ? l.slice(0, 17) + '\u2026' : l;
+            };
+            return new Chart(canvas, {
+              type: event.chart_type,
+              plugins: [partialBand],
+              data: {
+                labels: event.labels,
+                datasets: [{
+                  label: event.title || 'Value',
+                  data: event.values,
+                  backgroundColor: event.chart_type === 'pie'
+                    ? pieColors.slice(0, event.labels.length)
+                    : bar ? event.labels.map((l, i) => isPartial(i) ? hatch : c.accent) : c.accent,
+                  borderColor: event.chart_type === 'pie'
+                    ? c.paper
+                    : bar ? event.labels.map((l, i) => isPartial(i) ? c.warnMark : c.accent) : c.accent,
+                  borderWidth: line ? 2.25 : 1,
+                  // Only the partial point gets a dot (hollow, in the warning color).
+                  pointRadius: line ? event.labels.map((l, i) => isPartial(i) ? 4 : 0) : undefined,
+                  pointHoverRadius: 5,
+                  pointBackgroundColor: line ? event.labels.map((l, i) => isPartial(i) ? c.paper : c.accent) : undefined,
+                  pointBorderColor: line ? event.labels.map((l, i) => isPartial(i) ? c.warnMark : c.accent) : undefined,
+                  pointBorderWidth: 2,
+                  segment: line ? {
+                    borderColor: (ctx) => isPartial(ctx.p1DataIndex) ? c.warnMark : undefined,
+                    borderDash: (ctx) => isPartial(ctx.p1DataIndex) ? [5, 4] : undefined,
+                  } : undefined,
+                }]
+              },
+              options: {
+                responsive: true,
+                // No grow-in animation: the chart is revealed only once it is
+                // drawn, so an animation would just put a half-height chart on
+                // screen — the thing this deferral exists to avoid.
+                animation: false,
+                // The box has a fixed height, so the canvas fills it.
+                maintainAspectRatio: false,
+                plugins: {
+                  legend: { display: event.chart_type === 'pie', labels: { color: c.ink2 } },
+                  title: { display: !!event.title, text: event.title || '', color: c.ink2, align: 'start', font: { weight: '500' } },
+                  tooltip: {
+                    callbacks: {
+                      afterLabel: (ctx) => isPartial(ctx.dataIndex) ? 'partial period' : '',
                     },
                   },
                 },
-                y: { title: { display: false }, beginAtZero: true, ticks: { callback: function(v) {
-                  // Count measures (e.g. "employees", "agencies") are plain
-                  // numbers, not dollars — only prefix $ for currency.
-                  const money = event.value_kind !== 'count';
-                  const p = money ? '$' : '';
-                  if (Math.abs(v) >= 1e9) return p + (v/1e9).toFixed(1) + 'B';
-                  if (Math.abs(v) >= 1e6) return p + (v/1e6).toFixed(1) + 'M';
-                  if (Math.abs(v) >= 1e3) return p + (v/1e3).toFixed(money ? 0 : 1) + 'K';
-                  return p + v.toLocaleString();
-                }}},
-              },
-            }
-          }));
+                scales: event.chart_type === 'pie' ? {} : {
+                  x: {
+                    grid: { display: false },
+                    border: { color: c.rule },
+                    title: { display: !!event.label_axis, text: event.label_axis || '', color: c.ink2 },
+                    ticks: {
+                      color: c.ink2,
+                      autoSkip: true,
+                      maxTicksLimit: 12,
+                      maxRotation: 45,
+                      minRotation: 0,
+                      // Payee and project names run long enough to collide with
+                      // each other and with the axis title even when rotated.
+                      callback: function(v) {
+                        const l = String(this.getLabelForValue(v));
+                        return l.length > 18 ? l.slice(0, 17) + '…' : l;
+                      },
+                    },
+                  },
+                  y: { title: { display: false }, beginAtZero: true, grid: { color: c.rule }, border: { display: false },
+                    ticks: { color: c.ink2, callback: function(v) {
+                    // Count measures (e.g. "employees", "agencies") are plain
+                    // numbers, not dollars — only prefix $ for currency.
+                    const money = event.value_kind !== 'count';
+                    const p = money ? '$' : '';
+                    if (Math.abs(v) >= 1e9) return p + (v/1e9).toFixed(1) + 'B';
+                    if (Math.abs(v) >= 1e6) return p + (v/1e6).toFixed(1) + 'M';
+                    if (Math.abs(v) >= 1e3) return p + (v/1e3).toFixed(money ? 0 : 1) + 'K';
+                    return p + v.toLocaleString();
+                  }}},
+                },
+              }
+            });
+          };
+          build.box = chartDiv;
+          pendingCharts.push(build);
           } catch (chartErr) {
             // Degrade to a chartless answer: drop any half-built chart box and
             // keep processing the rest of the stream (interpretation, sources).
@@ -1514,11 +2158,28 @@ async function streamAnswer(question, opts = {}) {
           }
         }
 
+        else if (event.type === 'headline') {
+          // Deterministic figure computed from the result (no LLM), so it
+          // cannot disagree with the table.
+          const h = card.headline;
+          h.replaceChildren();
+          const label = [event.label, event.partial_label ? 'latest complete year' : null].filter(Boolean).join(' · ');
+          h.appendChild(el('div', 'mono-label', label));
+          h.appendChild(el('div', 'headline-figure', fmtValue(event.value, event.value_kind, true)));
+          if (event.context) {
+            const ctx = el('p', 'headline-context');
+            String(event.context).split(' · ').forEach((part, i) => {
+              if (i) ctx.appendChild(document.createTextNode(' · '));
+              const text = i === 0 ? part.charAt(0).toUpperCase() + part.slice(1) : part;
+              ctx.appendChild(/partial|year to date/i.test(part) ? el('span', 'partial', text) : document.createTextNode(text));
+            });
+            h.appendChild(ctx);
+          }
+        }
+
         else if (event.type === 'interpretation') {
           if (!interpBlock) {
-            interpBlock = document.createElement('div');
-            interpBlock.className = 'interpretation';
-            agentDiv.appendChild(interpBlock);
+            interpBlock = card.prose;
           }
           interpText += event.content;
           // Convert newlines to <br> for readable formatting
@@ -1532,23 +2193,18 @@ async function streamAnswer(question, opts = {}) {
         }
 
         else if (event.type === 'sources') {
-          // Related legislation, rendered as a footer under the answer. Links
+          // Related legislation, rendered as footnotes under the answer. Links
           // are built with textContent + setAttribute rather than innerHTML:
           // titles and URLs come from a third-party API (Legistar), so they
           // are data, never markup.
           const items = event.items || [];
           if (items.length) {
             report.sources = items.map(s => `${s.file_no} ${s.url}`).join('\n');
-            const box = document.createElement('div');
-            box.className = 'sources-block';
-            const label = document.createElement('span');
-            label.className = 'label';
-            label.textContent = 'Related city legislation';
-            box.appendChild(label);
+            const box = card.footnotes;
+            box.replaceChildren(el('span', 'mono-label', 'Related city legislation'));
             items.forEach(s => {
-              const row = document.createElement('div');
-              row.className = 'source-row';
-              const a = document.createElement('a');
+              const row = el('div', 'source-row');
+              const a = el('a');
               a.setAttribute('href', s.url);
               a.setAttribute('target', '_blank');
               a.setAttribute('rel', 'noopener noreferrer');
@@ -1560,66 +2216,36 @@ async function streamAnswer(question, opts = {}) {
               ));
               box.appendChild(row);
             });
-            agentDiv.appendChild(box);
           }
         }
 
         else if (event.type === 'log') {
-          const lg = document.createElement('div');
-          lg.className = 'log-block';
-          lg.textContent = `> ${event.content}`;
-          agentDiv.appendChild(lg);
+          addRaw(card, el('div', 'log-block', `> ${event.content}`));
         }
 
         else if (event.type === 'debug') {
           report.debug.push(event.content);
-          const dbg = document.createElement('div');
-          dbg.className = 'debug-block';
-          dbg.textContent = event.content;
-          agentDiv.appendChild(dbg);
+          addRaw(card, el('div', 'debug-block', event.content));
         }
 
         else if (event.type === 'usage' && event.providers) {
           // One line per budget: OpenRouter's free allowance and Cerebras's
           // paid account are different limits and must not be summed.
-          const u = document.createElement('div');
-          u.className = 'debug-block';
-          u.style.borderColor = '#93c5fd';
-          u.style.background = '#eff6ff';
-          u.style.color = '#1e40af';
           const o = event.providers.openrouter || {}, c = event.providers.cerebras || {};
           const fmt = (n) => (n || 0).toLocaleString();
-          let free;
-          if (o.rpd) {
-            const pct = Math.min(100, Math.round((o.requests_today || 0) / o.rpd * 100));
-            const filled = Math.min(20, Math.round(pct / 5));
-            free = `${fmt(o.requests_today)}/${fmt(o.rpd)} requests today (${pct}%) [${'█'.repeat(filled)}${'░'.repeat(20 - filled)}] · limit ${o.rpm}/min`;
-          } else {
-            free = `${fmt(o.requests_today)} requests today (daily limit unknown)`;
-          }
-          u.innerHTML = `<b>This query:</b> ~${fmt(event.request_tokens)} tokens`
-            + ` | <b>Free (OpenRouter):</b> ${free} · ${fmt(o.tokens_today)} tokens`
-            // Cerebras: requests only. Its streamed refine reports no usage, and
-            // a chunk count (the whole answer in 1-2 chunks) is not a token figure.
-            + ` | <b>Paid (Cerebras):</b> ${fmt(c.requests_today)} requests today`;
-          agentDiv.appendChild(u);
+          const free = o.rpd
+            ? `${fmt(o.requests_today)}/${fmt(o.rpd)} requests today (${Math.min(100, Math.round((o.requests_today || 0) / o.rpd * 100))}%) · limit ${o.rpm}/min`
+            : `${fmt(o.requests_today)} requests today (daily limit unknown)`;
+          // Cerebras: requests only. Its streamed refine reports no usage, and
+          // a chunk count (the whole answer in 1-2 chunks) is not a token figure.
+          addRaw(card, el('div', 'debug-block',
+            `This query: ~${fmt(event.request_tokens)} tokens | Free (OpenRouter): ${free} · ${fmt(o.tokens_today)} tokens | Paid (Cerebras): ${fmt(c.requests_today)} requests today`));
         }
 
         else if (event.type === 'usage') {
           // Legacy shape: cached answers from before the per-provider split.
-          const u = document.createElement('div');
-          u.className = 'debug-block';
-          u.style.borderColor = '#93c5fd';
-          u.style.background = '#eff6ff';
-          u.style.color = '#1e40af';
-          const rpd = event.requests_today + event.rpd_remaining;
-          const rpm = event.rpm_used + event.rpm_remaining;
-          const filled = Math.min(20, Math.round(event.rpd_pct / 5));
-          const bar = `[${'█'.repeat(filled)}${'░'.repeat(20 - filled)}]`;
-          const tpd = event.tokens_limit || 1000000;
-          const tpd_pct = (event.tokens_today / tpd * 100).toFixed(1);
-          u.innerHTML = `<b>This query:</b> ~${event.request_tokens.toLocaleString()} tokens | <b>Today:</b> ${event.requests_today}/${rpd} requests (${event.rpd_pct}%) ${bar} | RPM: ${event.rpm_used}/${rpm} | Tokens: ${event.tokens_today.toLocaleString()}/${tpd.toLocaleString()} (${tpd_pct}%) — ${event.tokens_remaining.toLocaleString()} remaining (${event.local_prompt_tokens_today.toLocaleString()} prompt + ${event.local_completion_tokens_today.toLocaleString()} completion used)`;
-          agentDiv.appendChild(u);
+          addRaw(card, el('div', 'debug-block',
+            `This query: ~${(event.request_tokens || 0).toLocaleString()} tokens | Today: ${event.requests_today} requests`));
         }
 
         else if (event.type === 'error') {
@@ -1629,10 +2255,7 @@ async function streamAnswer(question, opts = {}) {
         }
 
         else if (event.type === 'info') {
-          const info = document.createElement('div');
-          info.className = 'info';
-          info.textContent = event.content;
-          agentDiv.appendChild(info);
+          card.notices.appendChild(el('div', 'info', event.content));
         }
 
         scrollBottom();
@@ -1648,17 +2271,13 @@ async function streamAnswer(question, opts = {}) {
     } else if (reason === 'user') {
       // User pressed Stop: a quiet note, no alarming error, plus a way back in.
       clearWaiting();
-      const note = document.createElement('div');
-      note.className = 'status-line';
-      note.textContent = 'Stopped.';
-      const again = document.createElement('button');
+      const note = el('div', 'status-line', 'Stopped.');
+      const again = el('button', 'retry-btn neutral', 'Ask again');
       again.type = 'button';
-      again.className = 'retry-btn neutral';
-      again.textContent = 'Ask again';
       again.onclick = () => { agentDiv.remove(); streamAnswer(question, { isRetry: true }); };
       note.appendChild(document.createElement('br'));
       note.appendChild(again);
-      agentDiv.appendChild(note);
+      card.notices.appendChild(note);
     } else if (reason === 'timeout' || (err && err.name === 'AbortError')) {
       showError("The server is taking too long to respond. It may be busy or rate-limited; please try again in a minute.", { retry: true });
     } else {
@@ -1669,8 +2288,9 @@ async function streamAnswer(question, opts = {}) {
     // Invocation-local: run always so a superseded turn can't orphan its spinner.
     clearProcessing();
     clearWaiting();
-    // Draw against the settled layout. Runs on the error path too: a chart
-    // with no interpretation is still worth showing.
+    // Tables and charts are drawn against the settled layout. Runs on the
+    // error path too: data with no interpretation is still worth showing.
+    drawTables();
     drawPendingCharts();
     // ALL shared teardown lives in this finally, NOT after the try: an early
     // `return` from the try (non-SSE HTTP error, supersede) runs the finally
@@ -1692,6 +2312,18 @@ async function streamAnswer(question, opts = {}) {
   // return) has no answer to record and its teardown already ran in the finally.
   if (!ownsLifecycle) return;
 
+  // The repair stage is omitted from the stream when it never ran; say so in
+  // the timeline when the query simply returned rows (that is why it didn't).
+  const exec = card.stepEvents.filter(s => s.id === 'execute' && s.status === 'ok').pop();
+  if (exec && exec.rows > 0 && !card.stepEvents.some(s => s.id === 'repair')) {
+    const items = [...card.steps.children];
+    const at = card.stepEvents.lastIndexOf(exec);
+    const li = stepItem(0, { name: 'Check and repair', status: 'not needed', kind: 'idle', meta: 'verify-and-repair',
+      note: 'The query returned rows, so the empty-result repair did not run.', time: '—' });
+    if (items[at]) items[at].after(li); else card.steps.appendChild(li);
+    [...card.steps.children].forEach((n, i) => { n.querySelector('.step-n').textContent = String(i + 1).padStart(2, '0'); });
+  }
+
   // Safety net: if the stream ended without producing any renderable content,
   // surface a fallback so the UI never hangs silently.
   if (!receivedAnyEvent && !agentDiv.querySelector('.error, .info, .status-line:not(.fading)')) {
@@ -1707,10 +2339,8 @@ async function streamAnswer(question, opts = {}) {
       conversationHistory = conversationHistory.slice(-6);
     }
     if (interpBlock) {
-      const copyBtn = document.createElement('button');
+      const copyBtn = el('button', 'link-btn msg-action', 'Copy');
       copyBtn.type = 'button';
-      copyBtn.className = 'msg-action';
-      copyBtn.textContent = 'Copy';
       copyBtn.setAttribute('aria-label', 'Copy this answer');
       copyBtn.addEventListener('click', async () => {
         try {
@@ -1721,14 +2351,12 @@ async function streamAnswer(question, opts = {}) {
         }
         setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
       });
-      agentDiv.appendChild(copyBtn);
+      card.msgGroup.appendChild(copyBtn);
       // Report-an-answer: opens the user's mail client to dev@raylytics.io,
       // prefilled with this answer's available details (built at click time
       // so it captures the final state).
-      const reportBtn = document.createElement('button');
+      const reportBtn = el('button', 'link-btn msg-action', 'Report an issue');
       reportBtn.type = 'button';
-      reportBtn.className = 'msg-action';
-      reportBtn.textContent = 'Report an issue';
       reportBtn.setAttribute('aria-label', 'Email dev@raylytics.io about a problem with this answer');
       reportBtn.title = 'Something off? Email us this answer’s details';
       reportBtn.addEventListener('click', async () => {
@@ -1763,17 +2391,13 @@ async function streamAnswer(question, opts = {}) {
           // Neither clipboard path worked: show the report inline so the user
           // can select and copy it manually — never a silent no-op.
           reportBtn.textContent = 'Report an issue';
-          const det = document.createElement('details');
-          det.className = 'debug-block report-fallback';
-          const sum = document.createElement('summary');
-          sum.textContent = `Couldn't copy automatically — report details (email to ${REPORT_EMAIL}):`;
-          const pre = document.createElement('pre');
+          const det = el('details', 'debug-block report-fallback');
+          det.appendChild(el('summary', null, `Couldn't copy automatically — report details (email to ${REPORT_EMAIL}):`));
+          const pre = el('pre', null, reportText);
           pre.style.whiteSpace = 'pre-wrap';
-          pre.textContent = reportText;
-          det.appendChild(sum);
           det.appendChild(pre);
           det.open = true;
-          agentDiv.appendChild(det);
+          card.notices.appendChild(det);
           scrollBottom();
         }
         // A real anchor click is the most reliably-handled mailto trigger
@@ -1784,7 +2408,7 @@ async function streamAnswer(question, opts = {}) {
         a.click();
         a.remove();
       });
-      agentDiv.appendChild(reportBtn);
+      card.msgGroup.appendChild(reportBtn);
       scrollBottom();
     }
   }
@@ -1806,13 +2430,13 @@ async function applyBranding() {
     }
     // The endpoint fills every key, so apply UNCONDITIONALLY: a pack without a
     // branding section must not silently inherit the page's shipped copy.
-    const set = (el, prop, val) => { if (el && val !== undefined) el[prop] = val; };
+    const set = (node, prop, val) => { if (node && val !== undefined) node[prop] = val; };
     document.title = cfg.tab_title ?? document.title;
     BOT_NAME = cfg.bot_name || BOT_NAME;
     set(document.querySelector('header h1'), 'textContent', cfg.bot_name);
     set(document.querySelector('.subtitle'), 'textContent', cfg.subtitle);
-    set(document.querySelector('#starters h2'), 'textContent', cfg.hero_heading);
-    set(document.querySelector('#starters > p'), 'textContent', cfg.hero_blurb);
+    set(document.getElementById('hero-title'), 'textContent', cfg.hero_heading);
+    set(document.getElementById('hero-blurb'), 'textContent', cfg.hero_blurb);
     const about = document.querySelector('.about-tooltip');
     // Empty is never applied: the shipped placeholder carries the as-is /
     // not-affiliated disclaimer and must not be blanked away.
