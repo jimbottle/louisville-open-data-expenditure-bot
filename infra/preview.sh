@@ -38,12 +38,14 @@ up() {
   # A stale image must never be what gets previewed: remove the tag first, and
   # fail on the BUILD's status (the grep filter has its own, meaningless one).
   docker rmi -f "$IMG" >/dev/null 2>&1 || true
-  # No `|| true` after the pipeline: it would run `true` and reset PIPESTATUS
-  # before it is read. set -e ignores a non-final pipeline element, so grep's
-  # no-match status is harmless and rc is the build's own.
-  docker buildx build --platform linux/arm64 --provenance=false -f Dockerfile.lambda -t "$IMG" --load . \
-    2>&1 | grep -E "self-check|ERROR|error:"; rc=${PIPESTATUS[0]}
-  [ "$rc" -eq 0 ] || { echo "!! image build failed (exit $rc)"; exit 1; }
+  # Build to a log file with the build as the ONLY command whose status is
+  # checked: no pipeline for set -e/pipefail to trip on. A fully cached rebuild
+  # prints no self-check line, so grep's no-match must not matter.
+  log=$(mktemp); rc=0
+  docker buildx build --platform linux/arm64 --provenance=false -f Dockerfile.lambda -t "$IMG" --load . >"$log" 2>&1 || rc=$?
+  grep -E "self-check|ERROR|error:" "$log" || true
+  if [ "$rc" -ne 0 ]; then echo "!! image build failed (exit $rc); last lines:"; tail -n 20 "$log"; rm -f "$log"; exit 1; fi
+  rm -f "$log"
   docker image inspect "$IMG" >/dev/null 2>&1 || { echo "!! image $IMG missing after build"; exit 1; }
   docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
   down_quiet
