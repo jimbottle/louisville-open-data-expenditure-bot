@@ -714,3 +714,172 @@ def test_refine_pass_keeps_free_first_when_disabled_or_unpaid(client, monkeypatc
     assert seen2["client"] is app.client
     assert seen2["kw"]["fallback_client"] is None
     assert seen2["kw"]["swapped"] is False
+
+
+# ── Structured event shapes (event schema v2) ────────────────────────────────
+# The redesigned UI renders a real table, a headline, a partial-year marker and
+# a pipeline timeline from these fields; the text fields beside them must keep
+# their old shape for the report email and older clients.
+
+ANNUAL_SQL = "SELECT fiscal_year, total_spend, transaction_count FROM summary_annual_spend ORDER BY fiscal_year"
+
+
+def _happy(monkeypatch, sql=REAL_SQL):
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(sql))
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("draft"))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("final"))
+
+
+def test_results_event_carries_structured_columns_and_rows(client, monkeypatch):
+    _happy(monkeypatch)
+    events = _events(_post(client, "top agencies in 2025?"))
+    r = next(e for e in events if e["type"] == "results")
+    # The legacy fields are untouched.
+    assert set(r) >= {"content", "row_count", "humanized"}
+    assert isinstance(r["content"], str) and "Total Spend" in r["content"]
+    assert r["columns"] == [
+        {"name": "agency_canonical", "label": "Agency (Normalized)", "kind": "text"},
+        {"name": "total_spend", "label": "Total Spend", "kind": "money"},
+    ]
+    assert len(r["rows"]) == r["row_count"] == r["total_rows"] == 3
+    assert all(isinstance(row[0], str) and isinstance(row[1], float) for row in r["rows"])
+    assert r["truncated"] is False
+
+
+def test_results_rows_are_capped_at_the_display_limit(client, monkeypatch):
+    import app
+    _happy(monkeypatch, "SELECT payee_canonical, extended_amount FROM expenditures "
+                        "WHERE fiscal_year = 2025 ORDER BY extended_amount DESC LIMIT 120")
+    r = next(e for e in _events(_post(client, "big payments?")) if e["type"] == "results")
+    assert r["total_rows"] == 120 and r["truncated"] is True
+    assert len(r["rows"]) == app.MAX_DISPLAY_ROWS
+
+
+def test_annual_spend_chart_marks_the_partial_year_and_headlines_the_last_complete(client, monkeypatch):
+    import app
+    _happy(monkeypatch, ANNUAL_SQL)
+    events = _events(_post(client, "How has total annual spending changed from 2008 to 2026?"))
+    types = _types(events)
+    yc = app.YEAR_CONTEXT
+    partial = yc["values"]["in_progress_year"]
+    chart = next(e for e in events if e["type"] == "chart")
+    head = next(e for e in events if e["type"] == "headline")
+    if partial is None:
+        pytest.skip("loaded data has no partial fiscal year")
+    assert chart["partial_labels"] == [str(partial)]
+    assert chart["data_through"] == yc["expenditures"]["covered_through"]
+    assert head["label"] == f"FY{partial - 1} Total Spend"
+    assert f"FY{partial} partial" in head["context"]
+    assert head["value_kind"] == "money"
+    assert types.index("results") < types.index("chart") < types.index("headline") \
+        < types.index("interpretation")
+
+
+def test_chart_without_a_partial_point_has_no_marker_fields(client, monkeypatch):
+    _happy(monkeypatch)
+    chart = next(e for e in _events(_post(client, "top agencies?")) if e["type"] == "chart")
+    assert "partial_labels" not in chart and "data_through" not in chart
+
+
+def test_happy_path_emits_one_step_per_stage_in_order(client, monkeypatch):
+    _happy(monkeypatch)
+    events = _events(_post(client, "which agencies spent the most in 2025?"))
+    steps = [e for e in events if e["type"] == "step"]
+    assert [s["id"] for s in steps] == [
+        "grounding", "generate_sql", "execute", "retrieve_docs", "interpret", "refine"]
+    for s in steps:
+        assert set(s) == {"type", "id", "status", "ms", "model", "tier", "tokens", "rows", "detail"}
+        assert s["status"] == "ok" and isinstance(s["ms"], int) and isinstance(s["detail"], dict)
+    by_id = {s["id"]: s for s in steps}
+    assert by_id["generate_sql"]["tokens"] == 2
+    assert by_id["generate_sql"]["detail"] == {"attempts": 1, "regenerated_after_error": False}
+    assert by_id["generate_sql"]["model"] and by_id["generate_sql"]["tier"]
+    assert by_id["execute"]["rows"] == 3
+    assert isinstance(by_id["grounding"]["detail"]["matches"], list)
+    assert isinstance(by_id["retrieve_docs"]["detail"]["file_numbers"], list)
+    assert by_id["interpret"]["tokens"] is None          # chunks, never "tokens"
+    assert by_id["refine"]["detail"]["served"] == "refined"
+    # A stage's step lands after its own events, before the next stage's.
+    types = _types(events)
+    assert types.index("sql") < types.index("step", types.index("sql"))
+
+
+def test_grounding_step_reports_matched_values(client, monkeypatch):
+    _happy(monkeypatch)
+    events = _events(_post(client, "How much did Louisville Fire spend on vehicles in fiscal year 2024?"))
+    g = next(e for e in events if e["type"] == "step" and e["id"] == "grounding")
+    assert g["detail"]["matches"]
+    assert len(g["detail"]["matches"]) <= 8
+    assert set(g["detail"]["matches"][0]) == {"term", "column", "value"}
+
+
+def test_quota_error_closes_the_sql_step_as_failed_before_the_error(client, monkeypatch):
+    import app
+
+    def _broke(*a, **kw):
+        raise _payment_required()
+    monkeypatch.setattr(app, "generate_sql", _broke)
+    events = _events(_post(client, "quota step?"))
+    types = _types(events)
+    failed = [e for e in events if e["type"] == "step" and e["status"] == "failed"]
+    assert [f["id"] for f in failed] == ["generate_sql"]
+    assert failed[0]["detail"]["error"] == "APIStatusError"
+    assert types.index("step", types.index("step") + 1) < types.index("error")
+
+
+def test_execution_error_regenerates_and_reports_both_attempts(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql_sequence(
+        "SELECT no_such_column FROM expenditures LIMIT 1", REAL_SQL))
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("draft"))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("final"))
+    steps = [e for e in _events(_post(client, "regen?")) if e["type"] == "step"]
+    seq = [(s["id"], s["status"]) for s in steps]
+    assert seq[:5] == [("grounding", "ok"), ("generate_sql", "ok"), ("execute", "failed"),
+                       ("generate_sql", "ok"), ("execute", "ok")]
+    assert steps[3]["detail"]["attempts"] == 2
+    assert steps[3]["detail"]["regenerated_after_error"] is True
+
+
+def test_repair_step_appears_only_when_the_repair_fires(client, monkeypatch):
+    import app
+    gen = _fake_generate_sql_sequence(NARROW_SQL, REPAIRED_SQL)
+    monkeypatch.setattr(app, "generate_sql", gen)
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("draft"))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("final"))
+    events = _events(_post(client, "How much did Louisville Fire spend on vehicles in FY2024?"))
+    repair = [e for e in events if e["type"] == "step" and e["id"] == "repair"]
+    assert len(repair) == 1
+    d = repair[0]["detail"]
+    assert d["kept"] is True and d["outcome"] == "repaired"
+    assert "%Vehicle%" in d["hint"] and len(d["hint"]) <= 200
+    assert repair[0]["rows"] == 1
+
+    app.response_cache.clear()
+    _happy(monkeypatch)
+    events = _events(_post(client, "no repair here?"))
+    assert not [e for e in events if e["type"] == "step" and e["id"] == "repair"]
+
+
+def test_failed_refine_closes_as_failed_and_serves_the_draft(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("the draft"))
+
+    def _bad_refine(*a, **kw):
+        raise RuntimeError("refine down")
+        yield
+    monkeypatch.setattr(app, "refine_interpretation_stream", _bad_refine)
+    events = _events(_post(client, "refine fails?"))
+    refine = next(e for e in events if e["type"] == "step" and e["id"] == "refine")
+    assert refine["status"] == "failed"
+    assert refine["detail"] == {"chunks": 0, "error": "RuntimeError", "served": "draft"}
+    assert "error" not in _types(events)
+
+
+def test_cache_version_includes_the_event_schema_version():
+    import app
+    import inspect
+    assert app.EVENT_SCHEMA_VERSION == "2"
+    assert "EVENT_SCHEMA_VERSION" in inspect.getsource(app.startup)

@@ -543,9 +543,33 @@ def format_groups(groups: list, cfg=None, budget: int | None = None) -> str:
 
 def grounding_block(con, question: str, cfg=None) -> str:
     """The vocabulary block appended to the SQL-generation request, or ''."""
+    return grounding_lookup(con, question, cfg)[0]
+
+
+def grounding_matches(groups: list, limit: int = 8, per_group: int = 2) -> list:
+    """A short, JSON-safe summary of what grounding matched, for the pipeline
+    `step` event: [{term, column: 'table.column', value}]. The prompt block is
+    prose for the model; a UI should not have to parse it."""
+    out = []
+    for g in groups:
+        for val, _, _ in g["values"][:per_group]:
+            if len(out) >= limit:
+                return out
+            out.append({"term": g["term"], "column": f"{g['table']}.{g['column']}",
+                        "value": str(val)})
+    return out
+
+
+def grounding_lookup(con, question: str, cfg=None) -> tuple:
+    """(block, groups): the vocabulary block and the lookup groups behind it,
+    so a caller can report the matches without a second index query."""
     groups = lookup_terms(con, question_terms(question, cfg), cfg)
     if not groups:
-        return ""
+        return "", []
+    return (_block_text(groups, cfg), groups)
+
+
+def _block_text(groups: list, cfg=None) -> str:
     return (
         "## Data vocabulary matched to this question\n"
         "These are exact strings that exist in the data (with all-years totals). "

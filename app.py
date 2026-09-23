@@ -138,6 +138,10 @@ from data_model import (
     infer_chart,
     measure_kind,
     chart_window,
+    chart_partial_markers,
+    headline,
+    period_context,
+    result_table,
     load_all_data,
     prebuilt_meta,
     load_prebuilt,
@@ -730,6 +734,8 @@ def startup():
             f"No usable fiscal_year values in the expenditures table loaded from {DATA_DIR!r} — "
             "check the data files and the city pack's expenditure sources."
         )
+    global YEAR_CONTEXT
+    YEAR_CONTEXT = yc
     year_rules = yc["rules"]
     # Only point at the CalYear rule when one was actually derived, so the
     # prompt never references guidance that isn't in it.
@@ -877,7 +883,8 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
         (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CITY_FACTS)
          + CITATION_FORMAT + TRUNCATION_NOTE + TRUNCATION_COUNTS
          + TRUNCATION_COUNTS_WITH_TOTALS + TOTALS_MOVED_NOTE
-         + str(MAX_DISPLAY_ROWS) + grounding.GROUNDING_VERSION).encode()
+         + str(MAX_DISPLAY_ROWS) + grounding.GROUNDING_VERSION
+         + EVENT_SCHEMA_VERSION).encode()
     ).hexdigest()[:8]
     # On DynamoDB, keys of older versions simply never match again and the
     # 30-day TTL reclaims them; a scan-and-delete on every cold start would be
@@ -1103,6 +1110,19 @@ CACHE_VERSION = "unversioned"
 # already pre-warmed the starter questions most readers see. The cache lives
 # in the louisville-state volume, which a deploy does not replace.
 CITATION_FORMAT = "gateway-v1"
+
+# The same problem for the rest of the event stream. Version "2" added the
+# structured fields a UI renders without parsing text: `results` gained
+# columns/rows/total_rows/truncated, `chart` gained partial_labels/
+# data_through, and the `headline` and `step` events are new. A cached starter
+# answer would otherwise replay the OLD frames forever — the prompts did not
+# change, so nothing else would orphan it. Bump on any change to event shape.
+EVENT_SCHEMA_VERSION = "2"
+
+# Year coverage from year_context(), kept for per-request period markers
+# (which chart point is partial, which period a headline may use). Set at
+# startup.
+YEAR_CONTEXT: dict = {}
 
 # City data facts with year placeholders resolved (set at startup).
 CITY_FACTS: list[str] = []
@@ -1418,6 +1438,39 @@ async def ask(request: Request):
                 cache_events.append(event)
             return event
 
+        # Pipeline `step` events: one structured frame per stage, so a UI can
+        # draw the timeline without parsing the free-text log/debug lines
+        # (which stay exactly as they were). Conventions:
+        # - A step is emitted when its stage FINISHES. A stage that never
+        #   started is OMITTED, never sent as "skipped" (repair only appears
+        #   when it fired, refine only when a draft was refined). "skipped" is
+        #   reserved in the schema but not currently emitted.
+        # - A stage that runs twice emits twice (generate_sql/execute after an
+        #   execution error): render in order, or keep the last per id.
+        # - status: "ok"; "fallback" = the call succeeded but on a provider
+        #   other than the one it was sent to first; "failed" = the stage
+        #   failed, and on every error path the failed step precedes the
+        #   `error` event.
+        # - tokens is the provider-reported count where one exists (SQL
+        #   generation); streamed stages report chunks in detail, never as
+        #   tokens (a Cerebras chunk count is not a token figure).
+        # - A cached answer replays these frames verbatim, `ms` included.
+        def step(step_id, status, t0, *, ms=None, model=None, tier=None,
+                 tokens=None, rows=None, **detail):
+            if ms is None:
+                ms = (time.time() - t0) * 1000
+            return send("step", {"id": step_id, "status": status, "ms": int(ms),
+                                 "model": model, "tier": tier, "tokens": tokens,
+                                 "rows": rows, "detail": detail})
+
+        def model_for(tier):
+            # The primary client runs MODEL (or whatever a deprecation swapped
+            # in); any other tier is the Cerebras fallback client.
+            return get_active_model(MODEL) if tier == get_primary_tier() else FALLBACK_MODEL
+
+        def llm_status(tier, intended):
+            return "ok" if tier == intended else "fallback"
+
         # Collect retry log events to yield inline during streaming
         retry_logs = []
         def on_retry(attempt, max_retries, delay):
@@ -1442,13 +1495,20 @@ async def ask(request: Request):
         # the difference between filtering on 'Automotive Parts & Accessories'
         # and guessing '%Vehicle%'.
         vocab = ""
+        t_ground = time.time()
         try:
             with db_lock:
-                vocab = grounding.grounding_block(con, question, CONFIG)
+                vocab, vocab_groups = grounding.grounding_lookup(con, question, CONFIG)
+            ground = ("ok", {"matches": grounding.grounding_matches(vocab_groups)})
         except Exception as e:
             log.warning("Vocabulary grounding failed (continuing without it): %s", e)
+            ground = ("failed", {"error": type(e).__name__})
+        ground_ms = (time.time() - t_ground) * 1000
         if vocab:
             yield send("debug", {"content": "Vocabulary grounding:\n" + vocab.split("\n", 2)[-1]})
+        # send() records into the cache as it is CALLED, so a frame is built
+        # only at the point it is yielded — or a replay would reorder it.
+        yield step("grounding", ground[0], t_ground, ms=ground_ms, **ground[1])
 
         # Generate SQL
         yield send("log", {"content": "Generating SQL query..."})
@@ -1469,11 +1529,19 @@ async def ask(request: Request):
             # error-retry as SELECT '<the refusal>' AS message.
             if not _looks_like_sql(sql):
                 log.info("Model returned non-SQL response (likely off-topic)")
+                yield step("generate_sql", llm_status(sql_tier, get_primary_tier()), t_start,
+                           model=model_for(sql_tier), tier=sql_tier,
+                           tokens=sql_usage.get("total_tokens"), attempts=1,
+                           regenerated_after_error=False, off_topic=True)
                 yield send("interpretation", {"content": "This question doesn't appear to be answerable from the Louisville Metro expenditure data. Try asking about government spending, agency budgets, contractor payments, employee salaries, or capital projects."})
                 yield send("done", {})
                 return
         except Exception as e:
             log.error("SQL generation failed: %s", e)
+            fail_tier = get_last_tier_used()
+            yield step("generate_sql", "failed", t_start, model=model_for(fail_tier),
+                       tier=fail_tier, attempts=1, regenerated_after_error=False,
+                       error=type(e).__name__)
             if is_daily_cap_error(e):
                 track_error("daily_cap", str(e)[:200])
                 yield send("log", {"content": "Free daily allowance exhausted at the provider."})
@@ -1505,28 +1573,51 @@ async def ask(request: Request):
             yield evt
         yield send("sql", {"content": sql})
         yield send("debug", {"content": f"SQL generated in {t_sql:.1f}s | {sql_usage.get('total_tokens', 0)} tokens | Model: {get_active_model(MODEL)} | Tier: {tier_label(sql_tier)}"})
+        yield step("generate_sql", llm_status(sql_tier, get_primary_tier()), None, ms=t_sql * 1000,
+                   model=model_for(sql_tier), tier=sql_tier, tokens=sql_usage.get("total_tokens"),
+                   attempts=1, regenerated_after_error=False)
 
         # Execute SQL
         yield send("log", {"content": "Executing query against database..."})
         yield send("status", {"content": "Querying the data…"})
-        t_start = time.time()
+        t_start = t_exec_start = time.time()
         try:
             with db_lock:
                 result_df, result_str = execute_sql_safe(con, sql)
         except Exception as e:
             log.warning("SQL execution failed: %s — retrying", e)
             yield send("log", {"content": f"Query failed: {type(e).__name__}. Asking model to fix..."})
+            yield step("execute", "failed", t_start, error=type(e).__name__)
+            # Which half of the retry failed decides which step closes as
+            # failed: a regeneration error is generate_sql's, an error running
+            # the regenerated query is execute's.
+            regen_done = False
             try:
+                t_step = time.time()
                 fix_prompt = f"The following SQL failed with error: {e}\n\nOriginal SQL:\n{sql}\n\nFix the SQL query. Return ONLY the corrected SQL."
                 sql, retry_usage, raw_resp = generate_sql(client, MODEL, sql_system, fix_prompt, on_retry=on_retry, history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
-                track_usage(retry_usage.get("prompt_tokens", 0), retry_usage.get("completion_tokens", 0), tier=get_last_tier_used())
+                retry_tier = get_last_tier_used()
+                track_usage(retry_usage.get("prompt_tokens", 0), retry_usage.get("completion_tokens", 0), tier=retry_tier)
                 update_limits_from_headers(raw_resp)
                 log.info("SQL retry generated")
                 yield send("log", {"content": "Retrying with corrected SQL..."})
                 yield send("sql", {"content": sql})
+                yield step("generate_sql", llm_status(retry_tier, get_primary_tier()), t_step,
+                           model=model_for(retry_tier), tier=retry_tier,
+                           tokens=retry_usage.get("total_tokens"), attempts=2,
+                           regenerated_after_error=True, error=type(e).__name__)
+                regen_done = True
+                t_step = t_exec_start = time.time()
                 with db_lock:
                     result_df, result_str = execute_sql_safe(con, sql)
             except Exception as e2:
+                if regen_done:
+                    yield step("execute", "failed", t_step, error=type(e2).__name__)
+                else:
+                    fail_tier = get_last_tier_used()
+                    yield step("generate_sql", "failed", t_step, model=model_for(fail_tier),
+                               tier=fail_tier, attempts=2, regenerated_after_error=True,
+                               error=type(e2).__name__)
                 if is_daily_cap_error(e2):
                     track_error("daily_cap", str(e2)[:200])
                     yield send("log", {"content": "Free daily allowance exhausted at the provider."})
@@ -1553,6 +1644,7 @@ async def ask(request: Request):
                     yield send("error", {"content": "That query couldn't be run against the data, even after a retry. Try simplifying or rephrasing your question."})
                 return
         t_exec = time.time() - t_start
+        yield step("execute", "ok", t_exec_start, rows=len(result_df))
 
         # Verify-and-repair: an empty (or all-NULL) result is checked against
         # the data's vocabulary before it is believed. A filter that matched
@@ -1576,36 +1668,65 @@ async def ask(request: Request):
             yield send("status", {"content": "Checking the data's vocabulary and retrying…"})
             yield send("debug", {"content": "Repair hint:\n" + repair_hint})
             t_start = time.time()
+            # For the step event: WHICH filters were suspect, not the full hint
+            # (that is instructions to the model, and stays in the debug line).
+            hint_summary = ("Filters that matched nothing (or too little): " + "; ".join(
+                f"{d['column']} {d['op']} '{d['literal']}'" for d in diagnoses))[:200]
             try:
                 repair_prompt = (f"Question: {question}\n\nThis query ran but returned nothing:\n{sql}\n\n"
                                  f"{repair_hint}")
                 new_sql, repair_usage, raw_resp = generate_sql(client, MODEL, sql_system, repair_prompt, on_retry=on_retry, history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
-                track_usage(repair_usage.get("prompt_tokens", 0), repair_usage.get("completion_tokens", 0), tier=get_last_tier_used())
+                repair_tier = get_last_tier_used()
+                track_usage(repair_usage.get("prompt_tokens", 0), repair_usage.get("completion_tokens", 0), tier=repair_tier)
                 update_limits_from_headers(raw_resp)
                 sql_usage = {k: sql_usage.get(k, 0) + repair_usage.get(k, 0)
                              for k in ("prompt_tokens", "completion_tokens", "total_tokens")}
+                # `kept` is True when the repaired query REPLACED the original
+                # (the answer is built on it); `outcome` says why when not.
+                repair_rows, kept, outcome = None, False, "unchanged"
                 if new_sql.strip() and new_sql.strip().rstrip(";") != sql.strip().rstrip(";"):
                     with db_lock:
                         new_df, new_str = execute_sql_safe(con, new_sql)
+                    repair_rows = len(new_df)
                     if not _is_vacuous(new_df):
                         sql, result_df, result_str = new_sql, new_df, new_str
+                        kept, outcome = True, "repaired"
                         repair_note = ("Note: my first query used a label that does not appear in the "
                                        "data, so I re-checked the data's own category names and re-ran it.")
                         yield send("log", {"content": f"Repaired query returned {len(result_df)} rows."})
                         yield send("sql", {"content": sql})
                     else:
+                        outcome = "still_empty"
                         yield send("log", {"content": "Repaired query also returned nothing; keeping the original."})
                 else:
                     yield send("log", {"content": "Model kept the original query."})
                 yield send("debug", {"content": f"Repair pass in {time.time() - t_start:.1f}s"})
+                yield step("repair", llm_status(repair_tier, get_primary_tier()), t_start,
+                           model=model_for(repair_tier), tier=repair_tier,
+                           tokens=repair_usage.get("total_tokens"), rows=repair_rows,
+                           hint=hint_summary, kept=kept, outcome=outcome)
             except Exception as e:
                 # The repair is best-effort: a failure here falls through to
                 # the honest empty-result path, never to an error.
                 log.warning("SQL repair attempt failed: %s", e)
                 yield send("log", {"content": f"Repair attempt failed ({type(e).__name__}); keeping the original result."})
+                yield step("repair", "failed", t_start, hint=hint_summary, kept=False,
+                           outcome="error", error=type(e).__name__)
 
         display_str = result_str if dev_mode else humanize_text(result_str)
-        yield send("results", {"content": display_str, "row_count": len(result_df), "humanized": not dev_mode})
+        # `content` stays the preformatted text table (the report email and
+        # older clients render it); the structured fields beside it let a UI
+        # render a real table without parsing that text. A failure to build
+        # them must not cost the answer, so it degrades to the text alone.
+        results_evt = {"content": display_str, "row_count": len(result_df), "humanized": not dev_mode}
+        try:
+            results_evt.update(result_table(result_df, MAX_DISPLAY_ROWS, sql))
+        except Exception as e:
+            log.warning("Structured results failed (text table still sent): %s", e)
+        yield send("results", results_evt)
+        # Which period of the queried data is partial — shared by the chart's
+        # partial-point marker and the headline, so they cannot disagree.
+        period = period_context(YEAR_CONTEXT, sql)
 
         yield send("debug", {"content": f"Query executed in {t_exec:.2f}s | {len(result_df)} rows returned"})
 
@@ -1645,26 +1766,48 @@ async def ask(request: Request):
                     # rather than "$1.5K". Computed from the value column, not
                     # assumed to be dollars.
                     value_kind = measure_kind(value_col, chart_df[value_col])
-                    yield send("chart", {
+                    chart_evt = {
                         "chart_type": chart_type,
                         "labels": labels,
                         "values": [float(v) if v == v else 0 for v in values],
                         "title": title,
                         "label_axis": label_axis,
                         "value_kind": value_kind,
-                    })
+                    }
+                    # A year axis that includes the in-progress year gets
+                    # partial_labels + data_through, so the UI can mark that
+                    # point instead of letting it read as a real drop. Absent
+                    # (not empty) when nothing on the axis is partial.
+                    chart_evt.update(chart_partial_markers(labels, label_col, period))
+                    yield send("chart", chart_evt)
                 except Exception as e:
                     log.warning("Chart generation failed: %s", e)
+
+        # Deterministic headline figure (no LLM — read straight off the
+        # frame, so it cannot disagree with the table). Sent only when the
+        # result has an unambiguous one; see data_model.headline.
+        try:
+            head = headline(result_df, sql, period)
+        except Exception as e:
+            log.warning("Headline failed: %s", e)
+            head = None
+        if head:
+            yield send("headline", head)
 
         # Related city documents (local BM25, ~ms). Retrieved before the
         # interpretation so the model can cite legislation that explains the
         # numbers; hits below the pack's threshold come back empty and the
         # prompt simply carries no document block.
+        t_docs = time.time()
         doc_hits = _retrieve_documents(question)
         documents = rag.format_context(doc_hits)
         if doc_hits:
             yield send("debug", {"content": f"Retrieved {len(doc_hits)} document(s): " +
                                  ", ".join(f"{h['file_no']} ({h['score']:.1f})" for h in doc_hits)})
+        # "ok" with an empty list is a real outcome (nothing cleared the score
+        # threshold); _retrieve_documents already swallows and logs failures.
+        yield step("retrieve_docs", "ok", t_docs,
+                   file_numbers=[str(h.get("file_no")) for h in doc_hits])
 
         _pace()
 
@@ -1684,6 +1827,7 @@ The SQL query returned no data:
 
 Explain in plain text (no markdown, no SQL) why this likely returned no results based on what you know about the data structure. Then suggest 1-2 rephrased questions that would likely return results. Keep it under 100 words."""
             empty_served = []
+            t_empty = time.time()
             try:
                 for chunk in interpret_results_stream(
                     client, MODEL, interpret_system, empty_prompt, sql, "No rows returned", history=history, fallback_client=paid_client, fallback_model=FALLBACK_MODEL,
@@ -1692,7 +1836,9 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
                     text = humanize_prose(chunk)
                     empty_served.append(text)
                     yield send("interpretation", {"content": text})
-            except Exception:
+                empty_tier = get_last_tier_used()
+                empty_step = (llm_status(empty_tier, get_primary_tier()), {})
+            except Exception as e:
                 # The footer cites against the text actually served, so the
                 # fallback has to join it: matching the partial stream instead
                 # would credit a file number the reader never saw.
@@ -1700,6 +1846,11 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
                             "Try broadening your search or rephrasing.")
                 empty_served.append(fallback)
                 yield send("interpretation", {"content": fallback})
+                empty_tier = get_last_tier_used()
+                empty_step = ("failed", {"error": type(e).__name__})
+            yield step("interpret", empty_step[0], t_empty, model=model_for(empty_tier),
+                       tier=empty_tier, empty_result=True,
+                       **empty_step[1])
             for evt in _sources_event(doc_hits, "".join(empty_served), send):
                 yield evt
             yield send("done", {})
@@ -1727,6 +1878,7 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
         # failed after it started (observed live: OpenRouter 200s, then sends
         # an in-stream "Upstream error ... overloaded" mid-answer).
         attempts = [(client, MODEL, paid_client, FALLBACK_MODEL)]
+        draft_retried = False
         if paid_client is not None:
             attempts.append((paid_client, FALLBACK_MODEL, None, None))
         try:
@@ -1756,6 +1908,7 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
                     if i + 1 < len(attempts):
                         log.warning("Draft stream failed (%s); retrying whole draft on the fallback provider", e)
                         yield send("log", {"content": "Summary stream failed; retrying on the backup provider..."})
+                        draft_retried = True
                         continue
                     raise
         except GeneratorExit:
@@ -1764,6 +1917,9 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
         except Exception as e:
             draft_error = e
             log.error("Interpretation failed: %s", e)
+            fail_tier = get_last_tier_used()
+            yield step("interpret", "failed", t_start, model=model_for(fail_tier), tier=fail_tier,
+                       chunks=interp_tokens, retried=draft_retried, error=type(e).__name__)
             if is_daily_cap_error(e):
                 track_error("daily_cap", str(e)[:200])
                 yield send("log", {"content": "Free daily allowance exhausted during interpretation."})
@@ -1791,6 +1947,12 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
         t_draft = time.time() - t_start
         # Captured now: the refine below overwrites the process-wide tier.
         draft_tier, draft_chunks, refine_tier = get_last_tier_used(), interp_tokens, None
+        if draft_error is None:
+            # "retried" = the whole draft was re-run on the backup provider
+            # after a mid-stream failure (which also makes it a "fallback").
+            yield step("interpret", llm_status(draft_tier, get_primary_tier()), None,
+                       ms=t_draft * 1000, model=model_for(draft_tier), tier=draft_tier,
+                       chunks=draft_chunks, truncated=draft_truncated, retried=draft_retried)
 
         if draft_error is not None:
             # The user already saw the error (or apology). Never refine a
@@ -1816,6 +1978,8 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
             yield send("debug", {"content": f"Draft interpretation in {t_draft:.1f}s | ~{interp_tokens} chunks | Tier: {tier_label(draft_tier)}"})
             _pace()
             refine_counter = {"n": 0}
+            refine_failure = []
+            t_refine = time.time()
             # Provider order is flipped for this one call when a paid client
             # exists (see REFINE_PREFER_PAID above); everything else stays
             # free-first.
@@ -1831,13 +1995,27 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
                 draft,
                 send,
                 transform=humanize_prose,
-                on_fail=lambda e: track_error("interpretation", f"Refine failed: {str(e)[:150]}"),
+                on_fail=lambda e: (refine_failure.append(e),
+                                   track_error("interpretation", f"Refine failed: {str(e)[:150]}")),
                 timeout=stream_timeout,
                 counter=refine_counter,
                 sink=served_text,
             )
             interp_tokens += refine_counter["n"]
             refine_tier = get_last_tier_used()
+            # A failed refine still answers (the draft, or the partial refine
+            # plus a truncation note, is served), so it closes as "failed"
+            # with `served` saying what the reader got — never as an error.
+            # The refine's first-choice provider is the paid one when swapped.
+            if refine_failure:
+                r_status = "failed"
+                r_detail = {"error": type(refine_failure[0]).__name__,
+                            "served": "partial" if refine_counter["n"] else "draft"}
+            else:
+                r_status = llm_status(refine_tier, "paid" if r_swapped else get_primary_tier())
+                r_detail = {"served": "refined"}
+            yield step("refine", r_status, t_refine, model=model_for(refine_tier), tier=refine_tier,
+                       chunks=refine_counter["n"], **r_detail)
 
         # Citations go out after the answer, as a footer under a finished
         # response — and only for documents the answer actually cited.
