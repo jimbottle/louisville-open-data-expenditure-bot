@@ -331,6 +331,17 @@ def test_vendored_chartjs_is_served(monkeypatch):
     assert "Chart" in r.text[:5000] or "chart" in r.text[:5000].lower()
 
 
+def test_vendored_fonts_are_served_as_woff2():
+    """Self-hosted fonts (static/vendor/fonts) with their real type, not the
+    text/plain a MIME table without .woff2 falls back to."""
+    from fastapi.testclient import TestClient
+    import app
+    for name in ("vt323", "jetbrains-mono"):
+        r = TestClient(app.app).get(f"/static/vendor/fonts/{name}.woff2")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "font/woff2"
+
+
 def test_stream_teardown_lives_in_finally_not_after_try():
     """A `return` from inside the try (non-SSE HTTP error, supersede) runs the
     finally but skips any post-try code, so the Ask-button/isStreaming reset

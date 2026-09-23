@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import os
 import re
 import threading
@@ -249,6 +250,10 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+# The slim Lambda image's MIME table has no .woff2, so StaticFiles served the
+# self-hosted fonts as text/plain — under nosniff, on every response. Browsers
+# load fonts regardless, but the type should be right.
+mimetypes.add_type("font/woff2", ".woff2")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 db_lock = threading.Lock()
