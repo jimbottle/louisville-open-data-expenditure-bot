@@ -47,11 +47,7 @@ case "$caller" in
   *:assumed-role/lou-deploy/*) echo "== caller: $caller" ;;
   *) echo "!! refusing to run CDK as $caller (expected assumed-role/lou-deploy)"; exit 1 ;;
 esac
-# Alarm e-mail (SNS subscription; louisville-open-data-5cn). Passed as CDK
-# context so the address never lands in the public repo. Optional: without it
-# the alarms and topic still exist, just with no subscriber.
 CTX=()
-[ -n "${LOU_ALERT_EMAIL:-}" ] && CTX=(-c "lou:alertEmail=$LOU_ALERT_EMAIL")
 # Cutover: the public hostname + its ACM certificate (see cutover.sh). Both or
 # neither; the stack refuses one without the other.
 #
@@ -88,6 +84,23 @@ if [ -z "${LOU_DOMAIN:-}" ] && [ "${LOU_DROP_DOMAIN:-}" != "1" ]; then
     echo "== keeping the live public hostname $LOU_DOMAIN (set LOU_DROP_DOMAIN=1 to detach it deliberately)"
   fi
 fi
+# Alarm e-mail (SNS subscription; louisville-open-data-5cn). Passed as CDK
+# context so the address never lands in the public repo — and, like the
+# hostname, ADOPTED from the live stack (its AlertEmail output) when this run
+# was not given one. Without that, an ordinary deploy from a shell without
+# LOU_ALERT_EMAIL synthesized a topic with no subscriber and destroyed the
+# live one (2026-09-24); the monthly refresh then kept redeploying it empty.
+# Removing it on purpose is LOU_DROP_ALERTS=1. Same fail-closed read as above.
+if [ -z "${LOU_ALERT_EMAIL:-}" ] && [ "${LOU_DROP_ALERTS:-}" != "1" ]; then
+  live_email=$(stack_out AlertEmail) || exit 1
+  if [ -n "$live_email" ] && [ "$live_email" != "None" ] && [ "$live_email" != "none" ]; then
+    LOU_ALERT_EMAIL=$live_email
+    echo "== keeping the live alarm e-mail subscription (set LOU_DROP_ALERTS=1 to remove it deliberately)"
+  else
+    echo "!! no alarm e-mail: the alarms will have NO subscriber. Set LOU_ALERT_EMAIL=<address> to add one."
+  fi
+fi
+[ -n "${LOU_ALERT_EMAIL:-}" ] && [ "${LOU_DROP_ALERTS:-}" != "1" ] && CTX+=(-c "lou:alertEmail=$LOU_ALERT_EMAIL")
 [ -n "${LOU_DOMAIN:-}" ] && CTX+=(-c "lou:domain=$LOU_DOMAIN")
 [ -n "${LOU_CERT_ARN:-}" ] && CTX+=(-c "lou:certificateArn=$LOU_CERT_ARN")
 # ${CTX[@]+"${CTX[@]}"} expands to nothing when the array is empty: a plain

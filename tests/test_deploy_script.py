@@ -29,6 +29,7 @@ case "$*" in
     case "$*" in
       *"OutputKey=='PublicDomain'"*) printf '%s' "${LIVE_DOMAIN:-}" ;;
       *"OutputKey=='CertificateArn'"*) printf '%s' "${LIVE_CERT:-}" ;;
+      *"OutputKey=='AlertEmail'"*) printf '%s' "${LIVE_EMAIL:-}" ;;
     esac ;;
   *) echo "" ;;
 esac
@@ -69,6 +70,9 @@ def harness(tmp_path):
                  LOU_DATA_DIR=str(data), LOU_OUTPUTS_FILE=str(tmp_path / "outputs.json"), **(env or {}))
         e.pop("LOU_SKIP_PREVIEW", None) if not (env and "LOU_SKIP_PREVIEW" in env) else None
         e.pop("LOU_DOMAIN", None) if not (env and "LOU_DOMAIN" in env) else None
+        for k in ("LOU_ALERT_EMAIL", "LOU_DROP_ALERTS"):
+            if not (env and k in env):
+                e.pop(k, None)
         proc = subprocess.run(["/bin/bash", str(SCRIPT), step], env=e, capture_output=True, text=True, timeout=60)
         return proc, calls.read_text()
     return run
@@ -86,6 +90,28 @@ def test_plain_deploy_keeps_the_live_hostname_binding(harness):
     npx = _cdk_args(calls)[0]
     assert "lou:domain=louisville.raylytics.io" in npx
     assert "lou:certificateArn=arn:aws:acm:us-east-1:012146975534:certificate/abc" in npx
+
+
+def test_plain_deploy_keeps_the_live_alert_subscription(harness):
+    """The 2026-09-24 regression: a deploy from a shell without LOU_ALERT_EMAIL
+    destroyed the alarm e-mail subscription. The live stack's AlertEmail
+    output is now adopted like the hostname."""
+    proc, calls = harness("synth", env={"LIVE_EMAIL": "ops@example.invalid"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "keeping the live alarm e-mail subscription" in proc.stdout
+    assert "lou:alertEmail=ops@example.invalid" in _cdk_args(calls)[0]
+
+
+def test_alert_email_env_override_drop_flag_and_none(harness):
+    live = {"LIVE_EMAIL": "ops@example.invalid"}
+    proc, calls = harness("synth", env={**live, "LOU_ALERT_EMAIL": "new@example.invalid"})
+    assert "lou:alertEmail=new@example.invalid" in _cdk_args(calls)[0]
+    proc, calls = harness("synth", env={**live, "LOU_DROP_ALERTS": "1"})
+    assert proc.returncode == 0 and "lou:alertEmail" not in _cdk_args(calls)[0]
+    # A stack with no subscriber ("none") proceeds, but says so loudly.
+    proc, calls = harness("synth", env={"LIVE_EMAIL": "none"})
+    assert proc.returncode == 0
+    assert "NO subscriber" in proc.stdout and "lou:alertEmail" not in _cdk_args(calls)[0]
 
 
 def test_no_live_hostname_means_no_domain_context(harness):

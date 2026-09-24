@@ -377,6 +377,12 @@ class LouStack(cdk.Stack):
         # ── outputs ─────────────────────────────────────────────────────────
         cdk.CfnOutput(self, "RefreshProject", value=build.project_name)
         cdk.CfnOutput(self, "AlertsTopic", value=alerts.topic_arn)
+        # The live subscriber, read back by deploy.sh so an ordinary deploy
+        # that was not given LOU_ALERT_EMAIL keeps it. Without this the stack
+        # had no memory of the address: the 2026-09-24 redesign deploy ran
+        # without the variable and destroyed the alarm subscription. "none"
+        # because a CloudFormation output cannot be empty.
+        cdk.CfnOutput(self, "AlertEmail", value=str(alert_email) if alert_email else "none")
         cdk.CfnOutput(self, "CloudFrontUrl", value=f"https://{dist.distribution_domain_name}/")
         cdk.CfnOutput(self, "CloudFrontDomain", value=dist.distribution_domain_name,
                       description="CNAME target for the public hostname at cutover")

@@ -259,6 +259,9 @@ def test_alert_email_becomes_a_subscription_only_via_context():
     t = _synth(**{"lou:alertEmail": "ops@example.invalid"})
     sub = _only(t.to_json()["Resources"], "AWS::SNS::Subscription")
     assert sub["Protocol"] == "email" and sub["Endpoint"] == "ops@example.invalid"
+    # deploy.sh reads it back so a later deploy without the variable keeps it.
+    assert t.to_json()["Outputs"]["AlertEmail"]["Value"] == "ops@example.invalid"
+    assert _synth().to_json()["Outputs"]["AlertEmail"]["Value"] == "none"
 
 
 def test_waf_alarm_only_when_waf_is_on():
