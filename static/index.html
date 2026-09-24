@@ -1268,12 +1268,24 @@ function addUserMessage(text) {
   div.setAttribute('aria-label', `Question ${turnCount}`);
   div.appendChild(el('span', 'cell-label', `Q${turnCount}`));
   div.appendChild(el('h2', 'question-text', text));
+  // Only the newest answer reserves a screen of height (see pinQuestion).
+  messagesEl.querySelectorAll('.message.agent').forEach(a => { a.style.minHeight = ''; });
   messagesEl.appendChild(div);
-  scrollBottom();
 }
 
-function scrollBottom() {
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+// A new question scrolls to the top of the view and its answer fills in
+// below it; the page never chases the stream down. It used to follow every
+// event to the bottom, so a cached starter (which arrives all at once) opened
+// on the panel and the input box instead of the question and its headline.
+// The newest answer holds a min-height of one screen minus the question, so a
+// short answer (or an error) still leaves room for its question to reach the
+// top. Content added later lands BELOW the question, so nothing needs
+// re-pinning when the chart draws.
+function pinQuestion(answerEl) {
+  const q = answerEl.previousElementSibling;
+  if (!q || !q.classList.contains('user')) return;
+  answerEl.style.minHeight = `${Math.max(0, messagesEl.clientHeight - q.offsetHeight)}px`;
+  messagesEl.scrollTop += q.getBoundingClientRect().top - messagesEl.getBoundingClientRect().top;
 }
 
 // ── Formatting ───────────────────────────────────────────────
@@ -1704,7 +1716,7 @@ async function streamAnswer(question, opts = {}) {
   const typing = el('div', 'typing');
   typing.innerHTML = '<span></span><span></span><span></span>';
   agentDiv.appendChild(typing);
-  scrollBottom();
+  pinQuestion(agentDiv);
 
   let interpBlock = null;
   let statusLine = null;  // rotating progress line shown while waiting
@@ -1765,10 +1777,6 @@ async function streamAnswer(question, opts = {}) {
         void box.offsetHeight;
         const entry = { build, chart: build() };
         liveCharts.push(entry);
-        // The box went from display:none to full height ABOVE the
-        // interpretation, the error text, and any "Try again" button, so the
-        // turn has to be re-pinned (Safari has no scroll anchoring).
-        scrollBottom();
       } catch (e) {
         console.warn('Chart render skipped:', e && e.message ? e.message : e);
       }
@@ -1830,7 +1838,6 @@ async function streamAnswer(question, opts = {}) {
       errDiv.appendChild(btn);
     }
     card.notices.appendChild(errDiv);
-    scrollBottom();
   };
 
   // The table appears twice: behind "View data" in the card, and in the
@@ -1954,7 +1961,6 @@ async function streamAnswer(question, opts = {}) {
               else agentDiv.appendChild(statusLine);
             }
             statusLine.textContent = event.content;
-            scrollBottom();
           }
           continue;
         }
@@ -2265,8 +2271,6 @@ async function streamAnswer(question, opts = {}) {
         else if (event.type === 'info') {
           card.notices.appendChild(el('div', 'info', event.content));
         }
-
-        scrollBottom();
       }
     }
   } catch (err) {
@@ -2407,7 +2411,7 @@ async function streamAnswer(question, opts = {}) {
           det.appendChild(pre);
           det.open = true;
           card.notices.appendChild(det);
-          scrollBottom();
+          det.scrollIntoView({ block: 'nearest' });
         }
         // A real anchor click is the most reliably-handled mailto trigger
         // (location.href assignment is the variant browsers most often drop).
@@ -2418,7 +2422,6 @@ async function streamAnswer(question, opts = {}) {
         a.remove();
       });
       card.msgGroup.appendChild(reportBtn);
-      scrollBottom();
     }
   }
   // NOTE: isStreaming / resetAskButton / questionEl.focus() are reset in the
