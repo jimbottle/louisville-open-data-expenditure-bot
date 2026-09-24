@@ -15,9 +15,9 @@ branding:
   subtitle: Louisville Metro spending, in plain English
   hero_heading: Where does Louisville’s money go?
   hero_blurb: >-
-    Ask in plain English. Lou writes the SQL, runs it against Louisville Metro
-    spending, salary, capital project, contractor and staffing data from fiscal
-    years 2008 to 2026, and shows its work.
+    Ask in plain English. Lou writes the SQL, runs it against spending, salary,
+    capital project, contractor and staffing data for fiscal years 2008 to 2026,
+    extracted from Louisville Metro Open Data, and shows its work.
   input_placeholder: Ask about spending, salaries, contracts or capital projects
   input_aria_label: Ask a question about Louisville Metro data
   # Rendered as HTML into the About tooltip. Authored in the pack (trusted
