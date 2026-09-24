@@ -361,6 +361,7 @@
 
   .notices { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
 
+  .source-line a { color: var(--ink-2); }
   .source-line {
     margin-top: 20px;
     padding-top: 12px;
@@ -976,6 +977,9 @@ const questionEl = document.getElementById('question');
 const submitBtn = document.getElementById('submit-btn');
 const inputBar = document.getElementById('input-bar');
 let BOT_NAME = 'Lou';  // overridden by the city pack's branding
+// Where the data comes from, named on every answer's source line. Empty until
+// the pack's branding arrives, so no deployment shows another city's portal.
+let SOURCE = { name: '', url: '' };
 // The global Dev switch is gone: every answer carries its own "How Lou got this
 // answer" panel. ?dev=1 still asks the backend for the raw (un-humanized)
 // results and the reasoning trace, and opens the raw log by default.
@@ -1895,7 +1899,20 @@ async function streamAnswer(question, opts = {}) {
     if (tables.length) parts.push(tables.join(', '));
     if (report.rows !== null) parts.push(`${Number(report.rows).toLocaleString()} rows`);
     if (turn.dataThrough) parts.push(`data through ${fmtDate(turn.dataThrough)}`);
-    card.source.textContent = `SOURCE  ${parts.join(' · ')}`;
+    card.source.replaceChildren(document.createTextNode(`SOURCE  ${parts.join(' · ')}`));
+    if (SOURCE.name) {
+      card.source.appendChild(document.createTextNode(' · '));
+      // Pack-supplied, but only ever an http(s) link, set as an attribute.
+      if (/^https?:\/\//i.test(SOURCE.url)) {
+        const a = el('a', null, SOURCE.name);
+        a.setAttribute('href', SOURCE.url);
+        a.setAttribute('target', '_blank');
+        a.setAttribute('rel', 'noopener noreferrer');
+        card.source.appendChild(a);
+      } else {
+        card.source.appendChild(document.createTextNode(SOURCE.name));
+      }
+    }
   };
 
   try {
@@ -2449,6 +2466,7 @@ async function applyBranding() {
     set(document.querySelector('.subtitle'), 'textContent', cfg.subtitle);
     set(document.getElementById('hero-title'), 'textContent', cfg.hero_heading);
     set(document.getElementById('hero-blurb'), 'textContent', cfg.hero_blurb);
+    SOURCE = { name: cfg.source_name || '', url: cfg.source_url || '' };
     const about = document.querySelector('.about-tooltip');
     // Empty is never applied: the shipped placeholder carries the as-is /
     // not-affiliated disclaimer and must not be blanked away.

@@ -1023,6 +1023,10 @@ async def get_config():
         "affiliated with or endorsed by the city."
     ))
     b.setdefault("starter_groups", [])
+    # Attribution on every answer's source line. No URL by default: a link
+    # the pack did not declare could point anywhere.
+    b.setdefault("source_name", f"{who}'s open data portal" if city else "the city's open data portal")
+    b.setdefault("source_url", "")
     return b
 
 

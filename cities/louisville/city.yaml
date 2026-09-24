@@ -20,6 +20,9 @@ branding:
     extracted from Louisville Metro Open Data, and shows its work.
   input_placeholder: Ask about spending, salaries, contracts or capital projects
   input_aria_label: Ask a question about Louisville Metro data
+  # Attribution on every answer's source line (plain text + link).
+  source_name: Louisville Metro Open Data
+  source_url: https://data.louisvilleky.gov/datasets/
   # Rendered as HTML into the About tooltip. Authored in the pack (trusted
   # content) so a city's own attribution, license and disclaimer travel with
   # it — never another city's legal text.

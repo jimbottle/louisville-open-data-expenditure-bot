@@ -147,7 +147,8 @@ def test_frontend_city_literals_live_only_in_the_fallback_defaults():
 def test_branding_covers_every_overridable_frontend_string():
     cfg = load_city_config(LOUISVILLE)
     for key in ("bot_name", "tab_title", "subtitle", "hero_heading", "hero_blurb",
-                "input_placeholder", "input_aria_label", "about_html", "starter_groups"):
+                "input_placeholder", "input_aria_label", "about_html", "starter_groups",
+                "source_name", "source_url"):
         assert cfg.branding.get(key), f"branding missing {key}"
 
 
@@ -175,7 +176,8 @@ def test_default_starter_groups_match_the_pack():
 # ── GET /api/config (the contract applyBranding() depends on verbatim) ───────
 
 FRONTEND_KEYS = ("bot_name", "tab_title", "subtitle", "hero_heading", "hero_blurb",
-                 "input_placeholder", "input_aria_label", "about_html", "starter_groups")
+                 "input_placeholder", "input_aria_label", "about_html", "starter_groups",
+                 "source_name", "source_url")
 
 
 def _get_config():
@@ -232,6 +234,8 @@ def test_api_config_defaults_use_the_packs_own_city(monkeypatch):
     assert "not" in cfg["about_html"] and "affiliated" in cfg["about_html"]
     assert "Louisville" not in cfg["about_html"]
     assert cfg["starter_groups"] == []
+    # Attribution names the pack's own city and links nowhere by default.
+    assert cfg["source_name"] == "Cincinnati's open data portal" and cfg["source_url"] == ""
 
 
 def test_api_config_handles_a_pack_with_no_city_name(monkeypatch):
