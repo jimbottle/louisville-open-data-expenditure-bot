@@ -1820,7 +1820,7 @@ def headline(df, sql: str = None, period: dict = None, label=None) -> dict | Non
         value = json_safe(df[col].iloc[0])
         if not isinstance(value, (int, float)):
             return None
-        year_bits, other_bits, is_partial = [], [], False
+        years, other_bits = [], []     # years: (year, label, partial_year, through)
         for c in df.columns:
             if c == col:
                 continue
@@ -1832,14 +1832,27 @@ def headline(df, sql: str = None, period: dict = None, label=None) -> dict | Non
                 known, partial_year, through = axis_partial(period, axis_basis([v], c))
                 if period and not known:
                     return None        # can't tell whether this year is complete
-                year_bits.append(_year_label(v, y, c))
-                is_partial = is_partial or y == partial_year
+                years.append((y, _year_label(v, y, c), partial_year, through))
             elif kinds[c] == "text":
                 other_bits.append(str(v)[:60])
-        head = (year_bits[0] + " " if year_bits else "") + label(str(col))
+        # One year names the value's period. Several DIFFERENT years (MIN/MAX
+        # of fiscal_year beside a cumulative SUM) are a span: naming the first
+        # read "FY2008 Total Spend" over an all-years total, and flagging the
+        # last as partial put "partial year" on it too (roborev 4781). A span
+        # is shown as a range and flagged as nothing.
+        distinct = sorted({y[0] for y in years})
         context = other_bits[:2]
-        if is_partial:
-            context.append(f"partial year ({_through_phrase(through)})")
+        if len(distinct) == 1:
+            y, name, partial_year, through = years[0]
+            head = f"{name} {label(str(col))}"
+            if y == partial_year:
+                context.append(f"partial year ({_through_phrase(through)})")
+        elif distinct:
+            lo = next(y for y in years if y[0] == distinct[0])[1]
+            hi = next(y for y in years if y[0] == distinct[-1])[1]
+            head = f"{lo}–{hi} {label(str(col))}"
+        else:
+            head = label(str(col))
         return {"value": float(value), "value_kind": kinds[col], "label": head,
                 "context": " · ".join(context) or None}
 

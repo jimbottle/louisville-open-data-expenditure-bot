@@ -2444,3 +2444,18 @@ def test_salary_calendar_axis_still_marks_its_ytd_year():
 def test_single_value_on_an_ambiguous_year_gets_no_headline():
     df = pd.DataFrame({"year": [2026], "total_spend": [4.5e8]})
     assert headline(df, "SELECT ...", _OCT) is None
+
+
+def test_single_row_span_of_years_is_a_range_not_its_first_year():
+    """MIN/MAX(fiscal_year) beside a cumulative SUM: the headline read
+    "FY2008 Total Spend · partial year" for an all-years total (roborev 4781)."""
+    df = pd.DataFrame({"first_fiscal_year": [2008], "last_fiscal_year": [2026],
+                       "total_spend": [5.1e9]})
+    h = headline(df, "SELECT MIN(fiscal_year), MAX(fiscal_year), SUM(extended_amount) FROM expenditures",
+                 _FY_PERIOD)
+    assert h == {"value": 5.1e9, "value_kind": "money",
+                 "label": "FY2008–FY2026 Total Spend", "context": None}
+    # Two year columns holding the same year still name it, and flag it.
+    same = pd.DataFrame({"fiscal_year": [2026], "budget_fiscal_year": [2026], "total_spend": [1.0]})
+    h = headline(same, "SELECT ... FROM expenditures", _FY_PERIOD)
+    assert h["label"] == "FY2026 Total Spend" and "partial year" in h["context"]
