@@ -1107,11 +1107,14 @@ _EXPLANATORY = re.compile(
 
 
 _IRREGULARITY = re.compile(
-    r"\b(?:contract[- ]?splitting|split(?:ting)?\s+(?:contracts?|purchases?|invoices?)|fraud\w*"
+    r"\b(?:contract[- ]?splitting|split\w*\s+(?:of\s+)?(?:contracts?|purchases?|invoices?)"
+    r"|(?:contracts?|purchases?|invoices?)\s+(?:being\s+|were\s+|was\s+|are\s+)?split\w*|fraud\w*"
     # Not bare "waste"/"abuse": solid-waste contracts, Waste Management and
     # substance-abuse programs are ordinary spending topics.
-    r"|wasteful|wasted|kickbacks?|favoritism|bid[- ]rigging|rigg\w*|suspicious|irregular\w*"
-    r"|misuse|embezzl\w*|corrupt\w*|collusion)\b", re.I)
+    # rigg(ed|ing), not rigg\w*: a payee named Riggs is not a question about
+    # wrongdoing.
+    r"|wasteful|wasted|kickbacks?|favoritism|bid[- ]rigging|rigg(?:ed|ing)|suspicious|irregular\w*"
+    r"|misus\w*|embezzl\w*|corrupt\w*|collusion)\b", re.I)
 
 # Shown verbatim (an `info` notice) under any answer to a question probing for
 # wrongdoing. Deterministic on purpose: the judged 2026-09-25 runs showed the

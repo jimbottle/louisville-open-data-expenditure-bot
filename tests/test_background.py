@@ -116,6 +116,12 @@ from analytics_agent import IRREGULARITY_NOTE, is_irregularity
     ("What is spent on solid waste collection?", False),
     ("How much goes to substance abuse programs?", False),
     ("Which vendors receive payments from the most different agencies?", False),
+    # roborev 4855
+    ("Were any funds misused?", True),
+    ("Any splitting of contracts in Parks?", True),
+    ("Are contracts being split to stay under limits?", True),
+    ("Was the paving bid rigged?", True),
+    ("How much did the city pay Riggs Construction?", False),
 ])
 def test_is_irregularity(q, expected):
     assert is_irregularity(q) is expected
@@ -142,3 +148,18 @@ def test_data_notes_follow_the_tables_the_query_reads():
     both = app._data_notes("SELECT * FROM expenditures e JOIN summary_agency_spend s ON 1=1")
     assert len(both) == 1 and "payroll is not included" in both[0]
     assert app._data_notes("SELECT 1") == []
+
+
+
+def test_every_summary_built_from_expenditures_carries_a_table_note():
+    """The payroll data fact tells the model the page states the caveat, so a
+    summary table without a note would lose it silently (roborev 4855)."""
+    import re
+    import yaml
+    from pathlib import Path
+    pack = yaml.safe_load((Path(__file__).resolve().parent.parent / "cities" / "louisville" / "city.yaml").read_text())
+    notes = pack["table_notes"]
+    missing = [s["table"] for s in pack["summaries"]
+               if "expenditures" in {t.lower() for t in re.findall(r"\b(?:FROM|JOIN)\s+([A-Za-z_]\w*)", s["sql"], re.I)}
+               and s["table"] not in notes]
+    assert not missing, f"summary tables built from expenditures with no table_notes entry: {missing}"

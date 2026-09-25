@@ -897,7 +897,10 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
          + CITATION_FORMAT + TRUNCATION_NOTE + TRUNCATION_COUNTS
          + TRUNCATION_COUNTS_WITH_TOTALS + TOTALS_MOVED_NOTE
          + str(MAX_DISPLAY_ROWS) + grounding.GROUNDING_VERSION
-         + EVENT_SCHEMA_VERSION).encode()
+         + EVENT_SCHEMA_VERSION
+         # The table notes ride in the cached frames, so a note edit must
+         # orphan the answers that carry the old one.
+         + json.dumps(CONFIG.table_notes, sort_keys=True)).encode()
     ).hexdigest()[:8]
     # On DynamoDB, keys of older versions simply never match again and the
     # 30-day TTL reclaims them; a scan-and-delete on every cold start would be

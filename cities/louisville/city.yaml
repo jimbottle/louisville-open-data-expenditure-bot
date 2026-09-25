@@ -11,8 +11,6 @@ city:
   title: Louisville Open Data
   fiscal_year_start_month: 7
 
-# Everything the frontend shows, so a second city's deployment never says
-# "Louisville". Served by GET /api/config and applied on page load.
 # Shown under every answer whose SQL reads the table (app._data_notes):
 # what the figures measure, stated here rather than left to the model.
 table_notes:
@@ -24,7 +22,12 @@ table_notes:
   salary_data: Pay is by calendar year and covers regular, overtime, incentive and other pay; benefits are not included.
   summary_top_salaries: Pay is by calendar year and covers regular, overtime, incentive and other pay; benefits are not included.
   capital_projects: Allocations are the amounts recorded for each project in the capital projects dataset.
+  summary_largest_payments: Spending figures are payments to vendors and other payees; employee payroll is not included.
+  summary_expenditure_type: Spending figures are payments to vendors and other payees; employee payroll is not included.
+  summary_agency_contractors: Spending figures are payments to vendors and other payees; employee payroll is not included.
 
+# Everything the frontend shows, so a second city's deployment never says
+# "Louisville". Served by GET /api/config and applied on page load.
 branding:
   bot_name: Lou
   tab_title: Lou · Louisville Metro open data

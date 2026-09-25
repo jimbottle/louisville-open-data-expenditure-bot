@@ -889,6 +889,7 @@ def test_cache_version_includes_the_event_schema_version():
     # The background prompt is model-visible input: a change to it must
     # orphan cached answers like every other prompt.
     assert "BACKGROUND_SYSTEM_PROMPT" in src
+    assert "CONFIG.table_notes" in src      # notes are cached with the answer
 
 
 # ── General background for explanatory questions (03r) ──────────────────────
