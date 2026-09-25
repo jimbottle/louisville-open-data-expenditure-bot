@@ -53,13 +53,20 @@ def test_top_agency_spend_over_1b(con):
 
 # ── Annual spend ──────────────────────────────────────────────────────────────
 
-def test_19_fiscal_years(con):
-    r = con.execute("SELECT COUNT(*) FROM summary_annual_spend").fetchone()
-    assert r[0] == 19  # FY2008 through FY2026 inclusive
+def test_fiscal_years_contiguous_from_2008(con):
+    """One row per fiscal year, FY2008 through the newest loaded year, no gaps
+    (FY2027 was added 2026-09-25)."""
+    n, lo, hi = con.execute(
+        "SELECT COUNT(*), MIN(fiscal_year), MAX(fiscal_year) FROM summary_annual_spend").fetchone()
+    assert lo == 2008 and hi >= 2027
+    assert n == hi - lo + 1
 
 
 def test_annual_spend_range(con):
-    r = con.execute("SELECT MIN(total_spend), MAX(total_spend) FROM summary_annual_spend").fetchone()
+    """Complete years only: the newest (in-progress) year is a partial total."""
+    r = con.execute(
+        "SELECT MIN(total_spend), MAX(total_spend) FROM summary_annual_spend "
+        "WHERE fiscal_year < (SELECT MAX(fiscal_year) FROM summary_annual_spend)").fetchone()
     assert r[0] > 200_000_000  # lowest year > $200M
     assert r[1] < 700_000_000  # highest year < $700M
 
@@ -69,12 +76,13 @@ def test_peak_spending_year_is_2025(con):
     assert r[0] == 2025
 
 
-def test_2026_is_partial_year(con):
-    """FY2026 is still in progress, so its total must trail the last complete year."""
-    rows = dict(con.execute(
-        "SELECT fiscal_year, total_spend FROM summary_annual_spend WHERE fiscal_year IN (2025, 2026)"
-    ).fetchall())
-    assert rows[2026] < rows[2025]
+def test_newest_year_is_partial_year(con):
+    """The newest fiscal year is still in progress, so its total must trail the
+    last complete year."""
+    rows = con.execute(
+        "SELECT total_spend FROM summary_annual_spend ORDER BY fiscal_year DESC LIMIT 2"
+    ).fetchall()
+    assert rows[0][0] < rows[1][0]
 
 
 # ── Largest payments / data artifacts ─────────────────────────────────────────
@@ -2371,18 +2379,22 @@ def test_headline_emits_nothing_without_an_unambiguous_figure(df, sql):
     assert headline(df, sql, _FY_PERIOD) is None
 
 
-def test_headline_on_the_real_annual_spend_table_is_fy2025(con):
+def test_headline_on_the_real_annual_spend_table_is_last_complete_year(con):
     """The starter "How has total annual spending changed from 2008 to 2026?"
-    against the real data and the real year context."""
-    yc = year_context(con, 7, today=_date(2026, 9, 23))
+    against the real data and the real year context: the headline is the last
+    complete fiscal year and the in-progress one is flagged partial."""
+    yc = year_context(con, 7, today=_date(2026, 9, 25))
+    complete = yc["expenditures"]["last_complete_year"]
+    partial = yc["expenditures"]["in_progress_year"]
+    assert partial == complete + 1
     sql = "SELECT * FROM summary_annual_spend ORDER BY fiscal_year"
     df = con.execute(sql).fetchdf()
     period = period_context(yc, sql)
     h = headline(df, sql, period)
-    assert h["label"].startswith("FY2025 ")
-    assert "FY2026 partial" in h["context"]
+    assert h["label"].startswith(f"FY{complete} ")
+    assert f"FY{partial} partial" in h["context"]
     markers = chart_partial_markers(df["fiscal_year"].astype(str).tolist(), "fiscal_year", period)
-    assert markers["partial_labels"] == ["2026"]
+    assert markers["partial_labels"] == [str(partial)]
     assert markers["data_through"] == yc["expenditures"]["covered_through"]
 
 

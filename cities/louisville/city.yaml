@@ -35,7 +35,7 @@ branding:
   hero_heading: Where does Louisville’s money go?
   hero_blurb: >-
     Ask in plain English. Lou writes the SQL, runs it against spending, salary,
-    capital project, contractor and staffing data for fiscal years 2008 to 2026,
+    capital project, contractor and staffing data for fiscal years 2008 to 2027,
     extracted from Louisville Metro Open Data, and shows its work.
   input_placeholder: Ask about spending, salaries, contracts or capital projects
   input_aria_label: Ask a question about Louisville Metro data
@@ -167,7 +167,7 @@ expenditures:
     files: eExpenditures_{year}.csv
     years:
     - 2018
-    - 2026
+    - 2027
   - id: era_2008_2017
     reader: pandas_mapped
     files: eExpenditures_{year}.csv
@@ -484,7 +484,7 @@ dictionary:
         Available for ~31 companies that use corporate agent services (CT Corporation, etc.) as their
         registered agent.'
   expenditures:
-    description: 'Louisville Metro government expenditure transactions, FY2008-FY2026. Unified from two
+    description: 'Louisville Metro government expenditure transactions, FY2008-FY2027. Unified from two
       schema eras: 2008-2017 (old format) and 2018+ (current format).'
     record_scope: Each row is a single invoice line item / payment distribution.
     labels:

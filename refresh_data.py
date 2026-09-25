@@ -45,6 +45,9 @@ EXPENDITURE_DATASETS = {
     "eExpenditures_2024": f"{ARCGIS_BASE}/eExpenditures2024/FeatureServer/0",
     "eExpenditures_2025": f"{ARCGIS_BASE}/eExpenditures_2025/FeatureServer/0",
     "eExpenditures_2026": f"{ARCGIS_BASE}/eExpenditures_2026/FeatureServer/0",
+    # FY2027 is published as "expenditures_2027" (no "e" prefix); it lacks
+    # payment_number, which union_by_name fills with NULL.
+    "eExpenditures_2027": f"{ARCGIS_BASE}/expenditures_2027/FeatureServer/0",
     # Old era (2008-2017) — different schema, mapped at load time
     "eExpenditures_2008": f"{ARCGIS_BASE}/Louisville_Metro_KY_Expenditures_Data_For_Fiscal_Year_2008/FeatureServer/0",
     "eExpenditures_2009": f"{ARCGIS_BASE}/Louisville_Metro_KY_Expenditures_Data_For_Fiscal_Year_2009/FeatureServer/0",
