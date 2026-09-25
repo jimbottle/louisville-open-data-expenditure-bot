@@ -883,8 +883,12 @@ def test_failed_refine_closes_as_failed_and_serves_the_draft(client, monkeypatch
 def test_cache_version_includes_the_event_schema_version():
     import app
     import inspect
-    assert app.EVENT_SCHEMA_VERSION == "2"
-    assert "EVENT_SCHEMA_VERSION" in inspect.getsource(app.startup)
+    assert app.EVENT_SCHEMA_VERSION == "3"   # 3: the `background` event (03r)
+    src = inspect.getsource(app.startup)
+    assert "EVENT_SCHEMA_VERSION" in src
+    # The background prompt is model-visible input: a change to it must
+    # orphan cached answers like every other prompt.
+    assert "BACKGROUND_SYSTEM_PROMPT" in src
 
 
 # ── General background for explanatory questions (03r) ──────────────────────
