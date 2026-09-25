@@ -79,6 +79,8 @@ def _fast_and_isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(app.time, "sleep", lambda *a, **k: None)
     monkeypatch.setattr(app, "CACHE_FILE", str(tmp_path / "cache.json"))
     monkeypatch.setattr(app, "STATS_FILE", str(tmp_path / "stats.json"))
+    # The background call is an LLM call too: never let a test reach one.
+    monkeypatch.setattr(app, "generate_background", lambda *a, **k: ("NONE", {}))
     app.ip_requests.clear()
     app.response_cache.clear()
     yield
@@ -883,3 +885,61 @@ def test_cache_version_includes_the_event_schema_version():
     import inspect
     assert app.EVENT_SCHEMA_VERSION == "2"
     assert "EVENT_SCHEMA_VERSION" in inspect.getsource(app.startup)
+
+
+# ── General background for explanatory questions (03r) ──────────────────────
+
+def _answer_fakes(monkeypatch):
+    import app
+    monkeypatch.setattr(app, "generate_sql", _fake_generate_sql(REAL_SQL))
+    monkeypatch.setattr(app, "interpret_results_stream", _fake_interpret_stream("Top agencies by spend."))
+    monkeypatch.setattr(app, "refine_interpretation_stream", _fake_refine_stream("Public Works led."))
+
+
+def test_explanatory_question_gets_a_labeled_background_note(client, monkeypatch):
+    import app
+    _answer_fakes(monkeypatch)
+    note = "Public payroll extracts often keep records for people with unpaid roles."
+    monkeypatch.setattr(app, "generate_background", lambda *a, **k: (note, {"total_tokens": 9}))
+    ev = _events(_post(client, "Why do some agencies spend so much?"))
+    types = _types(ev)
+    bg = [e for e in ev if e["type"] == "background"]
+    assert bg and bg[0]["content"] == note
+    assert types.index("background") > max(i for i, t in enumerate(types) if t == "interpretation")
+    step = [e for e in ev if e["type"] == "step" and e["id"] == "background"][0]
+    assert step["detail"]["shown"] is True and step["tokens"] == 9
+    assert types[-1] == "done"
+
+
+def test_background_with_a_figure_is_withheld_and_says_why(client, monkeypatch):
+    import app
+    _answer_fakes(monkeypatch)
+    monkeypatch.setattr(app, "generate_background",
+                        lambda *a, **k: ("Most cities spend about 30% on public safety.", {}))
+    ev = _events(_post(client, "Why is public safety the biggest line?"))
+    assert "background" not in _types(ev)
+    step = [e for e in ev if e["type"] == "step" and e["id"] == "background"][0]
+    assert step["status"] == "failed" and step["detail"] == {"shown": False, "reason": "contained figures"}
+
+
+def test_no_background_call_for_a_how_much_question(client, monkeypatch):
+    import app
+    _answer_fakes(monkeypatch)
+    calls = []
+    monkeypatch.setattr(app, "generate_background", lambda *a, **k: calls.append(1) or ("x", {}))
+    ev = _events(_post(client, "Which agencies spent the most in FY2025?"))
+    assert not calls
+    assert not [e for e in ev if e.get("id") == "background"]
+
+
+def test_a_failing_background_call_never_costs_the_answer(client, monkeypatch):
+    import app
+    _answer_fakes(monkeypatch)
+    def boom(*a, **k):
+        raise RuntimeError("provider down")
+    monkeypatch.setattr(app, "generate_background", boom)
+    ev = _events(_post(client, "Why do some agencies spend so much?"))
+    assert "interpretation" in _types(ev) and _types(ev)[-1] == "done"
+    assert "error" not in _types(ev)
+    step = [e for e in ev if e["type"] == "step" and e["id"] == "background"][0]
+    assert step["status"] == "failed" and step["detail"]["error"] == "RuntimeError"

@@ -359,6 +359,19 @@
     max-width: 76ch;
   }
 
+  /* General background (not from the data): set apart by a dashed rule, a
+     label that says so, and the muted ink — never mistaken for the answer. */
+  .background-note {
+    margin-top: 22px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--rule);
+    max-width: 76ch;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .background-note p { font-size: 14px; line-height: 1.65; color: var(--ink-2); }
+
   .notices { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
 
   .source-line a { color: var(--ink-2); }
@@ -1469,6 +1482,7 @@ const STEP_NAMES = {
   retrieve_docs: 'Find related legislation',
   interpret: 'Draft the answer',
   refine: 'Refine',
+  background: 'Add general background',
 };
 const TIER_LABELS = { openrouter: 'free · OpenRouter', paid: 'paid · Cerebras', free: 'free · Cerebras' };
 
@@ -1523,6 +1537,11 @@ function stepView(ev) {
       if (d.empty_result) note = 'Explained why the query returned nothing.';
       else if (d.retried) note = 'The first stream failed mid-answer and was re-run on the backup provider.';
       break;
+    case 'background':
+      if (d.shown) note = 'General knowledge only; checked for figures and city-specific claims before showing.';
+      else if (d.reason === 'none') { status = 'nothing to add'; kind = 'idle'; note = 'The model had no general background worth adding.'; }
+      else if (d.reason) note = `Withheld: the note ${d.reason}. Background may not state numbers or anything about this city.`;
+      break;
     case 'refine':
       if (d.served === 'draft') note = 'The refine pass failed, so the draft was served.';
       else if (d.served === 'partial') note = 'The refine pass stopped part-way; the partial text was served.';
@@ -1563,6 +1582,7 @@ function buildCard(agentDiv) {
     headline: slot('div', 'headline'),
     figure: slot('div', 'figure'),
     prose: slot('div', 'prose'),
+    background: slot('div', 'background-note'),
     notices: slot('div', 'notices'),
     source: slot('div', 'source-line'),
     footnotes: slot('div', 'footnotes'),
@@ -1654,6 +1674,7 @@ function buildReportBody(report, interpText, scale, extras = true) {
     if (report.sql) parts.push('', 'SQL:', cut(report.sql, 500));
     if (report.results) parts.push('', `Results (${report.rows ?? '?'} rows):`, cut(report.results, 400));
     if (report.sources) parts.push('', 'Cited documents:', cut(report.sources, 300));
+    if (report.background) parts.push('', 'General background shown:', cut(report.background, 400));
     if (report.debug.length) parts.push('', 'Debug:', cut(report.debug.join('\n'), 250));
   }
   parts.push('', 'What looked wrong (please describe):', '');
@@ -1726,7 +1747,7 @@ async function streamAnswer(question, opts = {}) {
   let statusLine = null;  // rotating progress line shown while waiting
   let interpText = '';  // collect full interpretation for history
   // Everything the report-answer email can include.
-  const report = { question, sql: '', results: '', rows: null, debug: [], sources: '' };
+  const report = { question, sql: '', results: '', rows: null, debug: [], sources: '', background: '' };
   // Per-turn state the card pieces share: the partial periods (from the chart
   // event) tag table rows; the structured results feed the table and the CSV.
   const turn = { partial: new Set(), dataThrough: null, results: null, tablesDrawn: false };
@@ -1985,7 +2006,7 @@ async function streamAnswer(question, opts = {}) {
         // Only content a reader sees on the card ends the waiting state; the
         // panel's contents (steps, SQL, logs) arrive collapsed and must not
         // tear down the typing indicator / status line.
-        const visibleContent = ['chart', 'headline', 'interpretation', 'error', 'info'].includes(event.type);
+        const visibleContent = ['chart', 'headline', 'interpretation', 'background', 'error', 'info'].includes(event.type);
         if (visibleContent) {
           receivedAnyEvent = true;
           clearWaiting();
@@ -2248,6 +2269,13 @@ async function streamAnswer(question, opts = {}) {
               box.appendChild(row);
             });
           }
+        }
+
+        else if (event.type === 'background') {
+          report.background = event.content;
+          card.background.replaceChildren(
+            el('span', 'mono-label', 'General background · not from the data'),
+            el('p', null, event.content));
         }
 
         else if (event.type === 'log') {

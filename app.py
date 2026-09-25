@@ -127,6 +127,10 @@ from analytics_agent import (
     refine_events_with_fallback,
     refine_interpretation_stream,
     REFINE_SYSTEM_PROMPT,
+    BACKGROUND_SYSTEM_PROMPT,
+    generate_background,
+    is_explanatory,
+    validate_background,
 )
 from data_model import (
     CONFIG,
@@ -885,7 +889,8 @@ This data covers expenditures from FY{first_year}-FY{newest_year}, employee sala
     # where two verification runs replayed a pre-fix answer and looked like the
     # fix had failed. A stale answer here misquotes a row count to a reader.
     CACHE_VERSION = hashlib.sha1(
-        (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + json.dumps(CITY_FACTS)
+        (sql_system + interpret_system + REFINE_SYSTEM_PROMPT + BACKGROUND_SYSTEM_PROMPT
+         + json.dumps(CITY_FACTS)
          + CITATION_FORMAT + TRUNCATION_NOTE + TRUNCATION_COUNTS
          + TRUNCATION_COUNTS_WITH_TOTALS + TOTALS_MOVED_NOTE
          + str(MAX_DISPLAY_ROWS) + grounding.GROUNDING_VERSION
@@ -1126,12 +1131,22 @@ CITATION_FORMAT = "gateway-v1"
 # data_through, and the `headline` and `step` events are new. A cached starter
 # answer would otherwise replay the OLD frames forever — the prompts did not
 # change, so nothing else would orphan it. Bump on any change to event shape.
-EVENT_SCHEMA_VERSION = "2"
+EVENT_SCHEMA_VERSION = "3"   # 3: `background` event (03r)
 
 # Year coverage from year_context(), kept for per-request period markers
 # (which chart point is partial, which period a headline may use). Set at
 # startup.
 YEAR_CONTEXT: dict = {}
+
+def _city_names() -> list:
+    """Names a general-background note must not use (validate_background):
+    the pack's city name and its distinctive words ("Louisville Metro" ->
+    also "Louisville"), never generic ones like "Metro" or "City"."""
+    name = ((CONFIG.city or {}).get("name") or "").strip()
+    generic = {"metro", "city", "county", "government", "of", "the"}
+    words = [w for w in re.split(r"\W+", name) if len(w) > 3 and w.lower() not in generic]
+    return list(dict.fromkeys(n for n in [name, *words] if n))
+
 
 # City data facts with year placeholders resolved (set at startup).
 CITY_FACTS: list[str] = []
@@ -2025,6 +2040,38 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
                 r_detail = {"served": "refined"}
             yield step("refine", r_status, t_refine, model=model_for(refine_tier), tier=refine_tier,
                        chunks=refine_counter["n"], **r_detail)
+
+        # General background for explanatory questions (louisville-open-data-03r):
+        # "why are there so many $0 roles?" deserves the usual reasons public
+        # payroll systems carry $0 rows, not just a guess from the rows. One
+        # short extra call, only for why/what-does-it-mean questions; the note
+        # is shown apart from the answer, labeled as not from the data, and
+        # dropped outright when validate_background finds a figure or the
+        # city's name in it. Best-effort: a failure never touches the answer.
+        if is_explanatory(question) and served_text:
+            yield send("status", {"content": "Adding general background…"})
+            t_bg = time.time()
+            try:
+                note, bg_usage = generate_background(
+                    client, MODEL, question, "".join(served_text), on_retry=on_retry,
+                    fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
+                bg_tier = get_last_tier_used()
+                track_usage(bg_usage.get("prompt_tokens", 0), bg_usage.get("completion_tokens", 0), tier=bg_tier)
+                shown, reason = validate_background(note, _city_names())
+                if shown:
+                    yield send("background", {"content": humanize_prose(shown)})
+                    yield step("background", llm_status(bg_tier, get_primary_tier()), t_bg,
+                               model=model_for(bg_tier), tier=bg_tier,
+                               tokens=bg_usage.get("total_tokens"), shown=True)
+                else:
+                    # "none" = nothing useful to add (a real, fine outcome);
+                    # anything else = the note broke a rule and was withheld.
+                    yield step("background", "ok" if reason == "none" else "failed", t_bg,
+                               model=model_for(bg_tier), tier=bg_tier,
+                               tokens=bg_usage.get("total_tokens"), shown=False, reason=reason)
+            except Exception as e:
+                log.warning("Background note failed (answer unaffected): %s", e)
+                yield step("background", "failed", t_bg, shown=False, error=type(e).__name__)
 
         # Citations go out after the answer, as a footer under a finished
         # response — and only for documents the answer actually cited.

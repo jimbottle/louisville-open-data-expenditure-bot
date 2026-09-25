@@ -1045,6 +1045,94 @@ def refine_interpretation_stream(client, model, question, sql, results, draft, o
             yield chunk.choices[0].delta.content
 
 
+# ── General background (louisville-open-data-03r) ────────────────────────────
+# For explanatory questions ("why are there so many $0 roles?") the data answer
+# alone can only guess from the rows. One extra short call adds GENERAL
+# background — how public payroll, budget and procurement systems usually
+# work — rendered apart from the answer and labeled as not coming from the
+# data. The prompt forbids city-specific claims and numbers, and
+# validate_background enforces the parts a machine can check, so a note that
+# slips a figure or names the city is dropped rather than shown.
+BACKGROUND_SYSTEM_PROMPT = textwrap.dedent("""\
+    You add a short GENERAL BACKGROUND note beside an answer about a city
+    government's open data. The data answer has already been given; do not
+    repeat, summarize or correct it.
+
+    Explain, in general terms, the concepts or the common reasons behind what
+    the user asked: how public payroll, budgeting, procurement, grants or
+    accounting systems typically work.
+
+    Rules:
+    - General knowledge only. Never state or imply facts about this specific
+      city, its departments, people, vendors or records.
+    - No numbers of any kind: no amounts, counts, percentages, dates or years.
+    - Offer typical reasons as possibilities ("often", "commonly"), never as
+      the explanation for this data.
+    - Two to four sentences of plain text. No lists, no markdown.
+    - If general background would not help, reply with exactly: NONE
+""")
+
+_EXPLANATORY = re.compile(
+    r"\bwhy\b|\bhow come\b|\bexplain\b|\bwhat (?:does|do)\b.{0,80}\bmean\b"
+    r"|\bwhat(?:'s| is| are) the (?:reason|reasons|purpose)\b|\bhow (?:does|do)\b.{0,80}\bwork\b",
+    re.I)
+
+
+def is_explanatory(question: str) -> bool:
+    """Does the question ask WHY or what something means (vs. how much)?"""
+    return bool(_EXPLANATORY.search(question or ""))
+
+
+def validate_background(text: str, city_names=()) -> tuple[str | None, str | None]:
+    """(note, None) when the note may be shown, else (None, reason).
+
+    Mechanical checks only: the prompt asks for general knowledge, and these
+    catch the ways a note most plausibly breaks that — a figure (any digit,
+    currency or percent sign), or naming the city. "NONE" is the model saying
+    there is nothing useful to add."""
+    t = (text or "").strip()
+    if not t or t.upper().rstrip(".") == "NONE":
+        return None, "none"
+    if re.search(r"[0-9$%€£]", t):
+        return None, "contained figures"
+    low = t.lower()
+    if any(n and n.lower() in low for n in city_names):
+        return None, "named the city"
+    if len(t) > 1200:
+        return None, "too long"
+    return t, None
+
+
+def generate_background(client, model, question: str, answer: str, on_retry=None,
+                        fallback_client=None, fallback_model=None) -> tuple[str, dict]:
+    """The raw background note (validate it before showing) and token usage."""
+    user_msg = (f"Question: {question}\n\n"
+                f"The data answer, for context only (do not restate it):\n{(answer or '')[:1500]}")
+
+    def _make_call(c, m):
+        def _call():
+            resp = c.chat.completions.create(
+                model=m,
+                messages=[{"role": "system", "content": BACKGROUND_SYSTEM_PROMPT},
+                          {"role": "user", "content": user_msg}],
+                temperature=0.2,
+                # Room for a reasoning model's hidden reasoning before its
+                # few sentences of content (see the MODEL notes in CLAUDE.md).
+                max_tokens=1200,
+            )
+            _message_text(resp)  # empty reply -> fail over
+            return resp
+        return _call
+    resp = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry,
+                                     fallback_client=fallback_client, fallback_model=fallback_model)
+    usage = {}
+    if getattr(resp, "usage", None):
+        usage = {"prompt_tokens": resp.usage.prompt_tokens or 0,
+                 "completion_tokens": resp.usage.completion_tokens or 0,
+                 "total_tokens": resp.usage.total_tokens or 0}
+    return _message_text(resp).strip(), usage
+
+
 def refine_events_with_fallback(refine_iter, draft, send, transform=None, on_fail=None, timeout=90, counter=None, sink=None):
     """Yield SSE events for the refine pass with the no-lost-answer invariant:
     if the refiner fails before producing anything, the draft is served
