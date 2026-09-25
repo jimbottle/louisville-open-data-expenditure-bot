@@ -39,6 +39,10 @@ class CityConfig:
         self.summaries = raw.get("summaries", [])
         self.dictionary = raw.get("dictionary", {})
         self.data_facts = raw.get("data_facts", [])
+        # {table: note} shown under an answer whose SQL reads that table —
+        # what the figures measure, stated by the pack rather than left to
+        # the model (see app._data_notes).
+        self.table_notes = raw.get("table_notes", {}) or {}
         self.branding = raw.get("branding", {})
 
     def data_facts_for(self, values: dict | None = None) -> list:

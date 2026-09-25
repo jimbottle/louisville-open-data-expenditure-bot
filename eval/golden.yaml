@@ -178,7 +178,7 @@
 
 - id: grant-funding
   tags: [summary]
-  question: How much grant funding has Louisville received and from which sources?
+  question: How much has Louisville spent from grant and federal funds, and which funds are largest?
   reference_sql: SELECT ROUND(SUM(total_amount), 2) FROM summary_grant_funding
   check: scalar
 

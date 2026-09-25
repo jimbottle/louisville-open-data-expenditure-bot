@@ -1501,6 +1501,17 @@ _YEAR_LABEL = re.compile(r"(FY|CY)?\s*(\d{4})(?:\.0+)?", re.I)
 _TABLE_REF = re.compile(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)", re.I)
 
 
+def tables_read(sql: str) -> list:
+    """Tables a query reads, in first-seen order (string literals ignored).
+    CTE names come back too; callers look names up in a known-table map."""
+    out = []
+    for t in _TABLE_REF.findall(_blank_literals(sql or "")):
+        t = t.lower()
+        if t not in out:
+            out.append(t)
+    return out
+
+
 def json_safe(v):
     """One result cell as a JSON-serializable value.
 

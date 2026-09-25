@@ -130,6 +130,8 @@ from analytics_agent import (
     BACKGROUND_SYSTEM_PROMPT,
     generate_background,
     is_explanatory,
+    is_irregularity,
+    IRREGULARITY_NOTE,
     validate_background,
 )
 from data_model import (
@@ -147,6 +149,7 @@ from data_model import (
     headline,
     period_context,
     result_table,
+    tables_read,
     load_all_data,
     prebuilt_meta,
     load_prebuilt,
@@ -1131,12 +1134,28 @@ CITATION_FORMAT = "gateway-v1"
 # data_through, and the `headline` and `step` events are new. A cached starter
 # answer would otherwise replay the OLD frames forever — the prompts did not
 # change, so nothing else would orphan it. Bump on any change to event shape.
-EVENT_SCHEMA_VERSION = "3"   # 3: `background` event (03r)
+EVENT_SCHEMA_VERSION = "4"   # 3: `background` event (03r); 4: `note` events
 
 # Year coverage from year_context(), kept for per-request period markers
 # (which chart point is partial, which period a headline may use). Set at
 # startup.
 YEAR_CONTEXT: dict = {}
+
+def _data_notes(sql: str) -> list:
+    """The pack's notes for the tables this query read (city.yaml
+    table_notes), de-duplicated, in the order the tables appear. What a figure
+    measures — vendor payments, not payroll; spending from grant-funded
+    accounts, not money received — is a property of the table, so it is
+    stated by the pack on every such answer instead of being left to a model
+    that honoured it on one run and not the next (2026-09-25 judged runs)."""
+    notes = CONFIG.table_notes or {}
+    out = []
+    for t in tables_read(sql):
+        n = notes.get(t)
+        if n and n not in out:
+            out.append(n)
+    return out
+
 
 def _city_names() -> list:
     """Names a general-background note must not use (validate_background):
@@ -2054,6 +2073,12 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
             # Visible to every reader, after the answer: the self-correction is
             # part of the answer's provenance, not a dev-only log line.
             yield send("info", {"content": repair_note})
+        # Deterministic, no LLM: what the figures measure (per table) and, for
+        # questions probing wrongdoing, the fixed caveat.
+        for note in _data_notes(sql):
+            yield send("note", {"content": note})
+        if is_irregularity(question):
+            yield send("info", {"content": IRREGULARITY_NOTE})
         # General background for explanatory questions (louisville-open-data-03r):
         # "why are there so many $0 roles?" deserves the usual reasons public
         # payroll systems carry $0 rows, not just a guess from the rows. One

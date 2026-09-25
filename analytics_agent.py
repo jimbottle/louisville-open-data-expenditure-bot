@@ -774,6 +774,29 @@ def build_interpret_prompt(schema_desc: str, extra_facts=None) -> str:
         ## Rules
         - Give concise, insightful answers. Lead with the key finding.
         - Mention specific numbers and comparisons.
+        - The page shows the full results table and a chart under your answer,
+          so summarize instead of transcribing: after the key finding give at
+          most five supporting points — the largest items, or for a time
+          series the turning points (peaks, dips, the biggest year-over-year
+          changes). List every row only when the user explicitly asks for a
+          complete list.
+        - When the results span or add up several years, name the period in
+          the first sentence (e.g. fiscal years 2008-2026, the newest year
+          partial). Pay figures are calendar years: name the year.
+        - Round for reading: a million or more as $X.XM, smaller amounts to
+          whole dollars, cents only below $1,000.
+        - Write about the city's records and what they show; leave out how the
+          numbers were retrieved.
+        - Copy names exactly as the results spell them, one mention of each
+          field per line.
+        - For questions probing irregularities (contract splitting, fraud,
+          waste, favoritism), stay neutral: present a pattern as something that
+          could merit review, say plainly that it is not evidence of
+          wrongdoing, call any threshold in the SQL an assumption, and note that
+          repeated same-size payments often come from subscriptions, utilities
+          or service contracts.
+        - When rows are different views of the same spending (a department
+          total beside a category total), say that they overlap.
         - NEVER rescale numbers. Repeat values at the magnitude shown in the results:
           192,770.57 is about $192.8K (thousands), NOT $192.77M. Only write M or B
           if the digits in the results actually reach millions/billions.
@@ -785,10 +808,11 @@ def build_interpret_prompt(schema_desc: str, extra_facts=None) -> str:
         - If the data shows something notable or unexpected, call it out.
         - A "Related city legislation" block may follow the results. It is
           retrieved by keyword, so some entries will be irrelevant — judge
-          each one. When a document explains what the money was for, why it
-          was appropriated, or a figure in the results, add one short sentence
-          of context and name its file number inline (e.g. "Council set the
-          priorities for this money in R-083-21"). Ignore the rest in silence.
+          each one. Only when a document explains a specific figure or change
+          in the results — what that money was for or why it was appropriated
+          — add one short sentence of context and name its file number inline
+          (e.g. "Council set the priorities for this money in R-083-21"),
+          without any amount from the document. Ignore the rest in silence.
           The results are always the source of every number: never attribute a
           figure to a document, never let a document override the results, and
           never list documents you did not use.
@@ -962,18 +986,21 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
     - Plain, non-technical language: no SQL, database, or column-name jargon
       (say "department", never "agency_canonical").
     - Lead with the direct answer to the question in the first sentence.
-    - Consistent number style: dollar amounts with $ and thousands separators;
-      rounding for readability is fine ($19.6M, $267,811) but NEVER change a
+    - Consistent number style: $ and thousands separators; round for reading
+      ($19.6M, $267,811; cents only under $1,000) but NEVER change a
       number's magnitude — check every figure against the RESULTS table
       (192,770.57 is about $192.8K, not $192.77M).
     - Every number and claim must come from the RESULTS table or be directly
       computable from it. Delete anything the results don't support,
       including any sentence describing what a figure includes or what years
-      it covers when the results don't state that.
+      it covers when the results don't state that. The city facts listed
+      below count as support; so does a neutral caveat that a pattern is not
+      evidence of wrongdoing or that same-size payments are often routine.
     - ONE narrow exception to that deletion rule: a RELATED CITY LEGISLATION
       block may follow the results. Keep a sentence saying what a document
-      authorized or what it was for, with its file number spelled exactly as
-      the draft wrote it. Never use a document to state what a figure
+      authorized or what it was for — only when it concerns the rows' own
+      project or program, with every document amount removed (numbers come
+      only from RESULTS) — with its file number spelled as the draft wrote it. Never use a document to state what a figure
       includes, which years it covers, or how it was computed — those claims
       still come only from the results, and the bullet above still deletes
       them. Never introduce a citation the draft did not make, and never let a
@@ -982,6 +1009,7 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       legislation ONLY when the question asked about legislation (never cut
       it as jargon or swap in a field name then). When the question did not
       ask about legislation, DELETE that sentence: it is boilerplate there.
+    - Describe what the records show, never why anyone made a payment.
     - NEVER total or net a long list yourself: arithmetic is only allowed
       over a handful of values you can verify digit by digit. If the results
       have no total row, do not state an overall total — describe individual
@@ -990,8 +1018,8 @@ REFINE_SYSTEM_PROMPT = textwrap.dedent("""\
       (e.g. a department total and a category total, where one purchase can
       appear in both). Report such figures separately; summing them
       double-counts. Only add rows that are mutually exclusive slices.
-    - Short numbered lines for lists; keep the whole answer under 180 words
-      unless the draft genuinely needs more.
+    - At most five numbered list lines unless the question asks for a full
+      list; under 180 words unless the draft genuinely needs more.
     - Plain text only — no markdown headers or tables.
 
     Return ONLY the rewritten answer, nothing else.""")
@@ -1076,6 +1104,31 @@ _EXPLANATORY = re.compile(
     r"\bwhy\b|\bhow come\b|\bexplain\b|\bwhat (?:does|do)\b.{0,80}\bmean\b"
     r"|\bwhat(?:'s| is| are) the (?:reason|reasons|purpose)\b|\bhow (?:does|do)\b.{0,80}\bwork\b",
     re.I)
+
+
+_IRREGULARITY = re.compile(
+    r"\b(?:contract[- ]?splitting|split(?:ting)?\s+(?:contracts?|purchases?|invoices?)|fraud\w*"
+    # Not bare "waste"/"abuse": solid-waste contracts, Waste Management and
+    # substance-abuse programs are ordinary spending topics.
+    r"|wasteful|wasted|kickbacks?|favoritism|bid[- ]rigging|rigg\w*|suspicious|irregular\w*"
+    r"|misuse|embezzl\w*|corrupt\w*|collusion)\b", re.I)
+
+# Shown verbatim (an `info` notice) under any answer to a question probing for
+# wrongdoing. Deterministic on purpose: the judged 2026-09-25 runs showed the
+# neutrality rule in the prompts holding on one run and not the next — one
+# answer speculated about a vendor's motive. A caveat that matters this much
+# cannot depend on a sample.
+IRREGULARITY_NOTE = (
+    "Patterns like these are leads for review, not evidence of wrongdoing. "
+    "Repeated payments of a similar size are common for subscriptions, "
+    "utilities and recurring service contracts, and spending records alone "
+    "cannot show why a payment was made."
+)
+
+
+def is_irregularity(question: str) -> bool:
+    """Does the question look for wrongdoing (splitting, fraud, waste ...)?"""
+    return bool(_IRREGULARITY.search(question or ""))
 
 
 def is_explanatory(question: str) -> bool:

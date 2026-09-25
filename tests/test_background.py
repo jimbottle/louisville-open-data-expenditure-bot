@@ -99,3 +99,46 @@ def test_generate_background_gives_up_when_the_budget_is_spent():
     from analytics_agent import generate_background
     with pytest.raises(Exception):
         generate_background([(_FakeClient("x"), "m", "paid")], "why?", "a", budget=0.5)
+
+
+
+# ── Deterministic caveats (2026-09-25 judged runs) ───────────────────────────
+from analytics_agent import IRREGULARITY_NOTE, is_irregularity
+
+
+@pytest.mark.parametrize("q,expected", [
+    ("Are there any patterns that suggest potential contract splitting?", True),
+    ("Is there evidence of fraud in fleet purchases?", True),
+    ("Any wasteful spending in parks?", True),
+    ("Show me suspicious payments", True),
+    ("Signs of bid-rigging on paving contracts?", True),
+    ("How much did the city pay Waste Management of Kentucky?", False),
+    ("What is spent on solid waste collection?", False),
+    ("How much goes to substance abuse programs?", False),
+    ("Which vendors receive payments from the most different agencies?", False),
+])
+def test_is_irregularity(q, expected):
+    assert is_irregularity(q) is expected
+
+
+def test_irregularity_note_is_neutral_and_has_no_figures():
+    assert "not evidence of wrongdoing" in IRREGULARITY_NOTE
+    assert not any(ch.isdigit() for ch in IRREGULARITY_NOTE)
+
+
+def test_tables_read_ignores_string_literals():
+    from data_model import tables_read
+    sql = "SELECT 'from salary_data' AS x FROM summary_grant_funding g JOIN expenditures e ON 1=1"
+    assert tables_read(sql) == ["summary_grant_funding", "expenditures"]
+
+
+def test_data_notes_follow_the_tables_the_query_reads():
+    import app
+    grant = app._data_notes("SELECT fund, SUM(total_amount) FROM summary_grant_funding GROUP BY fund")
+    assert len(grant) == 1 and "not grant awards or money received" in grant[0]
+    pay = app._data_notes("SELECT * FROM salary_data")
+    assert "calendar year" in pay[0] and "benefits are not included" in pay[0]
+    # Two spending tables with the same note: shown once.
+    both = app._data_notes("SELECT * FROM expenditures e JOIN summary_agency_spend s ON 1=1")
+    assert len(both) == 1 and "payroll is not included" in both[0]
+    assert app._data_notes("SELECT 1") == []

@@ -17,8 +17,19 @@ def test_refine_prompt_carries_the_load_bearing_rules():
     assert "agency_canonical" in p               # jargon example
     assert "mutually exclusive" in p             # the overlapping-views rule
     assert "Stay on task" in p                   # domain-scoping / anti-injection
-    # lean by design: the rubric itself stays small (~660 tokens, well under 1K)
-    assert len(p) < 2800
+    # The 2026-09-25 judged pass over the warmed starters (see the commit):
+    # the city facts count as support, neutral wrongdoing caveats survive,
+    # legislation stays on topic, and lists stay short.
+    import re
+    flat = re.sub(r"\s+", " ", p)
+    assert "city facts listed below count as support" in flat
+    assert "not evidence of wrongdoing" in flat
+    assert "rows' own project or program" in flat
+    assert "At most five numbered list lines" in flat
+    assert "never why anyone made a payment" in flat
+    # lean by design: the rubric stays small (~750 tokens, well under 1K);
+    # raised from 2800 for the rules above.
+    assert len(p) < 3200
 
 
 class _Delta:

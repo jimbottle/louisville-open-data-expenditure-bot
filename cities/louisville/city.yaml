@@ -13,6 +13,18 @@ city:
 
 # Everything the frontend shows, so a second city's deployment never says
 # "Louisville". Served by GET /api/config and applied on page load.
+# Shown under every answer whose SQL reads the table (app._data_notes):
+# what the figures measure, stated here rather than left to the model.
+table_notes:
+  expenditures: Spending figures are payments to vendors and other payees; employee payroll is not included.
+  summary_annual_spend: Spending figures are payments to vendors and other payees; employee payroll is not included.
+  summary_agency_spend: Spending figures are payments to vendors and other payees; employee payroll is not included.
+  summary_top_contractors: Totals are payments to each vendor across all fiscal years.
+  summary_grant_funding: These are payments charged to grant, federal and pass-through funds (spending from grant-funded accounts), not grant awards or money received. Fund names are accounting funds, not the grantors.
+  salary_data: Pay is by calendar year and covers regular, overtime, incentive and other pay; benefits are not included.
+  summary_top_salaries: Pay is by calendar year and covers regular, overtime, incentive and other pay; benefits are not included.
+  capital_projects: Allocations are the amounts recorded for each project in the capital projects dataset.
+
 branding:
   bot_name: Lou
   tab_title: Lou · Louisville Metro open data
@@ -58,12 +70,19 @@ branding:
       chips:
         - ["Who runs the top contractors?", "Who are the registered agents for the top 10 contractors by total spend?"]
         - ["Largest capital projects", "What are the largest capital projects and how much was allocated to each?"]
-        - ["Grant funding breakdown", "How much grant funding has Louisville received and from which sources?"]
+        - ["Grant funding breakdown", "How much has Louisville spent from grant and federal funds, and which funds are largest?"]
 
 # Facts the answer-writing prompts must enforce (injected into the interpret
 # and refine system prompts — per-city, so a city whose data DOES include
 # benefits simply states different facts here).
 data_facts:
+  # Verified 2026-09-25 against data/lou.duckdb: wage categories are $0.1M of
+  # FY2025 expenditures, while LMPD's CY2025 pay alone is ~$145M.
+  - "Expenditure figures are payments to vendors and other payees (invoice payments); employee payroll is in the salary data instead, so an expenditure total is never a department's full cost or budget. The page states this under the answer, so the answer itself need not repeat it."
+  - "Salary and compensation figures are by calendar year (CalYear): write calendar year, not fiscal year, for any pay figure."
+  # summary_grant_funding filters expenditures by fund NAME (grant, federal,
+  # CARES, CDBG, pass thru ...).
+  - "Grant figures are payments charged to funds whose names mark them as grant, federal or pass-through money: spending from grant-funded accounts, not grant awards or money received. Open any grant answer by describing them that way, even when the question asks what the city received, and call each entry a fund (an accounting fund), since the data does not name who gave the grant."
   - Compensation figures are pay components only (regular, overtime, incentive,
     other); the data contains no benefits information, so never describe an
     amount as including benefits.
@@ -327,7 +346,7 @@ summaries:
     WHERE cp.sos_registered_agent IS NOT NULL
     ORDER BY total_spend DESC
 - table: summary_grant_funding
-  question: How much grant funding has Louisville received?
+  question: How much has Louisville spent from grant and federal funds?
   sql: |-
     CREATE TABLE summary_grant_funding AS
     SELECT fund, ROUND(SUM(extended_amount), 2) AS total_amount,

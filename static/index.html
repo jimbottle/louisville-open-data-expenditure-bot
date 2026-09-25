@@ -375,6 +375,9 @@
   .notices { margin-top: 16px; display: flex; flex-direction: column; gap: 10px; }
 
   .source-line a { color: var(--ink-2); }
+  /* What the figures measure, from the city pack (the `note` event). */
+  .data-notes { margin-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+  .data-notes p { font-size: 12px; line-height: 1.55; color: var(--ink-2); }
   .source-line {
     margin-top: 20px;
     padding-top: 12px;
@@ -1025,7 +1028,7 @@ const DEFAULT_STARTER_GROUPS = [
   { label: 'Contracts & projects', chips: [
     ['Who runs the top contractors?', 'Who are the registered agents for the top 10 contractors by total spend?'],
     ['Largest capital projects', 'What are the largest capital projects and how much was allocated to each?'],
-    ['Grant funding breakdown', 'How much grant funding has Louisville received and from which sources?'],
+    ['Grant funding breakdown', 'How much has Louisville spent from grant and federal funds, and which funds are largest?'],
   ] },
 ];
 let STARTER_GROUPS = DEFAULT_STARTER_GROUPS;
@@ -1591,6 +1594,7 @@ function buildCard(agentDiv) {
     background: slot('div', 'background-note'),
     notices: slot('div', 'notices'),
     source: slot('div', 'source-line'),
+    dataNotes: slot('div', 'data-notes'),
     footnotes: slot('div', 'footnotes'),
     actions: el('div', 'actions'),
     dataView: el('div', 'data-view'),
@@ -2282,6 +2286,10 @@ async function streamAnswer(question, opts = {}) {
           card.background.replaceChildren(
             el('span', 'mono-label', 'General background · not from the data'),
             el('p', null, event.content));
+        }
+
+        else if (event.type === 'note') {
+          card.dataNotes.appendChild(el('p', null, `NOTE  ${event.content}`));
         }
 
         else if (event.type === 'log') {

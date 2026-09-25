@@ -883,7 +883,7 @@ def test_failed_refine_closes_as_failed_and_serves_the_draft(client, monkeypatch
 def test_cache_version_includes_the_event_schema_version():
     import app
     import inspect
-    assert app.EVENT_SCHEMA_VERSION == "3"   # 3: the `background` event (03r)
+    assert app.EVENT_SCHEMA_VERSION == "4"   # 3: `background` (03r); 4: `note`
     src = inspect.getsource(app.startup)
     assert "EVENT_SCHEMA_VERSION" in src
     # The background prompt is model-visible input: a change to it must
@@ -960,3 +960,18 @@ def test_background_runs_after_citations_and_repair_note(client, monkeypatch):
     for t in ("sources", "info"):
         if t in types:
             assert types.index(t) < bg
+
+
+
+def test_answers_carry_the_packs_data_note_and_the_irregularity_caveat(client, monkeypatch):
+    """Deterministic caveats (2026-09-25 judged runs): the table note for what
+    the figures measure, and the fixed wrongdoing caveat — no LLM involved."""
+    import app
+    _answer_fakes(monkeypatch)
+    ev = _events(_post(client, "Are there any patterns that suggest potential contract splitting?"))
+    notes = [e["content"] for e in ev if e["type"] == "note"]
+    assert notes and "payroll is not included" in notes[0]          # REAL_SQL reads expenditures
+    infos = [e["content"] for e in ev if e["type"] == "info"]
+    assert app.IRREGULARITY_NOTE in infos
+    ev = _events(_post(client, "Which agencies spent the most in FY2025?"))
+    assert app.IRREGULARITY_NOTE not in [e["content"] for e in ev if e["type"] == "info"]
