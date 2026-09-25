@@ -1142,10 +1142,15 @@ def _city_names() -> list:
     """Names a general-background note must not use (validate_background):
     the pack's city name and its distinctive words ("Louisville Metro" ->
     also "Louisville"), never generic ones like "Metro" or "City"."""
-    name = ((CONFIG.city or {}).get("name") or "").strip()
+    city = CONFIG.city or {}
+    name = (city.get("name") or "").strip()
     generic = {"metro", "city", "county", "government", "of", "the"}
     words = [w for w in re.split(r"\W+", name) if len(w) > 3 and w.lower() not in generic]
-    return list(dict.fromkeys(n for n in [name, *words] if n))
+    # The state and any pack-declared names (county, consolidated government,
+    # well-known agencies): "Jefferson County's pension system…" is as much a
+    # claim about this place as naming the city (roborev 4828).
+    extra = [city.get("state") or "", *(city.get("background_blocked_names") or [])]
+    return list(dict.fromkeys(str(n).strip() for n in [name, *words, *extra] if str(n).strip()))
 
 
 # City data facts with year placeholders resolved (set at startup).
@@ -2041,38 +2046,6 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
             yield step("refine", r_status, t_refine, model=model_for(refine_tier), tier=refine_tier,
                        chunks=refine_counter["n"], **r_detail)
 
-        # General background for explanatory questions (louisville-open-data-03r):
-        # "why are there so many $0 roles?" deserves the usual reasons public
-        # payroll systems carry $0 rows, not just a guess from the rows. One
-        # short extra call, only for why/what-does-it-mean questions; the note
-        # is shown apart from the answer, labeled as not from the data, and
-        # dropped outright when validate_background finds a figure or the
-        # city's name in it. Best-effort: a failure never touches the answer.
-        if is_explanatory(question) and served_text:
-            yield send("status", {"content": "Adding general background…"})
-            t_bg = time.time()
-            try:
-                note, bg_usage = generate_background(
-                    client, MODEL, question, "".join(served_text), on_retry=on_retry,
-                    fallback_client=paid_client, fallback_model=FALLBACK_MODEL)
-                bg_tier = get_last_tier_used()
-                track_usage(bg_usage.get("prompt_tokens", 0), bg_usage.get("completion_tokens", 0), tier=bg_tier)
-                shown, reason = validate_background(note, _city_names())
-                if shown:
-                    yield send("background", {"content": humanize_prose(shown)})
-                    yield step("background", llm_status(bg_tier, get_primary_tier()), t_bg,
-                               model=model_for(bg_tier), tier=bg_tier,
-                               tokens=bg_usage.get("total_tokens"), shown=True)
-                else:
-                    # "none" = nothing useful to add (a real, fine outcome);
-                    # anything else = the note broke a rule and was withheld.
-                    yield step("background", "ok" if reason == "none" else "failed", t_bg,
-                               model=model_for(bg_tier), tier=bg_tier,
-                               tokens=bg_usage.get("total_tokens"), shown=False, reason=reason)
-            except Exception as e:
-                log.warning("Background note failed (answer unaffected): %s", e)
-                yield step("background", "failed", t_bg, shown=False, error=type(e).__name__)
-
         # Citations go out after the answer, as a footer under a finished
         # response — and only for documents the answer actually cited.
         for evt in _sources_event(doc_hits, "".join(served_text), send):
@@ -2081,6 +2054,40 @@ Explain in plain text (no markdown, no SQL) why this likely returned no results 
             # Visible to every reader, after the answer: the self-correction is
             # part of the answer's provenance, not a dev-only log line.
             yield send("info", {"content": repair_note})
+        # General background for explanatory questions (louisville-open-data-03r):
+        # "why are there so many $0 roles?" deserves the usual reasons public
+        # payroll systems carry $0 rows, not just a guess from the rows. One
+        # short extra call, only for why/what-does-it-mean questions; the note
+        # is shown apart from the answer, labeled as not from the data, and
+        # withheld when validate_background finds a figure or one of the
+        # city's names in it. Best-effort, and it runs AFTER the citations and
+        # the repair note so an optional note can never delay them; the call
+        # itself is paid-first (the free tier's daily allowance is shared), one
+        # try per provider, inside BACKGROUND_TIMEOUT (roborev 4828).
+        if is_explanatory(question) and served_text:
+            yield send("status", {"content": "Adding general background…"})
+            t_bg = time.time()
+            attempts = [(client, get_active_model(MODEL), get_primary_tier())]
+            if paid_client is not None:
+                attempts.insert(0, (paid_client, FALLBACK_MODEL, "paid"))
+            try:
+                note, bg_usage, bg_tier = generate_background(attempts, question, "".join(served_text))
+                track_usage(bg_usage.get("prompt_tokens", 0), bg_usage.get("completion_tokens", 0), tier=bg_tier)
+                bg_status = "ok" if bg_tier == attempts[0][2] else "fallback"
+                shown, reason = validate_background(note, _city_names())
+                if shown:
+                    yield send("background", {"content": humanize_prose(shown)})
+                    yield step("background", bg_status, t_bg, model=model_for(bg_tier), tier=bg_tier,
+                               tokens=bg_usage.get("total_tokens"), shown=True)
+                else:
+                    # "none" = nothing useful to add (a real, fine outcome);
+                    # anything else = the note broke a rule and was withheld.
+                    yield step("background", bg_status if reason == "none" else "failed", t_bg,
+                               model=model_for(bg_tier), tier=bg_tier,
+                               tokens=bg_usage.get("total_tokens"), shown=False, reason=reason)
+            except Exception as e:
+                log.warning("Background note failed (answer unaffected): %s", e)
+                yield step("background", "failed", t_bg, shown=False, error=type(e).__name__)
         # Two calls, two providers (the refine runs Cerebras-first by design,
         # REFINE_PREFER_PAID): count each against the provider that served it.
         track_usage(0, draft_chunks, tier=draft_tier)

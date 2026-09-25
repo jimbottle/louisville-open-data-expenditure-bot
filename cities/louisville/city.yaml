@@ -4,6 +4,10 @@
 city:
   name: Louisville
   state: KY
+  # A general-background note (analytics_agent.validate_background) is
+  # withheld if it names any of these: it must stay general, never a claim
+  # about this place.
+  background_blocked_names: [Kentucky, Jefferson County, Louisville Metro, LMPD, Metro Council]
   title: Louisville Open Data
   fiscal_year_start_month: 7
 

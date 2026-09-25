@@ -1538,9 +1538,15 @@ function stepView(ev) {
       else if (d.retried) note = 'The first stream failed mid-answer and was re-run on the backup provider.';
       break;
     case 'background':
-      if (d.shown) note = 'General knowledge only; checked for figures and city-specific claims before showing.';
+      if (d.shown) note = 'General knowledge only; checked for figures and for the city, county and state names before showing.';
       else if (d.reason === 'none') { status = 'nothing to add'; kind = 'idle'; note = 'The model had no general background worth adding.'; }
-      else if (d.reason) note = `Withheld: the note ${d.reason}. Background may not state numbers or anything about this city.`;
+      else if (d.reason) {
+        // Reason codes from validate_background, phrased here (roborev 4828).
+        const why = { 'contained figures': 'it contained figures',
+                      'named the city': 'it named the city, county or state',
+                      'too long': 'it was too long' }[d.reason] || d.reason;
+        note = `Withheld because ${why}. Background may not state numbers or anything about this city.`;
+      }
       break;
     case 'refine':
       if (d.served === 'draft') note = 'The refine pass failed, so the draft was served.';

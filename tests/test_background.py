@@ -44,3 +44,58 @@ def test_a_general_note_passes():
 ])
 def test_notes_that_break_a_rule_are_withheld(text, reason):
     assert validate_background(text, ["Louisville"]) == (None, reason)
+
+
+def test_state_code_matches_whole_words_only():
+    assert validate_background("Rules differ in KY.", ["KY"]) == (None, "named the city")
+    ok = "Budgets often look to the sky for rain."
+    assert validate_background(ok, ["KY"]) == (ok, None)
+
+
+def test_pack_blocked_names_reach_the_validator():
+    import app
+    names = app._city_names()
+    for n in ("Louisville", "KY", "Kentucky", "Jefferson County", "LMPD"):
+        assert n in names
+    assert validate_background("Jefferson County pensions are common.", names)[1] == "named the city"
+
+
+class _FakeCompletions:
+    def __init__(self, behaviour):
+        self.behaviour = behaviour
+
+    def create(self, **kw):
+        b = self.behaviour
+        if isinstance(b, Exception):
+            raise b
+        class _Msg: content = b
+        class _Choice: message = _Msg(); finish_reason = "stop"
+        class _Resp: choices = [_Choice()]; usage = None
+        return _Resp()
+
+
+class _FakeClient:
+    def __init__(self, behaviour):
+        self.seen = []
+        self.chat = type("C", (), {"completions": _FakeCompletions(behaviour)})()
+
+    def with_options(self, **kw):
+        self.seen.append(kw)
+        return self
+
+
+def test_generate_background_is_one_try_per_provider_paid_first():
+    from analytics_agent import generate_background
+    paid = _FakeClient(RuntimeError("402"))
+    free = _FakeClient("Payroll systems often keep unpaid roles.")
+    text, usage, tier = generate_background([(paid, "m1", "paid"), (free, "m2", "openrouter")], "why?", "a")
+    assert tier == "openrouter" and text.startswith("Payroll")
+    # No retry ladder: every call is made with retries off and a bounded timeout.
+    for kw in paid.seen + free.seen:
+        assert kw["max_retries"] == 0 and 0 < kw["timeout"] <= 15
+
+
+def test_generate_background_gives_up_when_the_budget_is_spent():
+    from analytics_agent import generate_background
+    with pytest.raises(Exception):
+        generate_background([(_FakeClient("x"), "m", "paid")], "why?", "a", budget=0.5)

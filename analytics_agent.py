@@ -1095,23 +1095,41 @@ def validate_background(text: str, city_names=()) -> tuple[str | None, str | Non
         return None, "none"
     if re.search(r"[0-9$%€£]", t):
         return None, "contained figures"
-    low = t.lower()
-    if any(n and n.lower() in low for n in city_names):
+    # Whole words, so a two-letter state code ("KY") cannot match "sky".
+    if any(n and re.search(rf"\b{re.escape(n)}\b", t, re.I) for n in city_names):
         return None, "named the city"
     if len(t) > 1200:
         return None, "too long"
     return t, None
 
 
-def generate_background(client, model, question: str, answer: str, on_retry=None,
-                        fallback_client=None, fallback_model=None) -> tuple[str, dict]:
-    """The raw background note (validate it before showing) and token usage."""
+# Best-effort, so it gets a hard wall-clock budget and NO retry ladder: the
+# ladder (LLM_MAX_RETRIES x LLM_RETRY_BASE_DELAY, 60s reads) could hold the end
+# of the stream — and the Lambda invocation — open for minutes on a 429, all
+# for an optional note (roborev 4828).
+BACKGROUND_TIMEOUT = float(os.environ.get("BACKGROUND_TIMEOUT_SECONDS", "15") or 15)
+
+
+def generate_background(attempts, question: str, answer: str,
+                        budget: float = None) -> tuple[str, dict, str]:
+    """(raw note, usage, tier) from the first provider that answers in time.
+
+    attempts: [(client, model, tier), ...] in order — the caller puts the paid
+    client first so an optional note does not spend the free tier's shared
+    daily allowance. One try each, no retries, all inside `budget` seconds.
+    Validate the note (validate_background) before showing it."""
+    deadline = time.monotonic() + (BACKGROUND_TIMEOUT if budget is None else budget)
     user_msg = (f"Question: {question}\n\n"
                 f"The data answer, for context only (do not restate it):\n{(answer or '')[:1500]}")
-
-    def _make_call(c, m):
-        def _call():
-            resp = c.chat.completions.create(
+    last = None
+    for c, m, tier in attempts:
+        if c is None:
+            continue
+        left = deadline - time.monotonic()
+        if left < 1:
+            break
+        try:
+            resp = c.with_options(timeout=left, max_retries=0).chat.completions.create(
                 model=m,
                 messages=[{"role": "system", "content": BACKGROUND_SYSTEM_PROMPT},
                           {"role": "user", "content": user_msg}],
@@ -1120,17 +1138,17 @@ def generate_background(client, model, question: str, answer: str, on_retry=None
                 # few sentences of content (see the MODEL notes in CLAUDE.md).
                 max_tokens=1200,
             )
-            _message_text(resp)  # empty reply -> fail over
-            return resp
-        return _call
-    resp = _call_with_model_fallback(_make_call, client, model, on_retry=on_retry,
-                                     fallback_client=fallback_client, fallback_model=fallback_model)
-    usage = {}
-    if getattr(resp, "usage", None):
-        usage = {"prompt_tokens": resp.usage.prompt_tokens or 0,
-                 "completion_tokens": resp.usage.completion_tokens or 0,
-                 "total_tokens": resp.usage.total_tokens or 0}
-    return _message_text(resp).strip(), usage
+            text = _message_text(resp).strip()
+        except Exception as e:          # next provider, if any time is left
+            last = e
+            continue
+        usage = {}
+        if getattr(resp, "usage", None):
+            usage = {"prompt_tokens": resp.usage.prompt_tokens or 0,
+                     "completion_tokens": resp.usage.completion_tokens or 0,
+                     "total_tokens": resp.usage.total_tokens or 0}
+        return text, usage, tier
+    raise last or TimeoutError("background budget spent before any provider answered")
 
 
 def refine_events_with_fallback(refine_iter, draft, send, transform=None, on_fail=None, timeout=90, counter=None, sink=None):

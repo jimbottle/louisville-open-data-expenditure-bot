@@ -80,7 +80,7 @@ def _fast_and_isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "CACHE_FILE", str(tmp_path / "cache.json"))
     monkeypatch.setattr(app, "STATS_FILE", str(tmp_path / "stats.json"))
     # The background call is an LLM call too: never let a test reach one.
-    monkeypatch.setattr(app, "generate_background", lambda *a, **k: ("NONE", {}))
+    monkeypatch.setattr(app, "generate_background", lambda *a, **k: ("NONE", {}, "paid"))
     app.ip_requests.clear()
     app.response_cache.clear()
     yield
@@ -904,7 +904,7 @@ def test_explanatory_question_gets_a_labeled_background_note(client, monkeypatch
     import app
     _answer_fakes(monkeypatch)
     note = "Public payroll extracts often keep records for people with unpaid roles."
-    monkeypatch.setattr(app, "generate_background", lambda *a, **k: (note, {"total_tokens": 9}))
+    monkeypatch.setattr(app, "generate_background", lambda *a, **k: (note, {"total_tokens": 9}, "paid"))
     ev = _events(_post(client, "Why do some agencies spend so much?"))
     types = _types(ev)
     bg = [e for e in ev if e["type"] == "background"]
@@ -919,7 +919,7 @@ def test_background_with_a_figure_is_withheld_and_says_why(client, monkeypatch):
     import app
     _answer_fakes(monkeypatch)
     monkeypatch.setattr(app, "generate_background",
-                        lambda *a, **k: ("Most cities spend about 30% on public safety.", {}))
+                        lambda *a, **k: ("Most cities spend about 30% on public safety.", {}, "paid"))
     ev = _events(_post(client, "Why is public safety the biggest line?"))
     assert "background" not in _types(ev)
     step = [e for e in ev if e["type"] == "step" and e["id"] == "background"][0]
@@ -930,7 +930,7 @@ def test_no_background_call_for_a_how_much_question(client, monkeypatch):
     import app
     _answer_fakes(monkeypatch)
     calls = []
-    monkeypatch.setattr(app, "generate_background", lambda *a, **k: calls.append(1) or ("x", {}))
+    monkeypatch.setattr(app, "generate_background", lambda *a, **k: calls.append(1) or ("x", {}, "paid"))
     ev = _events(_post(client, "Which agencies spent the most in FY2025?"))
     assert not calls
     assert not [e for e in ev if e.get("id") == "background"]
@@ -947,3 +947,16 @@ def test_a_failing_background_call_never_costs_the_answer(client, monkeypatch):
     assert "error" not in _types(ev)
     step = [e for e in ev if e["type"] == "step" and e["id"] == "background"][0]
     assert step["status"] == "failed" and step["detail"]["error"] == "RuntimeError"
+
+
+def test_background_runs_after_citations_and_repair_note(client, monkeypatch):
+    """An optional note must never delay the answer's provenance (roborev 4828)."""
+    import app
+    _answer_fakes(monkeypatch)
+    monkeypatch.setattr(app, "generate_background",
+                        lambda *a, **k: ("Payroll systems often keep unpaid roles.", {}, "paid"))
+    types = _types(_events(_post(client, "Why do some agencies spend so much?")))
+    bg = types.index("background")
+    for t in ("sources", "info"):
+        if t in types:
+            assert types.index(t) < bg
