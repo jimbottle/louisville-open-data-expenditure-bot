@@ -158,8 +158,11 @@ swapped:
    DynamoDB table holding the counters is the one dependency the health
    endpoint reports on separately.
 3. **CloudWatch alarms in the stack** (`lou_stack.py`), notifying the SNS
-   topic `lou-alerts` (email subscription supplied at deploy time as
-   `LOU_ALERT_EMAIL`, confirm the subscription e-mail once):
+   topic `lou-alerts` (email subscription: the stack's `AlertEmail` output is
+   adopted by every deploy, so it only has to be supplied once as
+   `LOU_ALERT_EMAIL`; a new address must be confirmed from the SNS e-mail.
+   `LOU_DROP_ALERTS=1` removes it deliberately — before that adoption, a
+   2026-09-24 deploy without the variable destroyed the subscription):
    `lou-bot-errors` (any invocation error in 5 min — init failures, timeouts,
    unhandled exceptions), `lou-bot-throttles` (the reserved-concurrency
    ceiling was hit: a burst or abuse), `lou-bot-duration-near-timeout` (a

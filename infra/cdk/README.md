@@ -70,6 +70,18 @@ warm invoke, `/api/health` through CloudFront, and a POST to `/api/ask` that
 must answer `200 text/event-stream`. The POST carries `x-amz-content-sha256`
 because OAC signs the body hash (louisville-open-data-22e).
 
+`LOU_WARM=1` then clears and re-warms the starter answers through CloudFront;
+it needs `ADMIN_TOKEN` in the environment (the `/lou/prod/ADMIN_TOKEN` SSM
+value — a human reads it, agents may not). Do it after any change to
+`CACHE_VERSION` (prompts, city facts, `table_notes`, `EVENT_SCHEMA_VERSION`),
+which orphans every cached answer:
+
+```bash
+export ADMIN_TOKEN=$(aws ssm get-parameter --name /lou/prod/ADMIN_TOKEN --with-decryption --query Parameter.Value --output text --profile lou)
+LOU_WARM=1 ./infra/cdk/deploy.sh
+unset ADMIN_TOKEN
+```
+
 Secrets are **not** in the stack. The function reads `/lou/prod/*` from SSM at
 cold start (`app._load_secrets_from_ssm`); put them there first
 (louisville-open-data-8pf). Rotating a secret is `put-parameter` + a fresh
@@ -109,7 +121,11 @@ Once bound, the hostname is durable: `deploy.sh` reads `PublicDomain` and
 `CertificateArn` from the live stack and re-applies them on every deploy that
 was not given `LOU_DOMAIN`/`LOU_CERT_ARN`, and its post-deploy probe hits the
 hostname pinned to CloudFront. Detaching it is an explicit `LOU_DROP_DOMAIN=1`.
-`tests/test_deploy_script.py` pins that against stubbed CLIs.
+The alarm e-mail works the same way: the stack outputs `AlertEmail` ("none"
+when unset) and `deploy.sh` re-applies it unless given `LOU_ALERT_EMAIL`
+(override) or `LOU_DROP_ALERTS=1` (remove); a deploy that would leave no
+subscriber says so loudly. `tests/test_deploy_script.py` pins both against
+stubbed CLIs.
 
 ## Destroy
 

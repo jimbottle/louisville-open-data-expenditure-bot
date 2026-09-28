@@ -33,7 +33,8 @@ A: Louisville Fire spent $1.58M on vehicle-related purchases in fiscal year 2024
 | **Agent loop** (`app.py`, `analytics_agent.py`, `grounding.py`) | question → vocabulary grounding → SQL generation → safety guard → execute → **verify-and-repair** → chart inference → document retrieval → draft interpretation → refinement pass → citations, streamed as SSE. |
 | **Provider resilience** | OpenRouter (free tier) primary, Cerebras fallback; automatic model replacement when a provider retires a model; quota/daily-cap/rate-limit classification with honest user-facing messages. |
 | **Evaluation** (`eval/`) | An LLM-in-the-loop harness that drives the real request path over a golden question set and scores both the served SQL and the prose. |
-| **Operations** | Prebuilt read-only DuckDB artifact, versioned response cache, per-IP rate limiting behind a trusted proxy, health endpoint, uptime probe from CI, and a dead-man's switch that pages when the API stops answering. |
+| **Interface** (`static/index.html`) | A notebook-style page: each answer is a Q/A cell with a deterministic headline figure, a chart that marks partial periods, the prose, a sortable table with CSV download, and a **"How Lou got this answer"** panel showing every pipeline step (model, provider, timing), the highlighted SQL and the raw event log. Light/dark themes, self-hosted fonts, no third-party origins. |
+| **Operations** | AWS Lambda behind CloudFront (CDK, `infra/cdk`), a prebuilt read-only DuckDB artifact baked into the image, DynamoDB for the shared cache/rate limit/counters, a mandatory local preview of the exact production image before every deploy, CloudWatch alarms, an uptime probe from CI, and a dead-man's switch that pages when the API stops answering. |
 
 ## The request path
 
@@ -64,13 +65,26 @@ A: Louisville Fire spent $1.58M on vehicle-related purchases in fiscal year 2024
                      │
                      ▼
                citations footer (only file numbers the answer actually used)
+                     │
+                     ├─▶ data notes: what the figures measure, per table (city.yaml, no LLM)
+                     ├─▶ wrongdoing questions: a fixed "leads, not evidence" notice (no LLM)
+                     └─▶ why/what-does-it-mean questions: a labeled general-background
+                         note (one short call, withheld if it states a figure or names the city)
 ```
 
-Every stage emits a structured SSE event (`status`, `sql`, `results`, `chart`,
-`interpretation`, `sources`, `info`, `log`, `debug`, `usage`, `error`,
-`done`), so the UI can show progress, the dev toggle can show the SQL and
-timings retroactively, and a failure anywhere still terminates the stream
-cleanly instead of leaving a spinner.
+Alongside the answer, deterministic code (no model) computes a **headline
+figure** from the result frame — the latest *complete* year of a series, the
+top item of a ranking — and marks **partial periods** on year charts, so the
+most prominent number on the page can never disagree with the table.
+
+Every stage emits a structured SSE event — `step` (one per pipeline stage:
+status, ms, model, provider tier, detail), `sql`, `results` (the table as
+columns and rows), `chart` (with partial-period markers), `headline`,
+`interpretation`, `background`, `note`, `sources`, `info`, `status`, `log`,
+`debug`, `usage`, `error`, `done` — so the page can draw the table, the chart
+and the step timeline without parsing text, and a failure anywhere still
+terminates the stream cleanly instead of leaving a spinner. `?dev=1` asks for
+the raw (un-humanized) results and the reasoning trace.
 
 ## Accuracy engineering
 
@@ -142,6 +156,21 @@ hash of every model-visible input (prompts, truncation notes, grounding
 wording). A prompt edit orphans every stale answer automatically; a fix can
 never be shadowed by a cached pre-fix reply.
 
+**Caveats the model cannot drop.** A judged pass over the starter answers
+(`eval/judge-2026-09-25.md`) found that prompt rules reliably changed tone
+and presentation but not load-bearing caveats: a neutrality rule held on one
+run and failed on the next. So what a figure *measures* is stated by the city
+pack, not the model — `table_notes` puts "payments to vendors; payroll not
+included" or "spending from grant-funded accounts, not money received" under
+every answer that reads that table — and questions probing wrongdoing always
+get a fixed "leads for review, not evidence" notice.
+
+**General knowledge, fenced off.** "Why are there so many $0 job titles?"
+deserves the usual reasons payroll systems carry $0 rows, not just a guess
+from the rows. Explanatory questions get one short extra call whose note is
+shown apart from the answer as *general background, not from the data*; it is
+withheld outright if it contains a figure or names the city, county or state.
+
 **Guards.** A blocklist stops file access and DDL in generated SQL, and the
 serving DuckDB connection is opened read-only with external access disabled —
 `read_csv('/etc/passwd')` and `COPY TO` are both blocked at the engine, not
@@ -164,6 +193,9 @@ Same 23 questions, same model (`gpt-oss-120b` on Cerebras), one day's work:
 |---|---|---|---|---|
 | before this pass | 19 / 23 | 20 | 20 | 7.2 s |
 | after | **23 / 23** | 23 | 23 | 2.2 s |
+
+The same harness gates prompt changes: after the 2026-09-25 judged pass
+rewrote the answer rules, the eval was re-run before deploying (still 23/23).
 
 The full scorecards, with every served query and answer, are in
 `eval/results/` — including the intermediate run where the first version of
@@ -191,7 +223,14 @@ worth more than a large one nobody re-runs.
   degrading into the rebuild that once overran the health check.
 - **Monitoring.** A GitHub Actions probe hits the production API every 30
   minutes; a dead-man's switch pings healthchecks.io only while the API
-  actually answers a question, and pages within four minutes when it stops.
+  actually answers a question, and pages within four minutes when it stops;
+  CloudWatch alarms (function errors, throttles at the concurrency ceiling,
+  requests near the timeout) e-mail through SNS.
+- **Deploy discipline.** `./infra/preview.sh` runs the exact production image
+  locally (arm64, read-only filesystem, DynamoDB Local, one real question);
+  `./infra/cdk/deploy.sh` refuses a commit that was not previewed or a dirty
+  tree, keeps the live hostname and alarm subscriber from the running stack,
+  verifies through CloudFront and re-warms the starter answers.
 
 ## Multi-city by construction
 
@@ -222,12 +261,13 @@ PREBUILT_DB=data/lou.duckdb uvicorn app:app --port 8000
 ```
 
 ```bash
-python -m pytest -q                     # ~600 tests; data-bound ones skip without data/
+python -m pytest -q                     # ~850 tests; data-bound ones skip without data/
 python eval/run_eval.py --provider cerebras --label my-change   # real-model eval
 ```
 
-Deployment (Docker, Cloudflare tunnel, volumes, verification steps) is
-documented in `CLAUDE.md`; a planned migration to AWS Lambda is analysed in
+Production runs on AWS Lambda behind CloudFront (`infra/cdk`, deployed since
+2026-09-23); the publish process (preview, deploy, verify) is in `CLAUDE.md`
+and `infra/cdk/README.md`, and the migration analysis and cost model in
 `LOU_MIGRATION_COMPAT.md`.
 
 ## Known limitations
@@ -254,9 +294,10 @@ data_model.py          city-agnostic DuckDB engine (load, canonicalize, flag, su
 city_config.py         config-pack loader
 rag.py                 Legistar corpus + BM25 retrieval + citation links
 cities/                per-city config packs
-static/index.html      the chat UI (vanilla JS, Chart.js)
-eval/                  golden questions, eval runner, scorecards
-tests/                 ~600 tests (engine invariants, prompts, endpoint flow, fallbacks)
+static/index.html      the notebook UI (vanilla JS, Chart.js, self-hosted fonts)
+infra/                 CDK stack (Lambda, CloudFront, DynamoDB, alarms), preview.sh
+eval/                  golden questions, eval runner, scorecards, judged passes
+tests/                 ~850 tests (engine invariants, prompts, endpoint flow, fallbacks)
 monitoring/            heartbeat script + healthchecks.io setup
 docs/                  canonical model, onboarding, RAG design, accuracy plan
 ```

@@ -118,7 +118,7 @@ effort is the real onboarding cost the second-city proof (ftq) must measure.
 ## 5b. `branding:` — everything the frontend says (per-city)
 
 Served by `GET /api/config` and applied on page load, so a second city's
-deployment never says Louisville. Nine keys, all optional; anything omitted
+deployment never says Louisville. Eleven keys, all optional; anything omitted
 falls back to neutral copy derived from the pack's own `city.name`.
 
 | Key | Shape | Notes |
@@ -132,6 +132,8 @@ falls back to neutral copy derived from the pack's own `city.name`.
 | `input_aria_label` | string | screen-reader label for the question box |
 | `about_html` | **trusted HTML** | see below |
 | `starter_groups` | list of `{label, chips}` | each chip is a `[button label, question]` **pair** |
+| `source_name` | string | named at the end of every answer's source line; default `"<city>'s open data portal"` |
+| `source_url` | http(s) URL | links `source_name`; default empty (no link — a link the pack did not declare could point anywhere) |
 
 Two contracts worth stating plainly:
 
@@ -146,6 +148,28 @@ Two contracts worth stating plainly:
   starter questions; a chip whose question text drifts from that list offers
   the user a question that was never warmed (a slow first answer), which
   `tests/test_city_config.py` guards.
+
+Starter questions should not assert a premise the data contradicts: the grant
+chip used to ask what the city *received*, and the model followed that wording
+over the data facts in 3/3 runs (the data is spending from grant-funded
+accounts). See `eval/judge-2026-09-25.md`.
+
+## 5b-2. What the figures mean: `data_facts`, `table_notes`, blocked names
+
+- **`data_facts`** (list of strings, `{placeholder}`s resolved from the year
+  context) — injected into the draft and refine prompts as facts to enforce,
+  and counted as support by the refine pass. Use them for what the model must
+  *know* (expenditures are vendor payments, not payroll; pay is by calendar
+  year). Part of `CACHE_VERSION`.
+- **`table_notes`** (`{table: note}`) — shown verbatim under every answer whose
+  SQL reads that table (a `note` SSE event; no LLM). Use them for what the
+  *reader* must be told regardless of what the model writes: prompts proved
+  unreliable at carrying load-bearing caveats. Every summary built from the
+  expenditures table must have one (test-enforced). Part of `CACHE_VERSION`,
+  since notes are cached inside the answer frames.
+- **`city.background_blocked_names`** (list) — names a general-background note
+  must not contain (county, consolidated government, state, well-known
+  agencies), on top of `city.name` and `city.state`. Matched as whole words.
 
 ## 5c. `rag:` — document corpus for citations (per-city, optional)
 

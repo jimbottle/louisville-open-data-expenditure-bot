@@ -104,10 +104,35 @@ mandatory rehearsal that costs nothing and needs no AWS access:
 # 2. Deploy: refuses unless .preview-ok names HEAD and the tree is clean.
 aws sts get-caller-identity --profile lou      # MFA
 ./infra/cdk/deploy.sh                          # diff -> deploy -> warm invoke -> health/SSE through CloudFront
-                                               # -> hostname on CloudFront (once bound). LOU_WARM=1 re-warms
-                                               # the starter cache afterwards (spends LLM calls; do it after a
-                                               # prompt change, which orphans the cache).
+                                               # -> hostname on CloudFront (once bound).
 ```
+
+**Re-warm after anything that changes CACHE_VERSION** (a prompt, a city fact,
+`table_notes`, `EVENT_SCHEMA_VERSION`): every cached starter is orphaned and
+would otherwise be answered live, one visitor at a time. `LOU_WARM=1` needs
+`ADMIN_TOKEN` (the `/lou/prod/ADMIN_TOKEN` SSM value). Agents may not read SSM
+secrets (Tier 3), so hand the human these, **one per line, no `\`
+continuations** (a pasted continuation broke on trailing spaces, 2026-09-24):
+
+```bash
+export ADMIN_TOKEN=$(aws ssm get-parameter --name /lou/prod/ADMIN_TOKEN --with-decryption --query Parameter.Value --output text --profile lou)
+LOU_WARM=1 ./infra/cdk/deploy.sh
+unset ADMIN_TOKEN
+```
+
+**What the deploy keeps from the live stack** (so an ordinary deploy from a
+fresh shell cannot silently change production): the public hostname +
+certificate (`PublicDomain`/`CertificateArn` outputs; detach deliberately with
+`LOU_DROP_DOMAIN=1`) and the alarm e-mail subscriber (`AlertEmail` output;
+override with `LOU_ALERT_EMAIL=...`, remove with `LOU_DROP_ALERTS=1`). The
+subscriber adoption exists because the 2026-09-24 redesign deploy ran without
+`LOU_ALERT_EMAIL` and destroyed the SNS subscription; a new or changed address
+must be confirmed from the SNS e-mail before alarms reach it.
+
+**Keep the tree clean between preview and deploy.** Any `bd` write re-exports
+`.beads/issues.jsonl` (and bd may auto-stage it), which makes the tree dirty
+and the deploy refuse; committing it moves HEAD past the marker. File/close
+issues before `preview.sh ok`, or re-run the preview after committing.
 
 Emergency bypass of the preview gate: `LOU_SKIP_PREVIEW=1` — loud in the
 output, for a hotfix only. Security-widening diffs additionally need
@@ -293,7 +318,7 @@ curl -s https://api.cerebras.ai/v1/models -H "Authorization: Bearer $CEREBRAS_PA
 
 `gpt-oss-120b` is a reasoning model: its chain-of-thought comes back in a separate `reasoning` field, the final answer is in `message.content`/`delta.content` (what the app reads), so reasoning never pollutes output as long as `max_tokens` leaves room after the reasoning tokens.
 
-## AWS interaction policy (migration in progress)
+## AWS interaction policy (production on AWS since 2026-09-23)
 
 The Lambda migration is tracked as bd epic `louisville-open-data-ru6`; the
 analysis and cost model are in `LOU_MIGRATION_COMPAT.md`. Agents have
@@ -366,7 +391,7 @@ uvicorn app:app --host 127.0.0.1 --port 8000
 # then open http://127.0.0.1:8000  (DEV ONLY — see "Where the bot runs" above)
 ```
 
-### Lambda image (migration)
+### Lambda image (production)
 
 `Dockerfile.lambda` is the container for the AWS migration (epic
 `louisville-open-data-ru6`): Lambda Web Adapter in response-stream mode,
@@ -421,13 +446,14 @@ filesystem (`read_csv` of an arbitrary path and `COPY TO` are both blocked —
 
 ## Architecture Overview
 
-- **`app.py`** — FastAPI backend. Serves the static frontend AND the `/api/ask` SSE endpoint (same origin). Translates NL → SQL via an OpenAI-compatible client (Cerebras), runs it on DuckDB, streams an interpretation. Per-IP rate limit (5/min), persistent stats + response cache, structured SSE events (`status`, `reasoning`, `sql`, `results`, `chart`, `interpretation`, `log`, `debug`, `usage`, `error`, `info`, `done`).
-- **`analytics_agent.py`** — LLM calls (generate SQL → interpret → refine), retry/fallback (OpenRouter → Cerebras), SQL safety guard.
+- **`app.py`** — FastAPI backend. Serves the static frontend AND the `/api/ask` SSE endpoint (same origin). Translates NL → SQL (OpenRouter primary, Cerebras fallback), runs it on DuckDB, streams the answer. Per-IP rate limit (5/min; DynamoDB-shared on Lambda), versioned response cache (`CACHE_VERSION` hashes every model-visible input + `EVENT_SCHEMA_VERSION` + `table_notes`), usage/error counters behind `/api/health`. SSE events: `step` (one per pipeline stage — grounding, generate_sql, execute, repair, retrieve_docs, interpret, refine, background — with status ok/fallback/failed, ms, model, tier, detail; a stage that never ran is omitted), `sql`, `results` (text `content` plus structured `columns`/`rows`/`total_rows`/`truncated`), `chart` (+ `partial_labels`/`data_through` on year axes), `headline`, `interpretation`, `background`, `note`, `sources`, `info`, `status`, `log`, `debug`, `usage`, `error`, `done`. Bump `EVENT_SCHEMA_VERSION` on any event-shape change.
+- **Deterministic answer parts (no LLM)** — `data_model.headline` (the figure: latest *complete* period of a year series, top of a ranking, a single value; nothing when ambiguous — a bare `year` column is ambiguous), `chart_partial_markers` + `period_context` (partial periods per axis kind: expenditures answer only for fiscal years), `app._data_notes` (the pack's `table_notes` for the tables the SQL read, sent as `note` events), and `analytics_agent.IRREGULARITY_NOTE` (an `info` notice on questions probing wrongdoing). Load-bearing caveats live here because the judged pass (`eval/judge-2026-09-25.md`) showed prompts do not hold them reliably.
+- **`analytics_agent.py`** — LLM calls (generate SQL → interpret → refine, and the optional general-background note), retry/fallback (OpenRouter → Cerebras), SQL safety guard, and the prompts (`build_interpret_prompt`, `REFINE_SYSTEM_PROMPT`, `BACKGROUND_SYSTEM_PROMPT`). The background note runs only for explanatory questions (`is_explanatory`), paid-first, one try per provider inside `BACKGROUND_TIMEOUT_SECONDS` (15), after the citations; `validate_background` withholds it on any digit/$/% or a city/county/state name (`city.background_blocked_names`). Prompt rules must be stated positively (tests/test_prompt_lint.py: models copy quoted failure text).
 - **`grounding.py`** — vocabulary grounding. Builds `_value_index` at load time (every categorical column's distinct values with dollar weights) and (a) appends the values a question's words match to the SQL-generation request, (b) diagnoses the string-literal filters of an empty result so `app.py` can regenerate the query once with the real values (the verify-and-repair step). Synonyms/stopwords per city under `grounding:` in city.yaml. Motivated by a confident wrong answer in production — see the module docstring.
-- **`eval/`** — LLM-in-the-loop accuracy eval: `golden.yaml` (questions + reference SQL + checks) and `run_eval.py` (drives the real `/api/ask` path in-process, scores the served SQL and the prose, writes `eval/results/*.md|json`). Run with `--provider cerebras` so it does not spend OpenRouter's shared 50/day free allowance.
-- **`data_model.py`** — generic city data engine: loads CSVs into DuckDB, builds `*_canonical` columns + summary tables, flags offsetting/artifact rows — all driven by a city config pack. Nothing city-specific lives here.
-- **`city_config.py`** + **`cities/<city>/city.yaml`** — city config packs (sources/era mappings, canonical map CSVs, data-quality params, summary SQL, data dictionary). `CITY_CONFIG` env var selects the pack (default: Louisville). Format documented in `docs/canonical-model.md`. `cities/cincinnati/` is a **runnable** second-city pack (loads with `CITY_CONFIG=cities/cincinnati/city.yaml DATA_DIR=data_cincinnati`); `cities/kansas_city/` is still a paper config (not yet runnable).
-- **`static/index.html`** — single-page chat UI (vanilla JS, inline CSS, Chart.js). Self-contained; talks to `/api/ask`.
+- **`eval/`** — LLM-in-the-loop accuracy eval: `golden.yaml` (questions + reference SQL + checks) and `run_eval.py` (drives the real `/api/ask` path in-process, scores the served SQL and the prose, writes `eval/results/*.md|json`). Run with `--provider cerebras` so it does not spend OpenRouter's shared 50/day free allowance. Re-run it after any prompt change before deploying. `eval/judge-2026-09-25.md` records the judged pass over the warmed starters (method: grade, adjust, re-ask live).
+- **`data_model.py`** — generic city data engine: loads CSVs into DuckDB, builds `*_canonical` columns + summary tables, flags offsetting/artifact rows, and the pure helpers behind the structured events (`result_table`, `column_kind`, `headline`, `period_context`, `axis_basis`, `tables_read`) — all driven by a city config pack. Nothing city-specific lives here.
+- **`city_config.py`** + **`cities/<city>/city.yaml`** — city config packs (sources/era mappings, canonical map CSVs, data-quality params, summary SQL, data dictionary, `data_facts` injected into the prompts, `table_notes`, `branding` incl. `source_name`/`source_url`, `city.background_blocked_names`). `CITY_CONFIG` env var selects the pack (default: Louisville). Format documented in `docs/canonical-model.md`. Every summary table built from `expenditures` must have a `table_notes` entry (test-enforced). `cities/cincinnati/` is a **runnable** second-city pack (loads with `CITY_CONFIG=cities/cincinnati/city.yaml DATA_DIR=data_cincinnati`); `cities/kansas_city/` is still a paper config (not yet runnable).
+- **`static/index.html`** — single-page notebook UI (vanilla JS, inline CSS, Chart.js, VT323 + JetBrains Mono self-hosted in `static/vendor/fonts`). Landing: raylytics.io wave hero, starter index, footer. Each answer: Q/A cell, headline, chart (partial period dashed/hatched + margin note), prose, labeled background note, source line (tables · rows · data-through · linked source), data notes, View data / Download CSV (formula-neutralized), Copy · Report, and the **"How Lou got this answer"** panel (step timeline, highlighted SQL, sortable table, raw event log). Light/dark tokens (OS default, header toggle persisted). A new question scrolls to the top of the view; the page never follows the stream down. No Dev toggle: `?dev=1` requests raw results. City text appears only in nodes `applyBranding()` rewrites (test-enforced); any Louisville literal elsewhere fails `tests/test_city_config.py`.
 - **`tests/test_known_answers.py`** — known-answer + invariant suite.
 
 ## Conventions & Patterns
