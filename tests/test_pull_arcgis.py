@@ -87,3 +87,60 @@ def test_pull_records_aborts_on_non_paginating_server(monkeypatch):
     monkeypatch.setattr(pull_arcgis, "fetch_json", ignores_offset)
     with pytest.raises(RuntimeError, match="pagination not honored"):
         pull_arcgis.pull_records("http://x/FeatureServer/0", batch_size=1000)
+
+
+# ── concurrent paging (louisville-open-data-rm4) ─────────────────────────────
+# The 2026-10-01 lou-refresh timed out mid-pull when the source served pages
+# ~6x slower than usual; pages are now fetched in a parallel window but must be
+# committed in offset order so the output is identical to the serial pull.
+
+def test_parallel_pull_matches_serial_and_keeps_order(monkeypatch):
+    total, server_cap = 10_500, 1000
+    monkeypatch.setattr(pull_arcgis, "get_record_count", lambda *a, **k: total)
+    monkeypatch.setattr(pull_arcgis, "fetch_json", _make_capped_server(total, server_cap))
+    serial = pull_arcgis.pull_records("http://x/FeatureServer/0", batch_size=1000, workers=1)
+    parallel = pull_arcgis.pull_records("http://x/FeatureServer/0", batch_size=1000, workers=4)
+    assert [r["id"] for r in parallel] == [r["id"] for r in serial] == list(range(total))
+
+
+def test_parallel_pull_replans_after_a_short_page(monkeypatch):
+    """If a page inside the window comes back short (server shrank its cap
+    mid-pull), the later pages of that window were laid out on stale offsets
+    and must be dropped, not committed with a gap."""
+    total = 7_000
+    calls = []
+
+    def shrinking_server(url, params, retries=3):
+        offset = params["resultOffset"]
+        calls.append(offset)
+        cap = 1000 if offset < 2000 else 500      # cap drops after the 2nd page
+        take = max(0, min(params["resultRecordCount"], cap, total - offset))
+        feats = [{"attributes": {"id": i}} for i in range(offset, offset + take)]
+        return {"features": feats, "exceededTransferLimit": (offset + take) < total}
+
+    monkeypatch.setattr(pull_arcgis, "get_record_count", lambda *a, **k: total)
+    monkeypatch.setattr(pull_arcgis, "fetch_json", shrinking_server)
+    records = pull_arcgis.pull_records("http://x/FeatureServer/0", batch_size=1000, workers=4)
+    assert [r["id"] for r in records] == list(range(total)), "gap or duplicate after the cap shrank"
+
+
+def test_parallel_pull_aborts_on_non_paginating_server(monkeypatch):
+    import pytest
+    def ignores_offset(url, params, retries=3):
+        return {"features": [{"attributes": {"id": i}} for i in range(1000)],
+                "exceededTransferLimit": True}
+    monkeypatch.setattr(pull_arcgis, "get_record_count", lambda *a, **k: 2000)
+    monkeypatch.setattr(pull_arcgis, "fetch_json", ignores_offset)
+    with pytest.raises(RuntimeError, match="pagination not honored"):
+        pull_arcgis.pull_records("http://x/FeatureServer/0", batch_size=1000, workers=4)
+
+
+def test_workers_flag_defaults_from_env(monkeypatch):
+    import importlib
+    monkeypatch.setenv("ARCGIS_WORKERS", "3")
+    mod = importlib.reload(pull_arcgis)
+    try:
+        assert mod.DEFAULT_WORKERS == 3
+    finally:
+        monkeypatch.delenv("ARCGIS_WORKERS")
+        importlib.reload(pull_arcgis)

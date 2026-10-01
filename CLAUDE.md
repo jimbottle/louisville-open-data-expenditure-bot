@@ -147,6 +147,19 @@ The scheduled data refresh (`lou-refresh`, monthly) deploys on its own without
 this gate: it changes data, not code, and clones `main` — which has already
 been through it.
 
+**The refresh build has a hard 45-minute cap** (2026-10-01, `louisville-open-data-rm4`):
+the project, the template and `lou_stack.py` all say 180 minutes, but AWS
+caps every build in this account at 45 (`timeoutInMinutes: 45` on each build
+record; not a Service Quotas item — only an AWS Support case lifts it). The
+22 Sept run took 23.5 min; on 1 Oct the ArcGIS source served pages ~6x
+slower and the sequential CSV pull alone overran the cap, so nothing shipped
+(the alert e-mail is the `lou-refresh-failed` rule). The pull now fetches
+pages in a parallel window (`ARCGIS_WORKERS`, default 6, `pull_arcgis.py`)
+and the profile builder reuses KY SOS results newer than 120 days from the
+tracked `data/contractor_profiles.csv` (`--reuse-sos`, `--sos-max-age-days`),
+so a slow day fits. Re-run by hand: `aws codebuild start-build --project-name lou-refresh --profile lou`
+(Tier 2) and read `/lou/build` for the timings.
+
 ## Deployment (self-hosted Docker on the Air — pre-cutover / rollback path)
 
 This is a **self-hosted FastAPI app**, NOT a static site. Pushing to GitHub does **not** deploy it (no CI/CD); the running code is baked into the Docker image, so a change is live only after the image is rebuilt and the container recreated.
@@ -229,7 +242,13 @@ procedure: `monitoring/README.md`.
 A deploy is not "done" until it is tested **end-to-end through the production URL**, not just by loading the page. Loading `/` proves static files; it does NOT prove the API works (the edge can block the API path while serving the page fine — exactly what the Cloudflare `/api` WAF block did).
 
 1. Container reachable: `curl -sf http://localhost:8000/api/health` on the server returns `ok`.
-2. **End-to-end through production:** `curl -i -X POST https://louisville.raylytics.io/<ask-path> -H 'Content-Type: application/json' --data '{"question":""}'` must return **HTTP 200** and `content-type: text/event-stream` (an empty question short-circuits to an SSE error with no LLM call, so it's a free, safe probe). A `403`/`5xx` here means the edge or app is blocking the API, fix before calling the deploy good.
+2. **End-to-end through production:** an empty question short-circuits to an SSE error with no LLM call, so it's a free, safe probe. Behind CloudFront + OAC a POST with a body **must carry `x-amz-content-sha256`** (hex sha256 of the exact body) or CloudFront answers `403 InvalidSignatureException` before the app sees it — the browser client sends it (`tests/test_sigv4_body_hash.py`), plain curl does not:
+   ```bash
+   B='{"question":""}'
+   H=$(printf '%s' "$B" | shasum -a 256 | cut -d' ' -f1)
+   curl -i -X POST https://louisville.raylytics.io/api/ask -H 'Content-Type: application/json' -H "x-amz-content-sha256: $H" --data "$B"
+   ```
+   must return **HTTP 200** and `content-type: text/event-stream`. Any other `403`/`5xx` here means the edge or app is blocking the API, fix before calling the deploy good.
 3. One real question in the browser at https://louisville.raylytics.io/ returns an answer.
 
 `data/contractor_profiles.csv` is the one data file tracked in git (a

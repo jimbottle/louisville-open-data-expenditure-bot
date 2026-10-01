@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import csv
+import datetime as _dt
 import os
 import re
 import sys
@@ -137,6 +138,57 @@ def lookup_entity(name: str, session: requests.Session) -> dict:
         return {}
 
 
+# ── SOS result reuse ─────────────────────────────────────────────────────────
+
+SOS_FIELDS = [
+    "sos_org_number", "sos_status", "sos_standing", "sos_company_type",
+    "sos_industry", "sos_employees", "sos_county", "sos_file_date",
+    "sos_principal_office", "sos_managed_by", "sos_registered_agent",
+]
+# Carried along with a reused row so scrape_officers.py can skip it too.
+SOS_CARRY_FIELDS = SOS_FIELDS + ["sos_officers", "sos_looked_up"]
+
+
+def load_prior_sos(path: str, max_age_days: int) -> dict[str, dict]:
+    """SOS results from a previous profiles CSV, keyed by payee, that are
+    recent enough to reuse (louisville-open-data-rm4).
+
+    The KY SOS lookups are ~150 polite 1.5 s round-trips (~4.5 min on
+    2026-09-22) and the answers change rarely, so a monthly rebuild reuses any
+    row looked up within `max_age_days` and only fetches payees that are new
+    to the top list or stale. A hit and a miss are both "looked up": the
+    `sos_looked_up` date column records either. Files written before that
+    column existed carry no date, so their rows are dated by the file's
+    mtime. The build plane clones `main`, so the tracked
+    data/contractor_profiles.csv is the cache it sees; committing a rebuilt
+    file refreshes it."""
+    if not path or not os.path.exists(path) or max_age_days <= 0:
+        return {}
+    import pandas as pd
+    try:
+        prior = pd.read_csv(path, dtype=str, keep_default_na=False)
+    except Exception as e:
+        print(f"  (prior profiles at {path} unreadable: {e}; SOS cache ignored)")
+        return {}
+    if "payee" not in prior.columns or "sos_registered_agent" not in prior.columns:
+        return {}
+    file_date = _dt.date.fromtimestamp(os.path.getmtime(path))
+    cutoff = _dt.date.today() - _dt.timedelta(days=max_age_days)
+    out = {}
+    for _, row in prior.iterrows():
+        stamp = row.get("sos_looked_up", "") if "sos_looked_up" in prior.columns else ""
+        try:
+            when = _dt.date.fromisoformat(stamp) if stamp else file_date
+        except ValueError:
+            when = file_date
+        if when < cutoff:
+            continue
+        rec = {f: row.get(f, "") for f in SOS_CARRY_FIELDS if f in prior.columns}
+        rec["sos_looked_up"] = when.isoformat()
+        out[row["payee"]] = rec
+    return out
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -145,6 +197,11 @@ def main():
     parser.add_argument("--skip-sos", action="store_true", help="Skip KY SOS lookups")
     parser.add_argument("--data-dir", default="data")
     parser.add_argument("--output", default="data/contractor_profiles.csv")
+    parser.add_argument("--reuse-sos", default=None,
+                        help="Previous profiles CSV whose recent SOS results are reused "
+                             "(default: --output if it exists; '' disables)")
+    parser.add_argument("--sos-max-age-days", type=int, default=120,
+                        help="Reuse SOS results looked up within this many days (0 = always re-fetch)")
     args = parser.parse_args()
 
     print("Loading expenditure data...")
@@ -218,25 +275,37 @@ def main():
         session = requests.Session()
         session.headers.update({"User-Agent": "Louisville-OpenData-Research/1.0"})
 
-        sos_fields = [
-            "sos_org_number", "sos_status", "sos_standing", "sos_company_type",
-            "sos_industry", "sos_employees", "sos_county", "sos_file_date",
-            "sos_principal_office", "sos_managed_by", "sos_registered_agent",
-        ]
-        for f in sos_fields:
+        sos_fields = SOS_FIELDS
+        for f in SOS_CARRY_FIELDS:
             merged[f] = None
+
+        reuse_path = args.output if args.reuse_sos is None else args.reuse_sos
+        prior = load_prior_sos(reuse_path, args.sos_max_age_days)
+        if prior:
+            print(f"  Reusing SOS results from {reuse_path} for lookups newer than "
+                  f"{args.sos_max_age_days} days ({len(prior)} payees cached)")
+        today = _dt.date.today().isoformat()
 
         # Only look up entities that look like businesses (contain LLC, INC, CO, CORP, etc.)
         biz_pattern = re.compile(r'\b(LLC|INC|CORP|CO\b|LTD|LP|COMPANY|ENTERPRISES|ASSOCIATES|GROUP|PARTNERS)', re.IGNORECASE)
 
         looked_up = 0
+        reused = 0
         for idx, row in merged.iterrows():
             name = row["payee"]
             if not biz_pattern.search(name):
                 continue
 
+            cached = prior.get(name)
+            if cached is not None:
+                for f, v in cached.items():
+                    merged.at[idx, f] = v if v != "" else None
+                reused += 1
+                continue
+
             print(f"  [{looked_up + 1}] Looking up: {name[:60]}...")
             profile = lookup_entity(name, session)
+            merged.at[idx, "sos_looked_up"] = today
 
             if profile:
                 merged.at[idx, "sos_org_number"] = profile.get("org_number", "")
@@ -258,7 +327,8 @@ def main():
             time.sleep(1.5)
 
         found = merged["sos_org_number"].notna().sum()
-        print(f"\n  SOS matches found: {found}/{looked_up} lookups")
+        print(f"\n  SOS matches found: {found}/{looked_up + reused} "
+              f"({looked_up} looked up, {reused} reused)")
 
     # Save
     output_cols = [
@@ -270,11 +340,7 @@ def main():
         "EMAIL", "DAYTIMEPHONE",
     ]
     if not args.skip_sos:
-        output_cols.extend([
-            "sos_org_number", "sos_status", "sos_standing", "sos_company_type",
-            "sos_industry", "sos_employees", "sos_county", "sos_file_date",
-            "sos_principal_office", "sos_managed_by", "sos_registered_agent",
-        ])
+        output_cols.extend(SOS_CARRY_FIELDS)
 
     # Keep only columns that exist
     output_cols = [c for c in output_cols if c in merged.columns]

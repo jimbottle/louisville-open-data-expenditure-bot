@@ -29,15 +29,39 @@ import json
 import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlencode, urlparse
 
 import pandas as pd
 import requests
 
 DEFAULT_BATCH_SIZE = 1000
+# Pages fetched concurrently within one layer. The hosted layers cap a page at
+# maxRecordCount=1000 (so a bigger batch_size buys nothing) and the pull is
+# ~2,300 pages across the 25 Louisville layers. Sequential, that is fine on a
+# normal day (0.2 s/page, ~9 min) but on 2026-10-01 the source served pages
+# at ~1.5 s each and the sequential pull alone (~60 min) blew the monthly
+# lou-refresh build's 45-minute cap (louisville-open-data-rm4). Offsets are
+# independent, so a window of pages is fetched in parallel and committed in
+# order. ARCGIS_WORKERS=1 restores the sequential pull.
+DEFAULT_WORKERS = int(os.environ.get("ARCGIS_WORKERS", "6") or 6)
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
+
+_thread_local = threading.local()
+
+
+def _session() -> requests.Session:
+    """One keep-alive session per worker thread (requests.Session is not
+    documented thread-safe, and a fresh TCP+TLS handshake per page is a
+    measurable share of a 0.2 s page)."""
+    s = getattr(_thread_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        _thread_local.session = s
+    return s
 
 
 def normalize_url(url: str) -> str:
@@ -61,7 +85,7 @@ def fetch_json(url: str, params: dict, retries: int = MAX_RETRIES) -> dict:
     """GET request with retry logic. Returns parsed JSON."""
     for attempt in range(1, retries + 1):
         try:
-            resp = requests.get(url, params=params, timeout=120)
+            resp = _session().get(url, params=params, timeout=120)
             resp.raise_for_status()
             data = resp.json()
             if "error" in data:
@@ -94,8 +118,15 @@ def pull_records(
     where: str = "1=1",
     out_fields: str = "*",
     batch_size: int = DEFAULT_BATCH_SIZE,
+    workers: int | None = None,
 ) -> list[dict]:
-    """Paginate through all records and return as a list of attribute dicts."""
+    """Paginate through all records and return as a list of attribute dicts.
+
+    Pages are fetched `workers` at a time (see DEFAULT_WORKERS) but always
+    COMMITTED in offset order, so the result is identical to a sequential pull
+    and every guard below reads the same way it did when the loop was serial.
+    """
+    workers = max(1, int(workers or DEFAULT_WORKERS))
     total = get_record_count(base_url, where)
     print(f"Total records matching query: {total:,}")
 
@@ -103,41 +134,48 @@ def pull_records(
         return []
 
     query_url = f"{base_url}/query"
-    all_records = []
-    offset = 0
-    page = 0
 
-    # Advance the offset by the number of records ACTUALLY returned, not by the
-    # requested batch_size. Hosted layers cap page size at their own
-    # maxRecordCount (often 1000-2000), so a --batch-size larger than that gets
-    # a short page every time; the old `offset = page * batch_size` with a
-    # precomputed page count then stepped over the un-returned rows and stopped
-    # early, silently writing a partial CSV. Loop until the server says there is
-    # no more (exceededTransferLimit) or hands back an empty page.
-    while True:
-        params = {
+    def fetch_page(offset: int) -> dict:
+        return fetch_json(query_url, {
             "where": where,
             "outFields": out_fields,
             "outSR": "4326",
             "f": "json",
             "resultOffset": offset,
             "resultRecordCount": batch_size,
-        }
-        data = fetch_json(query_url, params)
+        })
+
+    all_records = []
+    offset = 0
+    page = 0
+    # The server's real page size, learned from the first page: hosted layers
+    # cap page size at their own maxRecordCount (often 1000-2000), so a
+    # --batch-size above that gets a short page every time. The old
+    # `offset = page * batch_size` with a precomputed page count then stepped
+    # over the un-returned rows and stopped early, silently writing a partial
+    # CSV. Offsets therefore advance by the number of rows ACTUALLY returned,
+    # and the parallel window is laid out on the observed page size.
+    page_size = None
+
+    def commit(data: dict) -> bool:
+        """Append one page in order. Returns True when the pull is complete."""
+        nonlocal offset, page, page_size
         features = data.get("features", [])
         if not features:
-            break
+            return True
         batch = [f["attributes"] for f in features]
         all_records.extend(batch)
         offset += len(features)
         page += 1
+        if page_size is None:
+            page_size = len(features)
         print(f"  Page {page} — fetched {len(batch)} records ({len(all_records):,} of {total:,})")
 
         # Safety bound against a layer that does NOT paginate
         # (supportsPagination=false — common on older on-prem ArcGIS Server):
         # it ignores resultOffset, returns the SAME page every time with
         # exceededTransferLimit=true, so neither the empty-page nor the flag
-        # break ever fires and the loop would spin forever appending duplicates.
+        # stop ever fires and the loop would spin forever appending duplicates.
         # A correct pull collects exactly `total`; overshooting it by more than a
         # page means the server is not honoring the offset — stop loudly.
         if total and len(all_records) > total + batch_size:
@@ -152,8 +190,27 @@ def pull_records(
 
         # The transfer-limit flag is the authoritative "more to come" signal and
         # is the one that survives a server whose page cap is below batch_size.
-        if not data.get("exceededTransferLimit", False):
-            break
+        return not data.get("exceededTransferLimit", False)
+
+    # First page alone: it tells us the page size the window is built on.
+    done = commit(fetch_page(0))
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        while not done:
+            offsets = [offset + i * page_size for i in range(workers)]
+            pages = list(pool.map(fetch_page, offsets)) if workers > 1 else [fetch_page(offsets[0])]
+            for i, data in enumerate(pages):
+                expected_offset = offsets[i]
+                if expected_offset != offset:
+                    # An earlier page in this window came back short (the
+                    # source shrank, or the server changed its cap), so the
+                    # offsets this window was laid out on no longer line up.
+                    # Drop the rest and re-plan from the real offset; nothing
+                    # is skipped because pages are only committed in order.
+                    break
+                done = commit(data)
+                if done:
+                    break
 
     if total and len(all_records) < total:
         # total is a pre-count snapshot; a smaller final tally usually means the
@@ -262,6 +319,12 @@ def main():
         help=f"Records per request (default: {DEFAULT_BATCH_SIZE})",
     )
     parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Pages fetched concurrently (default: {DEFAULT_WORKERS}, env ARCGIS_WORKERS; 1 = sequential)",
+    )
+    parser.add_argument(
         "--metadata",
         action="store_true",
         help="Also save layer metadata and data dictionary",
@@ -296,7 +359,7 @@ def main():
         print()
 
     if not args.no_data:
-        records = pull_records(base_url, args.where, args.fields, args.batch_size)
+        records = pull_records(base_url, args.where, args.fields, args.batch_size, args.workers)
         if records:
             save_data(records, args.output_dir, name, args.format)
 

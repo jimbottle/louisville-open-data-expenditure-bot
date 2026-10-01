@@ -203,6 +203,8 @@ def main():
     parser.add_argument("--input", default="data/contractor_profiles.csv")
     parser.add_argument("--output", default="data/contractor_profiles.csv")
     parser.add_argument("--use-browser", action="store_true", help="Use spagents browser for officer scraping")
+    parser.add_argument("--refresh-existing", action="store_true",
+                        help="Re-scrape companies that already have sos_officers (default: skip them)")
     args = parser.parse_args()
 
     import pandas as pd
@@ -217,8 +219,14 @@ def main():
 
     # Find companies using agent services
     mask = df["sos_registered_agent"].apply(lambda x: is_agent_service(str(x)) if pd.notna(x) else False)
+    n_agent = int(mask.sum())
+    if not args.refresh_existing:
+        # Officers reused from the previous profiles file (build_contractor_profiles
+        # --reuse-sos) are kept; only companies without them are scraped
+        # (louisville-open-data-rm4).
+        mask &= df["sos_officers"].isna()
     targets = df[mask]
-    print(f"Found {len(targets)} companies using registered agent services")
+    print(f"Found {n_agent} companies using registered agent services; scraping {len(targets)}")
 
     session = requests.Session()
     session.headers.update({"User-Agent": "Louisville-OpenData-Research/1.0"})
