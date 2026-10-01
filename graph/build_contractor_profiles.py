@@ -157,13 +157,18 @@ SOS_CARRY_FIELDS = SOS_FIELDS + ["sos_officers", "sos_looked_up"]
 
 def _git_commit_date(path: str):
     """Date of the last commit touching `path`, or None if that cannot be
-    determined (not a git checkout, file untracked, git missing)."""
+    determined (not a git checkout, file untracked, git missing, or a SHALLOW
+    checkout: with `--depth 1` the only commit is a grafted root, so
+    `git log -1 -- file` reports HEAD's date for every file, which would make
+    an undated row look fresh on every run — roborev 5149)."""
+    cwd = os.path.dirname(os.path.abspath(path)) or "."
     try:
-        out = subprocess.run(
-            ["git", "log", "-1", "--format=%cs", "--", os.path.basename(path)],
-            cwd=os.path.dirname(os.path.abspath(path)) or ".",
-            capture_output=True, text=True, timeout=10, check=False,
-        ).stdout.strip()
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                                  text=True, timeout=10, check=False).stdout.strip()
+        if git("rev-parse", "--is-shallow-repository") != "false":
+            return None
+        out = git("log", "-1", "--format=%cs", "--", os.path.basename(path))
         return _dt.date.fromisoformat(out) if out else None
     except Exception:
         return None
@@ -185,9 +190,10 @@ def load_prior_sos(path: str, max_age_days: int) -> dict[str, dict]:
     fetched — never by mtime: the build plane does a fresh clone, so mtime is
     always "now" and every row would look fresh forever (roborev 5148). With
     no git date the row is treated as stale and re-fetched. The stamp carried
-    over is the real one, or that commit date for an undated row, so a
+    over is the real one, or that commit date for a legacy file, so a
     committed rebuild keeps aging from the original fetch rather than from the
-    new commit."""
+    new commit. In a file that has the column, a blank stamp is a failed
+    lookup and is always re-fetched."""
     if not path or not os.path.exists(path) or max_age_days <= 0:
         return {}
     import pandas as pd
@@ -199,19 +205,21 @@ def load_prior_sos(path: str, max_age_days: int) -> dict[str, dict]:
     if "payee" not in prior.columns or "sos_registered_agent" not in prior.columns:
         return {}
     has_stamp = "sos_looked_up" in prior.columns
-    undated_as_of = None if has_stamp and prior["sos_looked_up"].astype(bool).all() else _git_commit_date(path)
+    # The commit-date fallback is for files written before the column existed.
+    # In a stamped file a blank cell means the lookup FAILED last time (or the
+    # stamp is garbage) and the row must be re-fetched, not dated by the
+    # commit and reused as a miss (roborev 5149).
+    legacy_as_of = None if has_stamp else _git_commit_date(path)
     cutoff = _dt.date.today() - _dt.timedelta(days=max_age_days)
     out = {}
     for _, row in prior.iterrows():
-        stamp = row.get("sos_looked_up", "") if has_stamp else ""
-        when = None
-        if stamp:
+        if has_stamp:
             try:
-                when = _dt.date.fromisoformat(stamp)
+                when = _dt.date.fromisoformat(row.get("sos_looked_up", ""))
             except ValueError:
-                when = None
-        if when is None:
-            when = undated_as_of
+                continue
+        else:
+            when = legacy_as_of
         if when is None or when < cutoff:
             continue
         rec = {f: row.get(f, "") for f in SOS_CARRY_FIELDS if f in prior.columns}

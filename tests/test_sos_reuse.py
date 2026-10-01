@@ -99,3 +99,45 @@ def test_reuse_requires_sos_columns(tmp_path):
     p = tmp_path / "profiles.csv"
     _write(p, [{"payee": "No SOS Inc", "total_spend": 1}])
     assert bcp.load_prior_sos(str(p), 120) == {}
+
+
+def test_shallow_clone_never_dates_an_undated_row(tmp_path):
+    """The refresh build used `git clone --depth 1`; in a shallow clone
+    `git log -1 -- file` reports HEAD's date for every file, so an undated
+    row looked fresh on every run (roborev 5149). A shallow checkout must
+    treat undated rows as stale."""
+    src = tmp_path / "src"; src.mkdir()
+    _git(src, "init", "-q")
+    p = src / "profiles.csv"
+    _write(p, [{"payee": "Old Corp", "sos_registered_agent": "x", "sos_org_number": "9"}])
+    _commit_dated(src, p, dt.date.today() - dt.timedelta(days=200))
+    (src / "other.txt").write_text("later work\n")
+    _commit_dated(src, src / "other.txt", dt.date.today() - dt.timedelta(days=1))
+    # Full clone: the file's real commit is 200 days old -> stale.
+    full = tmp_path / "full"
+    _git(tmp_path, "clone", "-q", f"file://{src}", str(full))
+    assert bcp.load_prior_sos(str(full / "profiles.csv"), 120) == {}
+    # Shallow clone: HEAD is 1 day old and git log would say so for the CSV.
+    shallow = tmp_path / "shallow"
+    _git(tmp_path, "clone", "-q", "--depth", "1", f"file://{src}", str(shallow))
+    assert _git(shallow, "rev-parse", "--is-shallow-repository").stdout.strip() == "true"
+    assert bcp.load_prior_sos(str(shallow / "profiles.csv"), 120) == {}, \
+        "undated row dated by the shallow clone's HEAD"
+
+
+def test_blank_stamp_in_a_stamped_file_is_refetched(tmp_path):
+    """A failed lookup leaves sos_looked_up blank. When that file is reused,
+    the blank row must be re-fetched, not dated by the commit and reused as a
+    miss for 120 days (roborev 5149)."""
+    repo = tmp_path
+    _git(repo, "init", "-q")
+    p = repo / "profiles.csv"
+    today = dt.date.today()
+    _write(p, [
+        {"payee": "Fresh LLC", "sos_registered_agent": "a", "sos_org_number": "1", "sos_looked_up": today.isoformat()},
+        {"payee": "Failed Inc", "sos_registered_agent": "", "sos_org_number": "", "sos_looked_up": ""},
+        {"payee": "Garbage Co", "sos_registered_agent": "", "sos_org_number": "", "sos_looked_up": "not-a-date"},
+    ])
+    _commit_dated(repo, p, today)   # a commit date that WOULD be fresh if used
+    prior = bcp.load_prior_sos(str(p), 120)
+    assert set(prior) == {"Fresh LLC"}

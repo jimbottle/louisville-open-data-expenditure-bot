@@ -418,7 +418,13 @@ class LouStack(cdk.Stack):
                     "commands": [
                         # CodeBuild keeps the working directory between commands,
                         # so every command below anchors itself with an absolute cd.
-                        "git clone --depth 1 \"$LOU_REPO\" \"$CODEBUILD_SRC_DIR/src\" && git -C \"$CODEBUILD_SRC_DIR/src\" rev-parse --short HEAD",
+                        # Not --depth 1: build_contractor_profiles ages the
+                        # tracked contractor_profiles.csv by its last commit
+                        # date (SOS reuse, rm4), and a shallow clone reports
+                        # HEAD's date for every file. blob:none keeps the full
+                        # commit/tree history (1.5 MB) and fetches only HEAD's
+                        # blobs; GitHub honours the filter.
+                        "git clone --filter=blob:none \"$LOU_REPO\" \"$CODEBUILD_SRC_DIR/src\" && git -C \"$CODEBUILD_SRC_DIR/src\" rev-parse --short HEAD",
                         "cd \"$CODEBUILD_SRC_DIR/src\" && pip install -q -r requirements.txt -r infra/cdk/requirements.txt beautifulsoup4",
                     ],
                 },
