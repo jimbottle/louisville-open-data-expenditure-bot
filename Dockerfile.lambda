@@ -19,7 +19,12 @@
 # Nothing here is exercised by the self-hosted deploy; that keeps using ./Dockerfile.
 FROM public.ecr.aws/awsguru/aws-lambda-adapter:1.0.0 AS lwa
 
-FROM python:3.12-slim
+# Docker's official image via AWS's ECR Public mirror, not docker.io: the
+# lou-refresh build pulls anonymously from CodeBuild's shared egress and
+# Docker Hub answered 429 Too Many Requests on 2026-10-01 (build #4), failing
+# the deploy after a 27-minute data refresh. Same image, same tag, no
+# Docker Hub rate limit (louisville-open-data-rm4).
+FROM public.ecr.aws/docker/library/python:3.12-slim
 COPY --from=lwa /lambda-adapter /opt/extensions/lambda-adapter
 
 # HOME must be set before the INSTALL below so the extension lands where the
