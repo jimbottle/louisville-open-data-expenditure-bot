@@ -15,6 +15,7 @@ import csv
 import datetime as _dt
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -114,8 +115,10 @@ def sos_profile(ctr: str, session: requests.Session) -> dict:
     return profile
 
 
-def lookup_entity(name: str, session: requests.Session) -> dict:
-    """Search and get profile for a business entity. Returns best match or empty dict."""
+def lookup_entity(name: str, session: requests.Session) -> dict | None:
+    """Search and get profile for a business entity. Returns the best match,
+    {} when the search completed with no match, or None when the lookup
+    itself failed (so the caller can tell a miss from an outage)."""
     try:
         results = sos_search(name, session)
         if not results:
@@ -134,8 +137,11 @@ def lookup_entity(name: str, session: requests.Session) -> dict:
 
         return {}
     except Exception as e:
+        # None, not {}: a timeout/HTTP/parse failure is NOT a "no such entity"
+        # and must not be recorded as a looked-up miss that --reuse-sos then
+        # skips for 120 days (roborev 5148).
         print(f"    SOS lookup failed for {name}: {e}")
-        return {}
+        return None
 
 
 # ── SOS result reuse ─────────────────────────────────────────────────────────
@@ -149,6 +155,20 @@ SOS_FIELDS = [
 SOS_CARRY_FIELDS = SOS_FIELDS + ["sos_officers", "sos_looked_up"]
 
 
+def _git_commit_date(path: str):
+    """Date of the last commit touching `path`, or None if that cannot be
+    determined (not a git checkout, file untracked, git missing)."""
+    try:
+        out = subprocess.run(
+            ["git", "log", "-1", "--format=%cs", "--", os.path.basename(path)],
+            cwd=os.path.dirname(os.path.abspath(path)) or ".",
+            capture_output=True, text=True, timeout=10, check=False,
+        ).stdout.strip()
+        return _dt.date.fromisoformat(out) if out else None
+    except Exception:
+        return None
+
+
 def load_prior_sos(path: str, max_age_days: int) -> dict[str, dict]:
     """SOS results from a previous profiles CSV, keyed by payee, that are
     recent enough to reuse (louisville-open-data-rm4).
@@ -157,11 +177,17 @@ def load_prior_sos(path: str, max_age_days: int) -> dict[str, dict]:
     2026-09-22) and the answers change rarely, so a monthly rebuild reuses any
     row looked up within `max_age_days` and only fetches payees that are new
     to the top list or stale. A hit and a miss are both "looked up": the
-    `sos_looked_up` date column records either. Files written before that
-    column existed carry no date, so their rows are dated by the file's
-    mtime. The build plane clones `main`, so the tracked
-    data/contractor_profiles.csv is the cache it sees; committing a rebuilt
-    file refreshes it."""
+    `sos_looked_up` date column records either (a FAILED lookup records
+    nothing, so it is retried next time).
+
+    Rows without a stamp (files written before the column existed) are aged
+    by the file's last git commit date — the latest the data can have been
+    fetched — never by mtime: the build plane does a fresh clone, so mtime is
+    always "now" and every row would look fresh forever (roborev 5148). With
+    no git date the row is treated as stale and re-fetched. The stamp carried
+    over is the real one, or that commit date for an undated row, so a
+    committed rebuild keeps aging from the original fetch rather than from the
+    new commit."""
     if not path or not os.path.exists(path) or max_age_days <= 0:
         return {}
     import pandas as pd
@@ -172,16 +198,21 @@ def load_prior_sos(path: str, max_age_days: int) -> dict[str, dict]:
         return {}
     if "payee" not in prior.columns or "sos_registered_agent" not in prior.columns:
         return {}
-    file_date = _dt.date.fromtimestamp(os.path.getmtime(path))
+    has_stamp = "sos_looked_up" in prior.columns
+    undated_as_of = None if has_stamp and prior["sos_looked_up"].astype(bool).all() else _git_commit_date(path)
     cutoff = _dt.date.today() - _dt.timedelta(days=max_age_days)
     out = {}
     for _, row in prior.iterrows():
-        stamp = row.get("sos_looked_up", "") if "sos_looked_up" in prior.columns else ""
-        try:
-            when = _dt.date.fromisoformat(stamp) if stamp else file_date
-        except ValueError:
-            when = file_date
-        if when < cutoff:
+        stamp = row.get("sos_looked_up", "") if has_stamp else ""
+        when = None
+        if stamp:
+            try:
+                when = _dt.date.fromisoformat(stamp)
+            except ValueError:
+                when = None
+        if when is None:
+            when = undated_as_of
+        if when is None or when < cutoff:
             continue
         rec = {f: row.get(f, "") for f in SOS_CARRY_FIELDS if f in prior.columns}
         rec["sos_looked_up"] = when.isoformat()
@@ -291,6 +322,7 @@ def main():
 
         looked_up = 0
         reused = 0
+        failed = 0
         for idx, row in merged.iterrows():
             name = row["payee"]
             if not biz_pattern.search(name):
@@ -305,6 +337,12 @@ def main():
 
             print(f"  [{looked_up + 1}] Looking up: {name[:60]}...")
             profile = lookup_entity(name, session)
+            if profile is None:
+                # Failed, not missing: leave sos_looked_up blank so the next
+                # rebuild retries instead of reusing an outage for 120 days.
+                failed += 1
+                time.sleep(1.5)
+                continue
             merged.at[idx, "sos_looked_up"] = today
 
             if profile:
@@ -328,7 +366,7 @@ def main():
 
         found = merged["sos_org_number"].notna().sum()
         print(f"\n  SOS matches found: {found}/{looked_up + reused} "
-              f"({looked_up} looked up, {reused} reused)")
+              f"({looked_up} looked up, {reused} reused, {failed} failed and left for next time)")
 
     # Save
     output_cols = [

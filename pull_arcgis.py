@@ -167,7 +167,12 @@ def pull_records(
         all_records.extend(batch)
         offset += len(features)
         page += 1
-        if page_size is None:
+        more = data.get("exceededTransferLimit", False)
+        if page_size is None or (more and len(features) < page_size):
+            # First page, or the server lowered its cap mid-pull: lay the next
+            # window out on the size it actually serves, otherwise only the
+            # first page of every window would line up and the other
+            # workers-1 requests would be thrown away (roborev 5148).
             page_size = len(features)
         print(f"  Page {page} — fetched {len(batch)} records ({len(all_records):,} of {total:,})")
 
@@ -190,7 +195,7 @@ def pull_records(
 
         # The transfer-limit flag is the authoritative "more to come" signal and
         # is the one that survives a server whose page cap is below batch_size.
-        return not data.get("exceededTransferLimit", False)
+        return not more
 
     # First page alone: it tells us the page size the window is built on.
     done = commit(fetch_page(0))

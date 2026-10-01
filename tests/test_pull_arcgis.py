@@ -122,6 +122,10 @@ def test_parallel_pull_replans_after_a_short_page(monkeypatch):
     monkeypatch.setattr(pull_arcgis, "fetch_json", shrinking_server)
     records = pull_arcgis.pull_records("http://x/FeatureServer/0", batch_size=1000, workers=4)
     assert [r["id"] for r in records] == list(range(total)), "gap or duplicate after the cap shrank"
+    # The window re-plans on the NEW page size: 2 pages of 1000 + 10 of 500
+    # is 12 useful requests; one wasted window at most, not workers-1 wasted
+    # requests per window for the rest of the pull (roborev 5148).
+    assert len(calls) <= 12 + 4 + 4, f"{len(calls)} requests for 12 pages: window not re-planned on the shrunk cap"
 
 
 def test_parallel_pull_aborts_on_non_paginating_server(monkeypatch):
