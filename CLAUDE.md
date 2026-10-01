@@ -157,8 +157,17 @@ slower and the sequential CSV pull alone overran the cap, so nothing shipped
 pages in a parallel window (`ARCGIS_WORKERS`, default 6, `pull_arcgis.py`)
 and the profile builder reuses KY SOS results newer than 120 days from the
 tracked `data/contractor_profiles.csv` (`--reuse-sos`, `--sos-max-age-days`),
-so a slow day fits. Re-run by hand: `aws codebuild start-build --project-name lou-refresh --profile lou`
-(Tier 2) and read `/lou/build` for the timings.
+so a slow day fits. **ArcGIS Online meters the source at 6,000 request units
+per minute** and answers a JSON-level 429 ("Retry after 60 sec") when spent —
+build #5 died on it the moment the source was fast — so the puller also holds
+~100 pages/min (`ARCGIS_PAGES_PER_MINUTE`, token bucket) and sleeps out any
+429 it still gets. Budget for a run: ~23 min pull + 5 min SOS (0 once the
+blobless-clone buildspec is live) + ~8 min corpus/artifact/deploy/warm.
+The Lambda image's base comes from `public.ecr.aws/docker/library` (Docker
+Hub 429'd the anonymous pull from CodeBuild, build #4). Re-run by hand:
+`aws codebuild start-build --project-name lou-refresh --profile lou`
+(Tier 2; the agent harness blocks it as a prod deploy, so the human runs it)
+and read `/lou/build` for the timings.
 
 ## Deployment (self-hosted Docker on the Air — pre-cutover / rollback path)
 

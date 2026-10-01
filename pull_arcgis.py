@@ -47,10 +47,63 @@ DEFAULT_BATCH_SIZE = 1000
 # independent, so a window of pages is fetched in parallel and committed in
 # order. ARCGIS_WORKERS=1 restores the sequential pull.
 DEFAULT_WORKERS = int(os.environ.get("ARCGIS_WORKERS", "6") or 6)
+# ArcGIS Online meters hosted feature services in "request units" per
+# minute per organisation and answers a JSON-level 429 ("API calls quota
+# exceeded (6044 request units)! maximum allowed request units (6000) per
+# Minute. Retry after 60 sec.") when the budget is spent — which the parallel
+# window did on 2026-10-01 (lou-refresh #5) the moment the source was fast.
+# Two defences: a token bucket that keeps the pull under ~100 pages/min
+# (6 workers hide latency; this caps throughput), and a 429 handler that
+# sleeps for the server's Retry-after and tries again, so a shared budget
+# that someone else drains only stalls the pull instead of failing it.
+DEFAULT_PAGES_PER_MINUTE = float(os.environ.get("ARCGIS_PAGES_PER_MINUTE", "100") or 100)
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
+QUOTA_RETRIES = 10          # 429s tolerated per request (10 x ~60 s)
+QUOTA_DEFAULT_WAIT = 60     # seconds, when the 429 carries no "Retry after N sec"
 
 _thread_local = threading.local()
+
+
+class RateLimiter:
+    """Thread-safe token bucket: at most `per_minute` acquisitions per minute,
+    smoothed (one token every 60/per_minute seconds, up to a burst of
+    `burst`). 0 or less disables it."""
+
+    def __init__(self, per_minute: float, burst: int | None = None):
+        self.interval = 60.0 / per_minute if per_minute and per_minute > 0 else 0.0
+        self.burst = max(1, int(burst if burst is not None else max(1, per_minute / 10)))
+        self.tokens = float(self.burst)
+        self.updated = time.monotonic()
+        self.lock = threading.Lock()
+
+    def acquire(self) -> float:
+        """Block until a token is available; returns the seconds slept."""
+        if not self.interval:
+            return 0.0
+        with self.lock:
+            now = time.monotonic()
+            self.tokens = min(self.burst, self.tokens + (now - self.updated) / self.interval)
+            self.updated = now
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return 0.0
+            wait = (1 - self.tokens) * self.interval
+            self.tokens = 0.0
+            self.updated = now + wait
+        time.sleep(wait)
+        return wait
+
+
+def _quota_error(data: dict):
+    """The ArcGIS JSON-level 429, or None. Returns the seconds to wait."""
+    err = data.get("error") or {}
+    code = err.get("code")
+    text = " ".join([str(err.get("message", ""))] + [str(d) for d in err.get("details", [])])
+    if code == 429 or "Too many requests" in text or "quota exceeded" in text:
+        m = re.search(r"[Rr]etry after (\d+) ?sec", text)
+        return int(m.group(1)) if m else QUOTA_DEFAULT_WAIT
+    return None
 
 
 def _session() -> requests.Session:
@@ -82,17 +135,33 @@ def derive_layer_name(base_url: str) -> str:
 
 
 def fetch_json(url: str, params: dict, retries: int = MAX_RETRIES) -> dict:
-    """GET request with retry logic. Returns parsed JSON."""
-    for attempt in range(1, retries + 1):
+    """GET request with retry logic. Returns parsed JSON.
+
+    Network/HTTP failures retry `retries` times with a short backoff. The
+    ArcGIS JSON-level 429 (quota exceeded; HTTP 200) waits for the server's
+    "Retry after N sec" and retries up to QUOTA_RETRIES times — it is a
+    budget, not a fault, and comes back by itself."""
+    attempt = 0
+    quota_hits = 0
+    while True:
+        attempt += 1
         try:
             resp = _session().get(url, params=params, timeout=120)
             resp.raise_for_status()
             data = resp.json()
             if "error" in data:
+                wait = _quota_error(data)
+                if wait is not None and quota_hits < QUOTA_RETRIES:
+                    quota_hits += 1
+                    print(f"  ArcGIS quota exceeded (429); waiting {wait}s "
+                          f"[{quota_hits}/{QUOTA_RETRIES}]")
+                    time.sleep(wait)
+                    attempt -= 1   # a quota stall is not a failed attempt
+                    continue
                 raise RuntimeError(f"ArcGIS error: {data['error']}")
             return data
         except (requests.RequestException, json.JSONDecodeError) as e:
-            if attempt == retries:
+            if attempt >= retries:
                 raise
             wait = RETRY_DELAY * attempt
             print(f"  Retry {attempt}/{retries} after error: {e} (waiting {wait}s)")
@@ -119,14 +188,18 @@ def pull_records(
     out_fields: str = "*",
     batch_size: int = DEFAULT_BATCH_SIZE,
     workers: int | None = None,
+    pages_per_minute: float | None = None,
 ) -> list[dict]:
     """Paginate through all records and return as a list of attribute dicts.
 
     Pages are fetched `workers` at a time (see DEFAULT_WORKERS) but always
     COMMITTED in offset order, so the result is identical to a sequential pull
     and every guard below reads the same way it did when the loop was serial.
+    Throughput is capped at `pages_per_minute` (DEFAULT_PAGES_PER_MINUTE) to
+    stay under the ArcGIS Online request-unit quota.
     """
     workers = max(1, int(workers or DEFAULT_WORKERS))
+    limiter = RateLimiter(DEFAULT_PAGES_PER_MINUTE if pages_per_minute is None else pages_per_minute)
     total = get_record_count(base_url, where)
     print(f"Total records matching query: {total:,}")
 
@@ -136,6 +209,7 @@ def pull_records(
     query_url = f"{base_url}/query"
 
     def fetch_page(offset: int) -> dict:
+        limiter.acquire()
         return fetch_json(query_url, {
             "where": where,
             "outFields": out_fields,
@@ -330,6 +404,12 @@ def main():
         help=f"Pages fetched concurrently (default: {DEFAULT_WORKERS}, env ARCGIS_WORKERS; 1 = sequential)",
     )
     parser.add_argument(
+        "--pages-per-minute",
+        type=float,
+        default=DEFAULT_PAGES_PER_MINUTE,
+        help=f"Throughput cap (default: {DEFAULT_PAGES_PER_MINUTE:g}, env ARCGIS_PAGES_PER_MINUTE; 0 = unlimited)",
+    )
+    parser.add_argument(
         "--metadata",
         action="store_true",
         help="Also save layer metadata and data dictionary",
@@ -364,7 +444,8 @@ def main():
         print()
 
     if not args.no_data:
-        records = pull_records(base_url, args.where, args.fields, args.batch_size, args.workers)
+        records = pull_records(base_url, args.where, args.fields, args.batch_size, args.workers,
+                               args.pages_per_minute)
         if records:
             save_data(records, args.output_dir, name, args.format)
 

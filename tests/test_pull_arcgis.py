@@ -6,7 +6,16 @@ past the first page were silently skipped and a partial CSV was written.
 """
 import json
 
+import pytest
+
 import pull_arcgis
+
+
+@pytest.fixture(autouse=True)
+def _no_throttle(monkeypatch):
+    """The pagination tests fetch dozens of fake pages; the real token bucket
+    (100/min) would make them sleep. The limiter has its own tests below."""
+    monkeypatch.setattr(pull_arcgis, "DEFAULT_PAGES_PER_MINUTE", 0)
 
 
 def _make_capped_server(total, server_cap):
@@ -148,3 +157,103 @@ def test_workers_flag_defaults_from_env(monkeypatch):
     finally:
         monkeypatch.delenv("ARCGIS_WORKERS")
         importlib.reload(pull_arcgis)
+
+
+# ── ArcGIS Online request-unit quota (lou-refresh #5, 2026-10-01) ────────────
+
+def test_quota_429_waits_for_retry_after_and_retries(monkeypatch):
+    """ArcGIS answers HTTP 200 with a JSON-level 429 when the per-minute
+    request-unit budget is spent. That is a stall, not a failure: sleep for
+    the server's Retry-after and try again."""
+    sleeps = []
+    monkeypatch.setattr(pull_arcgis.time, "sleep", lambda s: sleeps.append(s))
+    calls = {"n": 0}
+
+    class Resp:
+        def __init__(self, payload): self._p = payload
+        def raise_for_status(self): pass
+        def json(self): return self._p
+
+    quota = {"error": {"code": 429, "message": "Unable to perform query. Too many requests.",
+                       "details": ["API calls quota exceeded (6044 request units)! maximum allowed "
+                                   "request units (6000) per Minute. Retry after 60 sec."]}}
+    ok = {"features": [{"attributes": {"id": 1}}], "exceededTransferLimit": False}
+
+    class Sess:
+        def get(self, url, params=None, timeout=None):
+            calls["n"] += 1
+            return Resp(quota if calls["n"] <= 2 else ok)
+    monkeypatch.setattr(pull_arcgis, "_session", lambda: Sess())
+    assert pull_arcgis.fetch_json("http://x/query", {}) == ok
+    assert calls["n"] == 3
+    assert sleeps == [60, 60], "must honour the server's Retry-after, not the 2 s network backoff"
+
+
+def test_quota_429_gives_up_after_quota_retries(monkeypatch):
+    import pytest
+    monkeypatch.setattr(pull_arcgis.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pull_arcgis, "QUOTA_RETRIES", 3)
+
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"error": {"code": 429, "message": "Too many requests.", "details": []}}
+
+    class Sess:
+        def get(self, url, params=None, timeout=None): return Resp()
+    monkeypatch.setattr(pull_arcgis, "_session", lambda: Sess())
+    with pytest.raises(RuntimeError, match="ArcGIS error"):
+        pull_arcgis.fetch_json("http://x/query", {})
+
+
+def test_other_arcgis_errors_still_raise_immediately(monkeypatch):
+    import pytest
+    sleeps = []
+    monkeypatch.setattr(pull_arcgis.time, "sleep", lambda s: sleeps.append(s))
+
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"error": {"code": 400, "message": "Invalid query parameters", "details": []}}
+
+    class Sess:
+        def get(self, url, params=None, timeout=None): return Resp()
+    monkeypatch.setattr(pull_arcgis, "_session", lambda: Sess())
+    with pytest.raises(RuntimeError, match="Invalid query"):
+        pull_arcgis.fetch_json("http://x/query", {})
+    assert sleeps == []
+
+
+def test_rate_limiter_caps_pages_per_minute(monkeypatch):
+    """100 pages/min with a burst of 10: the 11th acquisition must wait ~0.6 s
+    and 60 acquisitions must spread over ~30 s of (simulated) time."""
+    clock = {"t": 0.0}
+    slept = []
+    monkeypatch.setattr(pull_arcgis.time, "monotonic", lambda: clock["t"])
+    def fake_sleep(s):
+        slept.append(s); clock["t"] += s
+    monkeypatch.setattr(pull_arcgis.time, "sleep", fake_sleep)
+    lim = pull_arcgis.RateLimiter(100)
+    for _ in range(10):
+        assert lim.acquire() == 0.0
+    assert abs(lim.acquire() - 0.6) < 1e-6
+    for _ in range(49):
+        lim.acquire()
+    assert abs(clock["t"] - 30.0) < 1e-6, f"60 pages took {clock['t']:.1f}s of simulated time, expected 30"
+
+
+def test_rate_limiter_disabled_at_zero():
+    lim = pull_arcgis.RateLimiter(0)
+    assert all(lim.acquire() == 0.0 for _ in range(100))
+
+
+def test_pull_records_passes_through_the_limiter(monkeypatch):
+    total, cap = 3000, 1000
+    monkeypatch.setattr(pull_arcgis, "get_record_count", lambda *a, **k: total)
+    monkeypatch.setattr(pull_arcgis, "fetch_json", _make_capped_server(total, cap))
+    acquired = []
+    class Spy(pull_arcgis.RateLimiter):
+        def acquire(self):
+            acquired.append(1); return 0.0
+    monkeypatch.setattr(pull_arcgis, "RateLimiter", Spy)
+    records = pull_arcgis.pull_records("http://x/FeatureServer/0", batch_size=1000, workers=2)
+    assert len(records) == total
+    assert len(acquired) >= 3, "every page request must take a token"
